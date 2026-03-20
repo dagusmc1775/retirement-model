@@ -7,9 +7,6 @@ import pandas as pd
 START_YEAR = 2025
 END_YEAR = 2045
 
-OWNER_BIRTH_YEAR = 1965
-SPOUSE_BIRTH_YEAR = 1965
-
 FEDERAL_BRACKETS_MFJ = [
     (0, 0.10),
     (23200, 0.12),
@@ -196,6 +193,9 @@ def annual_ss_benefit(base_benefit_at_67, claim_age):
 # MODEL
 # -----------------------------
 def run_model(inputs):
+    owner_current_age = inputs["owner_current_age"]
+    spouse_current_age = inputs["spouse_current_age"]
+    
     years = list(range(START_YEAR, END_YEAR + 1))
 
     trad = inputs["trad"]
@@ -212,8 +212,11 @@ def run_model(inputs):
     owner_ss_base = inputs["owner_ss_base"]
     spouse_ss_base = inputs["spouse_ss_base"]
 
-    owner_ss_start = ss_start_year(OWNER_BIRTH_YEAR, owner_claim_age)
-    spouse_ss_start = ss_start_year(SPOUSE_BIRTH_YEAR, spouse_claim_age)
+    owner_birth_year = START_YEAR - owner_current_age
+    spouse_birth_year = START_YEAR - spouse_current_age
+
+    owner_ss_start = owner_birth_year + owner_claim_age
+    spouse_ss_start = spouse_birth_year + spouse_claim_age
 
     owner_ss_annual = annual_ss_benefit(owner_ss_base, owner_claim_age)
     spouse_ss_annual = annual_ss_benefit(spouse_ss_base, spouse_claim_age)
@@ -402,6 +405,11 @@ def run_model(inputs):
 st.title("Retirement Model — Phase 3")
 
 st.header("Inputs")
+owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60)
+spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=56)
+
+"owner_current_age": owner_current_age,
+"spouse_current_age": spouse_current_age,
 
 owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, 67)
 spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, 67)
