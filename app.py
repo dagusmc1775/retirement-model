@@ -427,9 +427,23 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
         summary_rows.append(row)
         detailed_results[candidate_conversion] = result
 
-    summary_df = pd.DataFrame(summary_rows).sort_values(
-        by=["Score", "Final Net Worth"],
-        ascending=[False, False]
+    summary_df = pd.DataFrame(summary_rows)
+
+    # Deterministic ranking:
+    # 1. Higher score is better
+    # 2. Higher final net worth is better
+    # 3. Lower shortfall is better
+    # 4. Lower government drag is better
+    # 5. Lower conversion wins ties
+    summary_df = summary_df.sort_values(
+        by=[
+            "Score",
+            "Final Net Worth",
+            "Total Shortfall",
+            "Total Government Drag",
+            "Annual Conversion Strategy",
+        ],
+        ascending=[False, False, True, True, True]
     ).reset_index(drop=True)
 
     best_conversion = float(summary_df.iloc[0]["Annual Conversion Strategy"])
@@ -440,8 +454,6 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
         "best_conversion": best_conversion,
         "best_result": best_result,
     }
-
-
 # -----------------------------
 # VALIDATION DISPLAY
 # -----------------------------
