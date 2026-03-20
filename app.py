@@ -49,10 +49,7 @@ def calculate_progressive_tax(taxable_income, brackets):
 
 def calculate_taxable_ss(total_ss, other_income):
     """
-    Simplified MFJ SS taxation:
-    - provisional income = other_income + 50% of SS
-    - base thresholds: 32k / 44k
-    - capped at 85% of SS
+    Simplified MFJ Social Security taxation.
     """
     total_ss = max(0.0, total_ss)
     other_income = max(0.0, other_income)
@@ -166,10 +163,6 @@ def deposit_cash(amount, cash):
 # -----------------------------
 # SOCIAL SECURITY
 # -----------------------------
-def ss_start_year(birth_year, claim_age):
-    return birth_year + claim_age
-
-
 def annual_ss_benefit(base_benefit_at_67, claim_age):
     """
     Simplified adjustment:
@@ -178,6 +171,7 @@ def annual_ss_benefit(base_benefit_at_67, claim_age):
     - after 67: +8% per year
     """
     delta = claim_age - 67
+
     if delta < 0:
         benefit = base_benefit_at_67 * (1 - 0.06 * abs(delta))
     elif delta > 0:
@@ -189,13 +183,16 @@ def annual_ss_benefit(base_benefit_at_67, claim_age):
     return benefit
 
 
+def ss_start_year_from_current_age(start_year, current_age, claim_age):
+    years_until_claim = claim_age - current_age
+    start_year_claim = start_year + years_until_claim
+    return int(start_year_claim)
+
+
 # -----------------------------
 # MODEL
 # -----------------------------
 def run_model(inputs):
-    owner_current_age = inputs["owner_current_age"]
-    spouse_current_age = inputs["spouse_current_age"]
-    
     years = list(range(START_YEAR, END_YEAR + 1))
 
     trad = inputs["trad"]
@@ -207,16 +204,15 @@ def run_model(inputs):
     annual_spending = inputs["annual_spending"]
     annual_conversion = inputs["annual_conversion"]
 
+    owner_current_age = inputs["owner_current_age"]
+    spouse_current_age = inputs["spouse_current_age"]
     owner_claim_age = inputs["owner_claim_age"]
     spouse_claim_age = inputs["spouse_claim_age"]
     owner_ss_base = inputs["owner_ss_base"]
     spouse_ss_base = inputs["spouse_ss_base"]
 
-    owner_birth_year = START_YEAR - owner_current_age
-    spouse_birth_year = START_YEAR - spouse_current_age
-
-    owner_ss_start = owner_birth_year + owner_claim_age
-    spouse_ss_start = spouse_birth_year + spouse_claim_age
+    owner_ss_start = ss_start_year_from_current_age(START_YEAR, owner_current_age, owner_claim_age)
+    spouse_ss_start = ss_start_year_from_current_age(START_YEAR, spouse_current_age, spouse_claim_age)
 
     owner_ss_annual = annual_ss_benefit(owner_ss_base, owner_claim_age)
     spouse_ss_annual = annual_ss_benefit(spouse_ss_base, spouse_claim_age)
@@ -233,44 +229,43 @@ def run_model(inputs):
             assert year > prev_year, "Year sequence error"
         prev_year = year
 
-        # ---- Start of year balances
+        # Start of year balances
         soy_trad = trad
         soy_roth = roth
         soy_brokerage = brokerage
         soy_cash = cash
 
-        # ---- Growth on invested accounts
+        # Growth on invested accounts
         trad *= (1 + growth)
         roth *= (1 + growth)
         brokerage *= (1 + growth)
 
-        # ---- Social Security income arrives as cash
+        # Social Security income arrives as cash
         owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
         spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
         total_ss = owner_ss + spouse_ss
 
         cash = deposit_cash(total_ss, cash)
 
-        # ---- Roth conversion
+        # Roth conversion
         conversion = min(annual_conversion, trad)
         trad -= conversion
         roth += conversion
 
-        # ---- Tax / ACA / IRMAA
+        # Tax / ACA / IRMAA
         other_ordinary_income = conversion
         tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
 
         magi = tax_info["agi"]  # simplified MAGI placeholder
         aca_cost = calculate_aca_cost(magi)
         irmaa_cost = calculate_irmaa_cost(magi)
-
         federal_tax = tax_info["federal_tax"]
 
         total_federal_taxes += federal_tax
         total_aca_cost += aca_cost
         total_irmaa_cost += irmaa_cost
 
-        # ---- Fund spending need
+        # Fund spending need
         spend_result = withdraw_for_need(
             annual_spending,
             trad,
@@ -283,7 +278,7 @@ def run_model(inputs):
         brokerage = spend_result["brokerage"]
         cash = spend_result["cash"]
 
-        # ---- Fund federal tax
+        # Fund federal tax
         tax_result = withdraw_for_need(
             federal_tax,
             trad,
@@ -296,7 +291,7 @@ def run_model(inputs):
         brokerage = tax_result["brokerage"]
         cash = tax_result["cash"]
 
-        # ---- Fund ACA cost
+        # Fund ACA cost
         aca_result = withdraw_for_need(
             aca_cost,
             trad,
@@ -309,7 +304,7 @@ def run_model(inputs):
         brokerage = aca_result["brokerage"]
         cash = aca_result["cash"]
 
-        # ---- Fund IRMAA cost
+        # Fund IRMAA cost
         irmaa_result = withdraw_for_need(
             irmaa_cost,
             trad,
@@ -329,7 +324,7 @@ def run_model(inputs):
             + irmaa_result["shortfall"]
         )
 
-        # ---- Validation
+        # Validation
         assert trad >= -0.01, "Traditional balance negative"
         assert roth >= -0.01, "Roth balance negative"
         assert brokerage >= -0.01, "Brokerage balance negative"
@@ -405,14 +400,12 @@ def run_model(inputs):
 st.title("Retirement Model — Phase 3")
 
 st.header("Inputs")
-owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60)
-spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=56)
-
-"owner_current_age": owner_current_age,
-"spouse_current_age": spouse_current_age,
 
 owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, 67)
 spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, 67)
+
+owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60, step=1)
+spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=56, step=1)
 
 col1, col2 = st.columns(2)
 
@@ -437,6 +430,8 @@ inputs = {
     "growth": growth,
     "annual_spending": annual_spending,
     "annual_conversion": annual_conversion,
+    "owner_current_age": owner_current_age,
+    "spouse_current_age": spouse_current_age,
     "owner_claim_age": owner_claim_age,
     "spouse_claim_age": spouse_claim_age,
     "owner_ss_base": owner_ss_base,
@@ -488,3 +483,5 @@ if st.button("Run Simulation"):
 
     except AssertionError as e:
         st.error(f"VALIDATION FAILED: {e}")
+    except Exception as e:
+        st.error(f"UNEXPECTED ERROR: {e}")
