@@ -489,14 +489,12 @@ def build_year_candidates(state: dict, year: int, params: dict, max_conversion: 
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
 
-    # Base grid
     candidates = [0.0]
     current = 0.0
     while current <= max_conversion + 0.01:
         candidates.append(round(current, 2))
         current += step
 
-    # Add useful thresholds
     candidates.append(min(max_conversion, STANDARD_DEDUCTION_MFJ))
 
     if aca_lives > 0:
@@ -506,7 +504,6 @@ def build_year_candidates(state: dict, year: int, params: dict, max_conversion: 
     if medicare_lives > 0:
         candidates.append(min(max_conversion, 218000.0))
 
-    # Can't convert more than available Trad after growth approximation would allow.
     trad_cap = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
     candidates = [min(c, trad_cap, max_conversion) for c in candidates]
     candidates = sorted(set(round(c, 2) for c in candidates if c >= 0))
@@ -520,10 +517,9 @@ def score_year_candidate(row: dict, trad_bias: float) -> tuple:
 
     Priority:
     1. No shortfall
-    2. Higher end-of-year net worth
+    2. Higher adjusted end-of-year value
     3. Lower current-year drag
-    4. Lower end-of-year Traditional balance (weighted by trad_bias)
-    5. Lower conversion as final tiebreak
+    4. Lower conversion as final tiebreak
     """
     shortfall_ok = row["Year Shortfall"] <= 0.01
     drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
@@ -537,6 +533,7 @@ def score_year_candidate(row: dict, trad_bias: float) -> tuple:
         -drag,
         -row["Chosen Conversion"],
     )
+
 
 def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float, trad_bias: float) -> dict:
     params = build_common_params(inputs)
@@ -587,6 +584,7 @@ def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float, t
     result["decision_df"] = decision_df
     return result
 
+
 # -----------------------------
 # DISPLAY
 # -----------------------------
@@ -609,14 +607,6 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 # UI
 # -----------------------------
-trad_bias = st.number_input(
-    "Traditional Balance Reduction Bias",
-    min_value=0.0,
-    value=0.05,
-    step=0.01,
-    help="Higher values encourage earlier Roth conversions by penalizing ending Traditional balance."
-)
-
 st.title("Retirement Model — Dynamic Governor")
 
 st.header("Household Inputs")
@@ -667,6 +657,13 @@ annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, val
 st.header("Dynamic Governor Inputs")
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=100000.0, step=5000.0)
 conversion_step = st.number_input("Conversion Step Size", min_value=1000.0, value=10000.0, step=1000.0)
+trad_bias = st.number_input(
+    "Traditional Balance Reduction Bias",
+    min_value=0.0,
+    value=0.05,
+    step=0.01,
+    help="Higher values encourage earlier Roth conversions by penalizing ending Traditional balance."
+)
 
 inputs = {
     "trad": trad,
