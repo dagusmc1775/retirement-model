@@ -517,15 +517,15 @@ with col1:
     cash = st.number_input("Cash", min_value=0.0, value=10000.0, step=1000.0)
 
 with col2:
-    growth = st.number_input("Growth Rate (%)", min_value=0.0, value=5.0, step=0.1) / 100
+    growth = st.number_input("Growth Rate (%)", min_value=0.0, value=8.0, step=0.1) / 100
     annual_spending = st.number_input("Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0)
-    owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=36000.0, step=1000.0)
-    spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=24000.0, step=1000.0)
+    owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=43000.0, step=1000.0)
+    spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=15000.0, step=1000.0)
 
 st.header("Coverage Timing")
 cov1, cov2 = st.columns(2)
 with cov1:
-    primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=2030, step=1)
+    primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=2031, step=1)
 with cov2:
     spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=2034, step=1)
 
