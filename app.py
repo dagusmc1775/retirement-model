@@ -514,19 +514,31 @@ def build_year_candidates(state: dict, year: int, params: dict, max_conversion: 
     return candidates
 
 
-def score_year_candidate(row: dict) -> tuple:
-    # Feasibility first, then higher end net worth, then lower drag, then lower conversion
+def score_year_candidate(row: dict, trad_bias: float) -> tuple:
+    """
+    Higher tuple is better.
+
+    Priority:
+    1. No shortfall
+    2. Higher end-of-year net worth
+    3. Lower current-year drag
+    4. Lower end-of-year Traditional balance (weighted by trad_bias)
+    5. Lower conversion as final tiebreak
+    """
     shortfall_ok = row["Year Shortfall"] <= 0.01
     drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
+    eoy_trad = row["EOY Trad"]
+
+    adjusted_value = row["Net Worth"] - trad_bias * eoy_trad
+
     return (
         1 if shortfall_ok else 0,
-        row["Net Worth"],
+        adjusted_value,
         -drag,
         -row["Chosen Conversion"],
     )
 
-
-def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float) -> dict:
+def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float, trad_bias: float) -> dict:
     params = build_common_params(inputs)
     state = {
         "trad": float(inputs["trad"]),
@@ -551,6 +563,7 @@ def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float) -
                 "Year": year,
                 "Candidate Conversion": c,
                 "Net Worth": row["Net Worth"],
+                "EOY Trad": row["EOY Trad"],
                 "Year Shortfall": row["Year Shortfall"],
                 "Federal Tax": row["Federal Tax"],
                 "ACA Cost": row["ACA Cost"],
@@ -559,7 +572,7 @@ def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float) -
                 "Shortfall OK": row["Year Shortfall"] <= 0.01,
             })
 
-            if best_row is None or score_year_candidate(row) > score_year_candidate(best_row):
+            if best_row is None or score_year_candidate(row, trad_bias) > score_year_candidate(best_row, trad_bias):
                 best_row = row
                 best_state = next_state
 
@@ -573,7 +586,6 @@ def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float) -
     result = summarize_run(chosen_df, params)
     result["decision_df"] = decision_df
     return result
-
 
 # -----------------------------
 # DISPLAY
@@ -597,6 +609,14 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 # UI
 # -----------------------------
+trad_bias = st.number_input(
+    "Traditional Balance Reduction Bias",
+    min_value=0.0,
+    value=0.05,
+    step=0.01,
+    help="Higher values encourage earlier Roth conversions by penalizing ending Traditional balance."
+)
+
 st.title("Retirement Model — Dynamic Governor")
 
 st.header("Household Inputs")
@@ -678,7 +698,7 @@ with btn1:
 
 with btn2:
     if st.button("Run Dynamic Year-by-Year Governor"):
-        result = run_model_dynamic_greedy(inputs, max_conversion, conversion_step)
+        result = run_model_dynamic_greedy(inputs, max_conversion, conversion_step, trad_bias)
         render_summary("Dynamic Governor Summary", result)
         st.subheader("Chosen Year-by-Year Path")
         st.dataframe(result["df"], use_container_width=True)
