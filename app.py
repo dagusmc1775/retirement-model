@@ -97,7 +97,7 @@ def calculate_irmaa_cost(magi):
 
 
 # -----------------------------
-# CASH FLOW HELPERS
+# ACCOUNT HELPERS
 # -----------------------------
 def deposit_cash(amount, cash):
     assert amount >= 0, "Deposit amount cannot be negative"
@@ -106,34 +106,67 @@ def deposit_cash(amount, cash):
     return cash
 
 
-def withdraw_for_spending(amount_needed, trad, roth, brokerage, cash):
-    """
-    Withdrawal order for spending/taxes/surcharges:
-    1. Cash
-    2. Brokerage
-    3. Traditional
-    4. Roth
+def normalize_balances(trad, roth, brokerage, cash):
+    trad = max(0.0, trad)
+    roth = max(0.0, roth)
+    brokerage = max(0.0, brokerage)
+    cash = max(0.0, cash)
+    return trad, roth, brokerage, cash
 
-    Traditional withdrawals are tracked as taxable ordinary income.
+
+def withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, policy_name):
+    """
+    Flexible withdrawal engine.
+
+    Policies:
+    - Cash then Brokerage then Trad then Roth
+    - Cash only
+    - Brokerage only
+    - Cash then Brokerage
     """
     starting_need = amount_needed
     assert amount_needed >= 0, "Amount needed cannot be negative"
 
-    from_cash = min(cash, amount_needed)
-    cash -= from_cash
-    amount_needed -= from_cash
+    from_cash = 0.0
+    from_brokerage = 0.0
+    from_trad = 0.0
+    from_roth = 0.0
 
-    from_brokerage = min(brokerage, amount_needed)
-    brokerage -= from_brokerage
-    amount_needed -= from_brokerage
+    if policy_name == "Cash then Brokerage then Trad then Roth":
+        draw_order = ["cash", "brokerage", "trad", "roth"]
+    elif policy_name == "Cash only":
+        draw_order = ["cash"]
+    elif policy_name == "Brokerage only":
+        draw_order = ["brokerage"]
+    elif policy_name == "Cash then Brokerage":
+        draw_order = ["cash", "brokerage"]
+    else:
+        raise ValueError(f"Unknown withdrawal policy: {policy_name}")
 
-    from_trad = min(trad, amount_needed)
-    trad -= from_trad
-    amount_needed -= from_trad
+    for source in draw_order:
+        if amount_needed <= 0:
+            break
 
-    from_roth = min(roth, amount_needed)
-    roth -= from_roth
-    amount_needed -= from_roth
+        if source == "cash":
+            amount = min(cash, amount_needed)
+            cash -= amount
+            amount_needed -= amount
+            from_cash += amount
+        elif source == "brokerage":
+            amount = min(brokerage, amount_needed)
+            brokerage -= amount
+            amount_needed -= amount
+            from_brokerage += amount
+        elif source == "trad":
+            amount = min(trad, amount_needed)
+            trad -= amount
+            amount_needed -= amount
+            from_trad += amount
+        elif source == "roth":
+            amount = min(roth, amount_needed)
+            roth -= amount
+            amount_needed -= amount
+            from_roth += amount
 
     shortfall = amount_needed
     total_funded = from_cash + from_brokerage + from_trad + from_roth
@@ -154,16 +187,32 @@ def withdraw_for_spending(amount_needed, trad, roth, brokerage, cash):
     }
 
 
+def withdraw_for_spending(amount_needed, trad, roth, brokerage, cash):
+    return withdraw_by_policy(
+        amount_needed,
+        trad,
+        roth,
+        brokerage,
+        cash,
+        "Cash then Brokerage then Trad then Roth",
+    )
+
+
+def withdraw_for_conversion_tax(amount_needed, trad, roth, brokerage, cash, conversion_tax_funding_policy):
+    return withdraw_by_policy(
+        amount_needed,
+        trad,
+        roth,
+        brokerage,
+        cash,
+        conversion_tax_funding_policy,
+    )
+
+
 # -----------------------------
 # SOCIAL SECURITY
 # -----------------------------
 def annual_ss_benefit(base_benefit_at_67, claim_age):
-    """
-    Simplified adjustment:
-    - 67 = base
-    - before 67: -6% per year
-    - after 67: +8% per year
-    """
     delta = claim_age - 67
     if delta < 0:
         benefit = base_benefit_at_67 * (1 - 0.06 * abs(delta))
@@ -193,6 +242,7 @@ def run_model(inputs):
     growth = float(inputs["growth"])
     annual_spending = float(inputs["annual_spending"])
     annual_conversion = float(inputs["annual_conversion"])
+    conversion_tax_funding_policy = inputs["conversion_tax_funding_policy"]
 
     owner_current_age = int(inputs["owner_current_age"])
     spouse_current_age = int(inputs["spouse_current_age"])
@@ -211,7 +261,13 @@ def run_model(inputs):
     total_federal_taxes = 0.0
     total_aca_cost = 0.0
     total_irmaa_cost = 0.0
+    total_shortfall = 0.0
     prev_year = None
+
+    aca_hit_years = 0
+    irmaa_hit_years = 0
+    first_irmaa_year = None
+    max_magi = 0.0
 
     for year in years:
         if prev_year is not None:
@@ -228,18 +284,18 @@ def run_model(inputs):
         roth *= (1 + growth)
         brokerage *= (1 + growth)
 
-        # SS income to cash
+        # Social Security to cash
         owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
         spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
         total_ss = owner_ss + spouse_ss
         cash = deposit_cash(total_ss, cash)
 
-        # Roth conversion
+        # Conversion
         conversion = min(annual_conversion, trad)
         trad -= conversion
         roth += conversion
 
-        # Spending withdrawals — now taxable if from Traditional
+        # Spending first
         spend_result = withdraw_for_spending(
             annual_spending, trad, roth, brokerage, cash
         )
@@ -248,26 +304,22 @@ def run_model(inputs):
         brokerage = spend_result["brokerage"]
         cash = spend_result["cash"]
 
-        # Ordinary income now includes:
-        # - Roth conversions
-        # - Traditional withdrawals used for spending
+        # Base tax calculation using conversion + trad spent for living
         other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
 
-        # Federal tax based on real current-year ordinary income
         tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
         federal_tax = tax_info["federal_tax"]
 
-        # Pay federal tax — additional Traditional withdrawals here are also taxable,
-        # but to keep Phase 4.1 stable, we do NOT recursively gross-up tax-on-tax yet.
-        tax_result = withdraw_for_spending(
-            federal_tax, trad, roth, brokerage, cash
+        # Pay federal tax using user-selected conversion tax funding policy
+        tax_result = withdraw_for_conversion_tax(
+            federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy
         )
         trad = tax_result["trad"]
         roth = tax_result["roth"]
         brokerage = tax_result["brokerage"]
         cash = tax_result["cash"]
 
-        # ACA / IRMAA based on MAGI placeholder
+        # ACA / IRMAA on simplified MAGI placeholder
         magi = tax_info["agi"]
         aca_cost = calculate_aca_cost(magi)
         irmaa_cost = calculate_irmaa_cost(magi)
@@ -288,29 +340,37 @@ def run_model(inputs):
         brokerage = irmaa_result["brokerage"]
         cash = irmaa_result["cash"]
 
-        total_federal_taxes += federal_tax
-        total_aca_cost += aca_cost
-        total_irmaa_cost += irmaa_cost
+        trad, roth, brokerage, cash = normalize_balances(trad, roth, brokerage, cash)
 
-        total_shortfall = (
+        year_shortfall = (
             spend_result["shortfall"]
             + tax_result["shortfall"]
             + aca_result["shortfall"]
             + irmaa_result["shortfall"]
         )
 
-        assert trad >= -0.01, "Traditional balance negative"
-        assert roth >= -0.01, "Roth balance negative"
-        assert brokerage >= -0.01, "Brokerage balance negative"
-        assert cash >= -0.01, "Cash balance negative"
+        total_shortfall += year_shortfall
+        total_federal_taxes += federal_tax
+        total_aca_cost += aca_cost
+        total_irmaa_cost += irmaa_cost
+
+        if aca_cost > 0:
+            aca_hit_years += 1
+
+        if irmaa_cost > 0:
+            irmaa_hit_years += 1
+            if first_irmaa_year is None:
+                first_irmaa_year = year
+
+        max_magi = max(max_magi, magi)
+
+        assert trad >= 0, "Traditional balance negative"
+        assert roth >= 0, "Roth balance negative"
+        assert brokerage >= 0, "Brokerage balance negative"
+        assert cash >= 0, "Cash balance negative"
         assert federal_tax >= 0, "Federal tax negative"
         assert aca_cost >= 0, "ACA cost negative"
         assert irmaa_cost >= 0, "IRMAA cost negative"
-
-        trad = max(0.0, trad)
-        roth = max(0.0, roth)
-        brokerage = max(0.0, brokerage)
-        cash = max(0.0, cash)
 
         net_worth = trad + roth + brokerage + cash
 
@@ -332,12 +392,17 @@ def run_model(inputs):
             "Other Ordinary Income": other_ordinary_income,
             "Taxable SS": tax_info["taxable_ss"],
             "AGI": tax_info["agi"],
-            "Taxable Income": tax_info["taxable_income"],
+            "MAGI": magi,
             "Federal Tax": federal_tax,
+            "Tax Paid from Cash": tax_result["from_cash"],
+            "Tax Paid from Brokerage": tax_result["from_brokerage"],
+            "Tax Paid from Trad": tax_result["from_trad"],
+            "Tax Paid from Roth": tax_result["from_roth"],
+            "Tax Funding Shortfall": tax_result["shortfall"],
             "ACA Cost": aca_cost,
             "IRMAA Cost": irmaa_cost,
             "Spend Need": annual_spending,
-            "Shortfall": total_shortfall,
+            "Shortfall": year_shortfall,
             "EOY Trad": trad,
             "EOY Roth": roth,
             "EOY Brokerage": brokerage,
@@ -347,15 +412,21 @@ def run_model(inputs):
 
     df = pd.DataFrame(results)
 
+    final_net_worth = float(df.iloc[-1]["Net Worth"])
+
     return {
         "df": df,
         "total_federal_taxes": total_federal_taxes,
         "total_aca_cost": total_aca_cost,
         "total_irmaa_cost": total_irmaa_cost,
-        "final_net_worth": net_worth,
+        "final_net_worth": final_net_worth,
         "owner_ss_start": owner_ss_start,
         "spouse_ss_start": spouse_ss_start,
-        "total_shortfall": df["Shortfall"].sum(),
+        "total_shortfall": total_shortfall,
+        "max_magi": max_magi,
+        "first_irmaa_year": first_irmaa_year,
+        "aca_hit_years": aca_hit_years,
+        "irmaa_hit_years": irmaa_hit_years,
     }
 
 
@@ -413,11 +484,15 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
         row = {
             "Annual Conversion Strategy": candidate_conversion,
             "Final Net Worth": result["final_net_worth"],
+            "Total Government Drag": total_drag,
             "Total Federal Taxes": result["total_federal_taxes"],
             "Total ACA Cost": result["total_aca_cost"],
             "Total IRMAA Cost": result["total_irmaa_cost"],
-            "Total Government Drag": total_drag,
             "Total Shortfall": result["total_shortfall"],
+            "Max MAGI": result["max_magi"],
+            "ACA Hit Years": result["aca_hit_years"],
+            "IRMAA Hit Years": result["irmaa_hit_years"],
+            "First IRMAA Year": result["first_irmaa_year"] if result["first_irmaa_year"] is not None else "",
             "Score": score,
         }
 
@@ -484,7 +559,7 @@ def render_validation(validation_messages):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Phase 4.1")
+st.title("Retirement Model — Phase 4.2")
 
 st.header("Household Inputs")
 
@@ -508,6 +583,19 @@ with col2:
     owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=36000.0, step=1000.0)
     spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=24000.0, step=1000.0)
 
+st.header("Tax Funding Policy")
+
+conversion_tax_funding_policy = st.selectbox(
+    "How to fund federal tax on conversions/ordinary income",
+    [
+        "Cash then Brokerage",
+        "Brokerage only",
+        "Cash only",
+        "Cash then Brokerage then Trad then Roth",
+    ],
+    index=0,
+)
+
 st.header("Governor Inputs")
 
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=100000.0, step=5000.0)
@@ -521,6 +609,7 @@ base_inputs = {
     "growth": growth,
     "annual_spending": annual_spending,
     "annual_conversion": 0.0,
+    "conversion_tax_funding_policy": conversion_tax_funding_policy,
     "owner_current_age": owner_current_age,
     "spouse_current_age": spouse_current_age,
     "owner_claim_age": owner_claim_age,
@@ -551,6 +640,13 @@ if st.button("Run Governor"):
             f"${best_result['total_federal_taxes'] + best_result['total_aca_cost'] + best_result['total_irmaa_cost']:,.0f}"
         )
         st.write(f"Total Shortfall: ${best_result['total_shortfall']:,.0f}")
+        st.write(f"Max MAGI: ${best_result['max_magi']:,.0f}")
+        st.write(f"ACA Hit Years: {best_result['aca_hit_years']}")
+        st.write(f"IRMAA Hit Years: {best_result['irmaa_hit_years']}")
+        st.write(
+            f"First IRMAA Year: "
+            f"{best_result['first_irmaa_year'] if best_result['first_irmaa_year'] is not None else 'None'}"
+        )
 
         st.subheader("Winning Strategy Validation")
         render_validation(build_validation_messages(best_df))
