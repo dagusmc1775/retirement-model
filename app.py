@@ -511,10 +511,10 @@ spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=56
 col1, col2 = st.columns(2)
 
 with col1:
-    trad = st.number_input("Traditional Balance", min_value=0.0, value=500000.0, step=1000.0)
-    roth = st.number_input("Roth Balance", min_value=0.0, value=200000.0, step=1000.0)
+    trad = st.number_input("Traditional Balance", min_value=0.0, value=1100000.0, step=1000.0)
+    roth = st.number_input("Roth Balance", min_value=0.0, value=1700000.0, step=1000.0)
     brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=300000.0, step=1000.0)
-    cash = st.number_input("Cash", min_value=0.0, value=50000.0, step=1000.0)
+    cash = st.number_input("Cash", min_value=0.0, value=10000.0, step=1000.0)
 
 with col2:
     growth = st.number_input("Growth Rate (%)", min_value=0.0, value=5.0, step=0.1) / 100
