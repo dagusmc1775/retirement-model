@@ -7,6 +7,19 @@ import pandas as pd
 START_YEAR = 2025
 END_YEAR = 2045
 
+STANDARD_DEDUCTION_MFJ = 30000.0
+ACA_CLIFF_MFJ = 85000.0
+IRMAA_FIRST_CLIFF_MFJ = 218000.0
+
+# Simplified current-law MFJ bracket tops
+# We use bracket tops, not rates, for candidate generation.
+BRACKET_TOPS_MFJ = {
+    "10%": 23200.0,
+    "12%": 94300.0,
+    "22%": 201050.0,
+    "24%": 383900.0,
+}
+
 FEDERAL_BRACKETS_MFJ = [
     (0, 0.10),
     (23200, 0.12),
@@ -17,7 +30,7 @@ FEDERAL_BRACKETS_MFJ = [
     (731200, 0.37),
 ]
 
-STANDARD_DEDUCTION_MFJ = 30000.0
+UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
 
 # -----------------------------
@@ -293,6 +306,65 @@ def normalize_balances(trad: float, roth: float, brokerage: float, cash: float) 
 
 
 # -----------------------------
+# PARAMS / HELPERS
+# -----------------------------
+def build_common_params(inputs: dict) -> dict:
+    owner_ss_start = ss_start_year_from_current_age(START_YEAR, int(inputs["owner_current_age"]), int(inputs["owner_claim_age"]))
+    spouse_ss_start = ss_start_year_from_current_age(START_YEAR, int(inputs["spouse_current_age"]), int(inputs["spouse_claim_age"]))
+
+    owner_ss_annual = annual_ss_benefit(float(inputs["owner_ss_base"]), int(inputs["owner_claim_age"]))
+    spouse_ss_annual = annual_ss_benefit(float(inputs["spouse_ss_base"]), int(inputs["spouse_claim_age"]))
+
+    # crude RMD start estimate using current age tracking
+    owner_rmd_start = START_YEAR + max(0, 73 - int(inputs["owner_current_age"]))
+    spouse_rmd_start = START_YEAR + max(0, 73 - int(inputs["spouse_current_age"]))
+    household_rmd_start = min(owner_rmd_start, spouse_rmd_start)
+
+    return {
+        "growth": float(inputs["growth"]),
+        "annual_spending": float(inputs["annual_spending"]),
+        "conversion_tax_funding_policy": inputs["conversion_tax_funding_policy"],
+        "owner_ss_start": owner_ss_start,
+        "spouse_ss_start": spouse_ss_start,
+        "owner_ss_annual": owner_ss_annual,
+        "spouse_ss_annual": spouse_ss_annual,
+        "primary_aca_end_year": int(inputs["primary_aca_end_year"]),
+        "spouse_aca_end_year": int(inputs["spouse_aca_end_year"]),
+        "household_rmd_start": household_rmd_start,
+    }
+
+
+def estimate_first_rmd(trad_balance: float) -> float:
+    trad_balance = max(0.0, float(trad_balance))
+    return trad_balance / UNIFORM_LIFETIME_DIVISOR_73
+
+
+def estimate_future_tax_pressure(row: dict, params: dict) -> float:
+    projected_rmd = estimate_first_rmd(row["EOY Trad"])
+    projected_ss = row["Total SS"]
+    return projected_rmd + projected_ss
+
+
+def summarize_run(df: pd.DataFrame, params: dict) -> dict:
+    return {
+        "df": df,
+        "final_net_worth": float(df.iloc[-1]["Net Worth"]),
+        "total_federal_taxes": float(df["Federal Tax"].sum()),
+        "total_aca_cost": float(df["ACA Cost"].sum()),
+        "total_irmaa_cost": float(df["IRMAA Cost"].sum()),
+        "total_shortfall": float(df["Year Shortfall"].sum()),
+        "max_magi": float(df["MAGI"].max()),
+        "aca_hit_years": int((df["ACA Cost"] > 0).sum()),
+        "irmaa_hit_years": int((df["IRMAA Cost"] > 0).sum()),
+        "first_irmaa_year": int(df.loc[df["IRMAA Cost"] > 0, "Year"].iloc[0]) if (df["IRMAA Cost"] > 0).any() else None,
+        "owner_ss_start": int(params["owner_ss_start"]),
+        "spouse_ss_start": int(params["spouse_ss_start"]),
+        "household_rmd_start": int(params["household_rmd_start"]),
+        "total_conversions": float(df["Chosen Conversion"].sum()),
+    }
+
+
+# -----------------------------
 # YEAR SIMULATION
 # -----------------------------
 def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: float) -> tuple:
@@ -426,39 +498,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
 
 
 # -----------------------------
-# MULTI-YEAR RUNNERS
+# RUNNERS
 # -----------------------------
-def build_common_params(inputs: dict) -> dict:
-    return {
-        "growth": float(inputs["growth"]),
-        "annual_spending": float(inputs["annual_spending"]),
-        "conversion_tax_funding_policy": inputs["conversion_tax_funding_policy"],
-        "owner_ss_start": ss_start_year_from_current_age(START_YEAR, int(inputs["owner_current_age"]), int(inputs["owner_claim_age"])),
-        "spouse_ss_start": ss_start_year_from_current_age(START_YEAR, int(inputs["spouse_current_age"]), int(inputs["spouse_claim_age"])),
-        "owner_ss_annual": annual_ss_benefit(float(inputs["owner_ss_base"]), int(inputs["owner_claim_age"])),
-        "spouse_ss_annual": annual_ss_benefit(float(inputs["spouse_ss_base"]), int(inputs["spouse_claim_age"])),
-        "primary_aca_end_year": int(inputs["primary_aca_end_year"]),
-        "spouse_aca_end_year": int(inputs["spouse_aca_end_year"]),
-    }
-
-
-def summarize_run(df: pd.DataFrame, params: dict) -> dict:
-    return {
-        "df": df,
-        "final_net_worth": float(df.iloc[-1]["Net Worth"]),
-        "total_federal_taxes": float(df["Federal Tax"].sum()),
-        "total_aca_cost": float(df["ACA Cost"].sum()),
-        "total_irmaa_cost": float(df["IRMAA Cost"].sum()),
-        "total_shortfall": float(df["Year Shortfall"].sum()),
-        "max_magi": float(df["MAGI"].max()),
-        "aca_hit_years": int((df["ACA Cost"] > 0).sum()),
-        "irmaa_hit_years": int((df["IRMAA Cost"] > 0).sum()),
-        "first_irmaa_year": int(df.loc[df["IRMAA Cost"] > 0, "Year"].iloc[0]) if (df["IRMAA Cost"] > 0).any() else None,
-        "owner_ss_start": int(params["owner_ss_start"]),
-        "spouse_ss_start": int(params["spouse_ss_start"]),
-    }
-
-
 def run_model_fixed(inputs: dict) -> dict:
     params = build_common_params(inputs)
     state = {
@@ -479,63 +520,104 @@ def run_model_fixed(inputs: dict) -> dict:
 
 
 # -----------------------------
-# DYNAMIC GOVERNOR
+# THRESHOLD-AWARE GOVERNOR
 # -----------------------------
-def build_year_candidates(state: dict, year: int, params: dict, max_conversion: float, step: float) -> list:
-    max_conversion = max(0.0, float(max_conversion))
-    step = max(1000.0, float(step))
+def conversion_needed_for_target_magi(state: dict, year: int, params: dict, target_magi: float) -> float:
+    """
+    Approximate conversion needed to hit a target MAGI using a zero-conversion baseline.
+    """
+    _, base_row = simulate_one_year(year, dict(state), params, 0.0)
+    base_magi = float(base_row["MAGI"])
+    needed = max(0.0, float(target_magi) - base_magi)
+    return needed
+
+
+def build_threshold_candidates(state: dict, year: int, params: dict, max_conversion: float) -> list:
+    coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
+    aca_lives = coverage["aca_lives"]
+    medicare_lives = coverage["medicare_lives"]
+
+    trad_cap = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
+    cap = min(float(max_conversion), trad_cap)
+
+    candidates = [0.0]
+
+    # Zero-conversion baseline to estimate current headroom.
+    _, baseline = simulate_one_year(year, dict(state), params, 0.0)
+    baseline_magi = float(baseline["MAGI"])
+
+    # Tax-bracket-oriented targets expressed as AGI / MAGI approximations.
+    # We target taxable income tops + standard deduction.
+    bracket_target_10 = BRACKET_TOPS_MFJ["10%"] + STANDARD_DEDUCTION_MFJ
+    bracket_target_12 = BRACKET_TOPS_MFJ["12%"] + STANDARD_DEDUCTION_MFJ
+    bracket_target_22 = BRACKET_TOPS_MFJ["22%"] + STANDARD_DEDUCTION_MFJ
+    bracket_target_24 = BRACKET_TOPS_MFJ["24%"] + STANDARD_DEDUCTION_MFJ
+
+    # Useful candidate helper
+    def add_target(target):
+        c = conversion_needed_for_target_magi(state, year, params, target)
+        candidates.append(min(cap, max(0.0, round(c, 2))))
+
+    if aca_lives > 0:
+        # ACA years: stay under cliff by default.
+        add_target(bracket_target_10)
+        add_target(bracket_target_12)
+        add_target(min(bracket_target_22, ACA_CLIFF_MFJ - 1.0))
+        add_target(ACA_CLIFF_MFJ - 1000.0)
+        add_target(ACA_CLIFF_MFJ - 1.0)
+        # add above-cliff only as a diagnostic boundary case, not main behavior
+        add_target(ACA_CLIFF_MFJ + 1.0)
+    else:
+        # Post-ACA: use brackets and IRMAA threshold
+        add_target(bracket_target_10)
+        add_target(bracket_target_12)
+        add_target(bracket_target_22)
+        add_target(bracket_target_24)
+        if medicare_lives > 0:
+            add_target(IRMAA_FIRST_CLIFF_MFJ - 1000.0)
+            add_target(IRMAA_FIRST_CLIFF_MFJ - 1.0)
+            add_target(IRMAA_FIRST_CLIFF_MFJ + 1.0)
+
+    # Also include user cap and half-cap
+    candidates.append(min(cap, cap / 2.0))
+    candidates.append(cap)
+
+    cleaned = sorted(set(round(min(cap, max(0.0, c)), 2) for c in candidates))
+    return cleaned
+
+
+def score_threshold_candidate(row: dict, year: int, params: dict, rmd_pressure_weight: float) -> tuple:
+    shortfall_ok = row["Year Shortfall"] <= 0.01
+    drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
+    future_tax_pressure = estimate_future_tax_pressure(row, params)
 
     coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
 
-    candidates = [0.0]
-    current = 0.0
-    while current <= max_conversion + 0.01:
-        candidates.append(round(current, 2))
-        current += step
+    over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
+    over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
 
-    candidates.append(min(max_conversion, STANDARD_DEDUCTION_MFJ))
-
-    if aca_lives > 0:
-        candidates.append(min(max_conversion, 84000.0))
-        candidates.append(min(max_conversion, 85000.0))
-
-    if medicare_lives > 0:
-        candidates.append(min(max_conversion, 218000.0))
-
-    trad_cap = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
-    candidates = [min(c, trad_cap, max_conversion) for c in candidates]
-    candidates = sorted(set(round(c, 2) for c in candidates if c >= 0))
-
-    return candidates
-
-
-def score_year_candidate(row: dict, trad_bias: float) -> tuple:
-    """
-    Higher tuple is better.
-
-    Priority:
-    1. No shortfall
-    2. Higher adjusted end-of-year value
-    3. Lower current-year drag
-    4. Lower conversion as final tiebreak
-    """
-    shortfall_ok = row["Year Shortfall"] <= 0.01
-    drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
-    eoy_trad = row["EOY Trad"]
-
-    adjusted_value = row["Net Worth"] - trad_bias * eoy_trad
+    # Lower is better for penalties; higher is better for value.
+    adjusted_value = (
+        row["Net Worth"]
+        - drag
+        - (over_aca * 100.0)
+        - (over_irmaa * 5.0)
+        - (future_tax_pressure * rmd_pressure_weight)
+    )
 
     return (
         1 if shortfall_ok else 0,
+        -over_aca,
+        -over_irmaa,
         adjusted_value,
         -drag,
         -row["Chosen Conversion"],
     )
 
 
-def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float, trad_bias: float) -> dict:
+def run_model_threshold_governor(inputs: dict, max_conversion: float, rmd_pressure_weight: float) -> dict:
     params = build_common_params(inputs)
     state = {
         "trad": float(inputs["trad"]),
@@ -548,32 +630,41 @@ def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float, t
     decision_rows = []
 
     for year in range(START_YEAR, END_YEAR + 1):
-        candidates = build_year_candidates(state, year, params, max_conversion, step)
+        candidates = build_threshold_candidates(state, year, params, max_conversion)
 
-        tested = []
         best_state = None
         best_row = None
 
         for c in candidates:
             next_state, row = simulate_one_year(year, dict(state), params, c)
-            tested.append({
+            future_tax_pressure = estimate_future_tax_pressure(row, params)
+
+            coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
+            aca_lives = coverage["aca_lives"]
+            medicare_lives = coverage["medicare_lives"]
+
+            decision_rows.append({
                 "Year": year,
                 "Candidate Conversion": c,
                 "Net Worth": row["Net Worth"],
                 "EOY Trad": row["EOY Trad"],
-                "Year Shortfall": row["Year Shortfall"],
+                "MAGI": row["MAGI"],
                 "Federal Tax": row["Federal Tax"],
                 "ACA Cost": row["ACA Cost"],
                 "IRMAA Cost": row["IRMAA Cost"],
-                "MAGI": row["MAGI"],
+                "Year Shortfall": row["Year Shortfall"],
                 "Shortfall OK": row["Year Shortfall"] <= 0.01,
+                "ACA Lives": aca_lives,
+                "Medicare Lives": medicare_lives,
+                "Over ACA Cliff": max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0,
+                "Over IRMAA Cliff": max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0,
+                "Projected Future Tax Pressure": future_tax_pressure,
             })
 
-            if best_row is None or score_year_candidate(row, trad_bias) > score_year_candidate(best_row, trad_bias):
+            if best_row is None or score_threshold_candidate(row, year, params, rmd_pressure_weight) > score_threshold_candidate(best_row, year, params, rmd_pressure_weight):
                 best_row = row
                 best_state = next_state
 
-        decision_rows.extend(tested)
         chosen_rows.append(best_row)
         state = best_state
 
@@ -592,6 +683,7 @@ def render_summary(title: str, result: dict):
     st.subheader(title)
     st.write(f"Owner SS Start Year: {result['owner_ss_start']}")
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
+    st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
     st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
     st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
     st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
@@ -599,6 +691,7 @@ def render_summary(title: str, result: dict):
     st.write(f"Total Government Drag: ${result['total_federal_taxes'] + result['total_aca_cost'] + result['total_irmaa_cost']:,.0f}")
     st.write(f"Total Shortfall: ${result['total_shortfall']:,.0f}")
     st.write(f"Max MAGI: ${result['max_magi']:,.0f}")
+    st.write(f"Total Conversions: ${result['total_conversions']:,.0f}")
     st.write(f"ACA Hit Years: {result['aca_hit_years']}")
     st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
     st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
@@ -607,7 +700,7 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Dynamic Governor")
+st.title("Retirement Model — Threshold-Aware Governor")
 
 st.header("Household Inputs")
 
@@ -654,15 +747,14 @@ st.caption("This build falls back to Trad then Roth if the preferred source is i
 st.header("Flat Strategy Test")
 annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0)
 
-st.header("Dynamic Governor Inputs")
-max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=100000.0, step=5000.0)
-conversion_step = st.number_input("Conversion Step Size", min_value=1000.0, value=10000.0, step=1000.0)
-trad_bias = st.number_input(
-    "Traditional Balance Reduction Bias",
+st.header("Threshold-Aware Governor Inputs")
+max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=300000.0, step=5000.0)
+rmd_pressure_weight = st.number_input(
+    "RMD Pressure Weight",
     min_value=0.0,
-    value=0.05,
-    step=0.01,
-    help="Higher values encourage earlier Roth conversions by penalizing ending Traditional balance."
+    value=20.0,
+    step=1.0,
+    help="Higher values push harder to reduce future RMD + SS tax pressure."
 )
 
 inputs = {
@@ -694,9 +786,9 @@ with btn1:
         st.dataframe(result["df"], use_container_width=True)
 
 with btn2:
-    if st.button("Run Dynamic Year-by-Year Governor"):
-        result = run_model_dynamic_greedy(inputs, max_conversion, conversion_step, trad_bias)
-        render_summary("Dynamic Governor Summary", result)
+    if st.button("Run Threshold-Aware Governor"):
+        result = run_model_threshold_governor(inputs, max_conversion, rmd_pressure_weight)
+        render_summary("Threshold-Aware Governor Summary", result)
         st.subheader("Chosen Year-by-Year Path")
         st.dataframe(result["df"], use_container_width=True)
         st.subheader("Per-Year Candidate Testing")
