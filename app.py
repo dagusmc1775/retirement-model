@@ -11,8 +11,6 @@ STANDARD_DEDUCTION_MFJ = 30000.0
 ACA_CLIFF_MFJ = 85000.0
 IRMAA_FIRST_CLIFF_MFJ = 218000.0
 
-# Simplified current-law MFJ bracket tops
-# We use bracket tops, not rates, for candidate generation.
 BRACKET_TOPS_MFJ = {
     "10%": 23200.0,
     "12%": 94300.0,
@@ -315,7 +313,6 @@ def build_common_params(inputs: dict) -> dict:
     owner_ss_annual = annual_ss_benefit(float(inputs["owner_ss_base"]), int(inputs["owner_claim_age"]))
     spouse_ss_annual = annual_ss_benefit(float(inputs["spouse_ss_base"]), int(inputs["spouse_claim_age"]))
 
-    # crude RMD start estimate using current age tracking
     owner_rmd_start = START_YEAR + max(0, 73 - int(inputs["owner_current_age"]))
     spouse_rmd_start = START_YEAR + max(0, 73 - int(inputs["spouse_current_age"]))
     household_rmd_start = min(owner_rmd_start, spouse_rmd_start)
@@ -523,9 +520,6 @@ def run_model_fixed(inputs: dict) -> dict:
 # THRESHOLD-AWARE GOVERNOR
 # -----------------------------
 def conversion_needed_for_target_magi(state: dict, year: int, params: dict, target_magi: float) -> float:
-    """
-    Approximate conversion needed to hit a target MAGI using a zero-conversion baseline.
-    """
     _, base_row = simulate_one_year(year, dict(state), params, 0.0)
     base_magi = float(base_row["MAGI"])
     needed = max(0.0, float(target_magi) - base_magi)
@@ -542,33 +536,23 @@ def build_threshold_candidates(state: dict, year: int, params: dict, max_convers
 
     candidates = [0.0]
 
-    # Zero-conversion baseline to estimate current headroom.
-    _, baseline = simulate_one_year(year, dict(state), params, 0.0)
-    baseline_magi = float(baseline["MAGI"])
-
-    # Tax-bracket-oriented targets expressed as AGI / MAGI approximations.
-    # We target taxable income tops + standard deduction.
     bracket_target_10 = BRACKET_TOPS_MFJ["10%"] + STANDARD_DEDUCTION_MFJ
     bracket_target_12 = BRACKET_TOPS_MFJ["12%"] + STANDARD_DEDUCTION_MFJ
     bracket_target_22 = BRACKET_TOPS_MFJ["22%"] + STANDARD_DEDUCTION_MFJ
     bracket_target_24 = BRACKET_TOPS_MFJ["24%"] + STANDARD_DEDUCTION_MFJ
 
-    # Useful candidate helper
     def add_target(target):
         c = conversion_needed_for_target_magi(state, year, params, target)
         candidates.append(min(cap, max(0.0, round(c, 2))))
 
     if aca_lives > 0:
-        # ACA years: stay under cliff by default.
         add_target(bracket_target_10)
         add_target(bracket_target_12)
-        add_target(min(bracket_target_22, ACA_CLIFF_MFJ - 1.0))
+        add_target(min(bracket_target_22, ACA_CLIFF_MFJ - 1000.0))
         add_target(ACA_CLIFF_MFJ - 1000.0)
         add_target(ACA_CLIFF_MFJ - 1.0)
-        # add above-cliff only as a diagnostic boundary case, not main behavior
         add_target(ACA_CLIFF_MFJ + 1.0)
     else:
-        # Post-ACA: use brackets and IRMAA threshold
         add_target(bracket_target_10)
         add_target(bracket_target_12)
         add_target(bracket_target_22)
@@ -578,7 +562,6 @@ def build_threshold_candidates(state: dict, year: int, params: dict, max_convers
             add_target(IRMAA_FIRST_CLIFF_MFJ - 1.0)
             add_target(IRMAA_FIRST_CLIFF_MFJ + 1.0)
 
-    # Also include user cap and half-cap
     candidates.append(min(cap, cap / 2.0))
     candidates.append(cap)
 
@@ -591,25 +574,33 @@ def score_threshold_candidate(row: dict, year: int, params: dict, rmd_pressure_w
     drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
     future_tax_pressure = estimate_future_tax_pressure(row, params)
 
-    coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
-    aca_lives = coverage["aca_lives"]
-    medicare_lives = coverage["medicare_lives"]
+    aca_lives = int(row["ACA Lives"])
+    medicare_lives = int(row["Medicare Lives"])
 
     over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
     over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
 
-    # Lower is better for penalties; higher is better for value.
+    aca_penalty = over_aca * 100.0 * (aca_lives / 2.0)
+
+    if aca_lives == 0 and medicare_lives > 0:
+        irmaa_headroom = IRMAA_FIRST_CLIFF_MFJ - row["MAGI"]
+        irmaa_target_reward = -abs(irmaa_headroom) * 0.5
+    else:
+        irmaa_target_reward = 0.0
+
     adjusted_value = (
         row["Net Worth"]
         - drag
-        - (over_aca * 100.0)
+        - aca_penalty
         - (over_irmaa * 5.0)
-        - (future_tax_pressure * rmd_pressure_weight)
+        - (future_tax_pressure * rmd_pressure_weight * 3.0)
+        - (row["EOY Trad"] * 0.02)
+        + irmaa_target_reward
     )
 
     return (
         1 if shortfall_ok else 0,
-        -over_aca,
+        -aca_penalty,
         -over_irmaa,
         adjusted_value,
         -drag,
@@ -639,9 +630,11 @@ def run_model_threshold_governor(inputs: dict, max_conversion: float, rmd_pressu
             next_state, row = simulate_one_year(year, dict(state), params, c)
             future_tax_pressure = estimate_future_tax_pressure(row, params)
 
-            coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
-            aca_lives = coverage["aca_lives"]
-            medicare_lives = coverage["medicare_lives"]
+            aca_lives = int(row["ACA Lives"])
+            medicare_lives = int(row["Medicare Lives"])
+
+            over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
+            over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
 
             decision_rows.append({
                 "Year": year,
@@ -656,8 +649,8 @@ def run_model_threshold_governor(inputs: dict, max_conversion: float, rmd_pressu
                 "Shortfall OK": row["Year Shortfall"] <= 0.01,
                 "ACA Lives": aca_lives,
                 "Medicare Lives": medicare_lives,
-                "Over ACA Cliff": max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0,
-                "Over IRMAA Cliff": max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0,
+                "Over ACA Cliff": over_aca,
+                "Over IRMAA Cliff": over_irmaa,
                 "Projected Future Tax Pressure": future_tax_pressure,
             })
 
