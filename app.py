@@ -181,6 +181,8 @@ def withdraw_by_policy(amount_needed: float, trad: float, roth: float, brokerage
         draw_order = ["brokerage"]
     elif policy_name == "Cash only":
         draw_order = ["cash"]
+    elif policy_name == "Trad then Roth":
+        draw_order = ["trad", "roth"]
     else:
         raise ValueError(f"Unknown withdrawal policy: {policy_name}")
 
@@ -214,7 +216,6 @@ def withdraw_by_policy(amount_needed: float, trad: float, roth: float, brokerage
     funded = from_cash + from_brokerage + from_trad + from_roth
     shortfall = amount_needed
 
-    # sanity
     if abs((start_need - shortfall) - funded) > 0.01:
         raise AssertionError("Withdrawal accounting mismatch")
 
@@ -236,8 +237,61 @@ def withdraw_for_spending(amount_needed: float, trad: float, roth: float, broker
     return withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, "Cash then Brokerage then Trad then Roth")
 
 
-def withdraw_for_tax(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, policy_name: str) -> dict:
-    return withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, policy_name)
+def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, preferred_policy: str) -> dict:
+    # First pass: preferred source
+    preferred = withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, preferred_policy)
+
+    remaining = preferred["shortfall"]
+
+    # Second pass: fallback only if needed
+    fallback_from_cash = 0.0
+    fallback_from_brokerage = 0.0
+    fallback_from_trad = 0.0
+    fallback_from_roth = 0.0
+
+    if remaining > 0:
+        fallback = withdraw_by_policy(
+            remaining,
+            preferred["trad"],
+            preferred["roth"],
+            preferred["brokerage"],
+            preferred["cash"],
+            "Trad then Roth"
+        )
+
+        trad = fallback["trad"]
+        roth = fallback["roth"]
+        brokerage = fallback["brokerage"]
+        cash = fallback["cash"]
+
+        true_shortfall = fallback["shortfall"]
+        fallback_from_cash = fallback["from_cash"]
+        fallback_from_brokerage = fallback["from_brokerage"]
+        fallback_from_trad = fallback["from_trad"]
+        fallback_from_roth = fallback["from_roth"]
+    else:
+        trad = preferred["trad"]
+        roth = preferred["roth"]
+        brokerage = preferred["brokerage"]
+        cash = preferred["cash"]
+        true_shortfall = 0.0
+
+    return {
+        "trad": trad,
+        "roth": roth,
+        "brokerage": brokerage,
+        "cash": cash,
+        "preferred_from_cash": preferred["from_cash"],
+        "preferred_from_brokerage": preferred["from_brokerage"],
+        "preferred_from_trad": preferred["from_trad"],
+        "preferred_from_roth": preferred["from_roth"],
+        "preferred_shortfall": preferred["shortfall"],
+        "fallback_from_cash": fallback_from_cash,
+        "fallback_from_brokerage": fallback_from_brokerage,
+        "fallback_from_trad": fallback_from_trad,
+        "fallback_from_roth": fallback_from_roth,
+        "true_tax_shortfall": true_shortfall,
+    }
 
 
 def normalize_balances(trad: float, roth: float, brokerage: float, cash: float) -> tuple:
@@ -301,7 +355,7 @@ def run_model(inputs: dict) -> dict:
         roth *= (1 + growth)
         brokerage *= (1 + growth)
 
-        # SS cash inflow
+        # SS inflow
         owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
         spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
         total_ss = owner_ss + spouse_ss
@@ -312,7 +366,7 @@ def run_model(inputs: dict) -> dict:
         trad -= conversion
         roth += conversion
 
-        # Spend
+        # Spending
         spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash)
         trad = spend_result["trad"]
         roth = spend_result["roth"]
@@ -323,15 +377,17 @@ def run_model(inputs: dict) -> dict:
         other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
         tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
         federal_tax = tax_info["federal_tax"]
-        magi = tax_info["agi"]
 
-        tax_result = withdraw_for_tax(federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy)
+        tax_result = withdraw_for_tax_with_fallback(
+            federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy
+        )
         trad = tax_result["trad"]
         roth = tax_result["roth"]
         brokerage = tax_result["brokerage"]
         cash = tax_result["cash"]
 
-        # Coverage / ACA / IRMAA
+        # ACA / IRMAA
+        magi = tax_info["agi"]
         coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
         aca_lives = coverage["aca_lives"]
         medicare_lives = coverage["medicare_lives"]
@@ -354,7 +410,7 @@ def run_model(inputs: dict) -> dict:
         trad, roth, brokerage, cash = normalize_balances(trad, roth, brokerage, cash)
 
         spend_shortfall = spend_result["shortfall"]
-        tax_shortfall = tax_result["shortfall"]
+        tax_shortfall = tax_result["true_tax_shortfall"]
         aca_shortfall = aca_result["shortfall"]
         irmaa_shortfall = irmaa_result["shortfall"]
         year_shortfall = spend_shortfall + tax_shortfall + aca_shortfall + irmaa_shortfall
@@ -393,6 +449,12 @@ def run_model(inputs: dict) -> dict:
             "ACA Lives": aca_lives,
             "Medicare Lives": medicare_lives,
             "Federal Tax": federal_tax,
+            "Tax Paid Preferred Cash": tax_result["preferred_from_cash"],
+            "Tax Paid Preferred Brokerage": tax_result["preferred_from_brokerage"],
+            "Tax Paid Preferred Trad": tax_result["preferred_from_trad"],
+            "Tax Paid Preferred Roth": tax_result["preferred_from_roth"],
+            "Tax Paid Fallback Trad": tax_result["fallback_from_trad"],
+            "Tax Paid Fallback Roth": tax_result["fallback_from_roth"],
             "ACA Cost": aca_cost,
             "IRMAA Cost": irmaa_cost,
             "Spend Shortfall": spend_shortfall,
@@ -498,7 +560,7 @@ def run_governor_debug(base_inputs: dict, max_conversion: float, step: float):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Debug Build")
+st.title("Retirement Model — Debug Build with Tax Fallback")
 
 st.header("Household Inputs")
 
@@ -531,7 +593,7 @@ with cov2:
 
 st.header("Tax Funding Policy")
 conversion_tax_funding_policy = st.selectbox(
-    "How to fund federal tax",
+    "Preferred tax funding source",
     [
         "Cash then Brokerage",
         "Brokerage only",
@@ -540,6 +602,7 @@ conversion_tax_funding_policy = st.selectbox(
     ],
     index=0,
 )
+st.caption("This build automatically falls back to Trad then Roth if the preferred source is insufficient.")
 
 st.header("Governor Debug Inputs")
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=100000.0, step=5000.0)
