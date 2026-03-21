@@ -524,45 +524,70 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
         candidate_inputs["annual_conversion"] = candidate_conversion
 
         result = run_model(candidate_inputs)
-        total_drag = result["total_federal_taxes"] + result["total_aca_cost"] + result["total_irmaa_cost"]
+
+        total_drag = (
+            result["total_federal_taxes"]
+            + result["total_aca_cost"]
+            + result["total_irmaa_cost"]
+        )
 
         row = {
-            "Annual Conversion Strategy": candidate_conversion,
-            "Final Net Worth": result["final_net_worth"],
-            "Total Government Drag": total_drag,
-            "Total Federal Taxes": result["total_federal_taxes"],
-            "Total ACA Cost": result["total_aca_cost"],
-            "Total IRMAA Cost": result["total_irmaa_cost"],
-            "Total Shortfall": result["total_shortfall"],
-            "Max MAGI": result["max_magi"],
-            "ACA Hit Years": result["aca_hit_years"],
-            "IRMAA Hit Years": result["irmaa_hit_years"],
+            "Annual Conversion Strategy": float(candidate_conversion),
+            "Final Net Worth": float(result["final_net_worth"]),
+            "Total Government Drag": float(total_drag),
+            "Total Federal Taxes": float(result["total_federal_taxes"]),
+            "Total ACA Cost": float(result["total_aca_cost"]),
+            "Total IRMAA Cost": float(result["total_irmaa_cost"]),
+            "Total Shortfall": float(result["total_shortfall"]),
+            "Max MAGI": float(result["max_magi"]),
+            "ACA Hit Years": int(result["aca_hit_years"]),
+            "IRMAA Hit Years": int(result["irmaa_hit_years"]),
             "First IRMAA Year": result["first_irmaa_year"] if result["first_irmaa_year"] is not None else "",
-            "Score": score_result(result),
         }
 
         summary_rows.append(row)
-        detailed_results[candidate_conversion] = result
+        detailed_results[float(candidate_conversion)] = result
 
-    summary_df = pd.DataFrame(summary_rows).sort_values(
-        by=[
-            "Score",
-            "Final Net Worth",
-            "Total Shortfall",
-            "Total Government Drag",
-            "Annual Conversion Strategy",
-        ],
-        ascending=[False, False, True, True, True]
-    ).reset_index(drop=True)
+    summary_df = pd.DataFrame(summary_rows)
 
-    best_conversion = float(summary_df.iloc[0]["Annual Conversion Strategy"])
+    # Treat tiny floating noise as zero shortfall
+    summary_df["Shortfall OK"] = summary_df["Total Shortfall"] <= 0.01
+
+    # First preference: no shortfall
+    feasible_df = summary_df[summary_df["Shortfall OK"]].copy()
+
+    if not feasible_df.empty:
+        ranked_df = feasible_df.sort_values(
+            by=[
+                "Final Net Worth",
+                "Total Government Drag",
+                "Annual Conversion Strategy",
+            ],
+            ascending=[False, True, True]
+        ).reset_index(drop=True)
+    else:
+        # If everything has shortfall, choose least bad:
+        ranked_df = summary_df.sort_values(
+            by=[
+                "Total Shortfall",
+                "Final Net Worth",
+                "Total Government Drag",
+                "Annual Conversion Strategy",
+            ],
+            ascending=[True, False, True, True]
+        ).reset_index(drop=True)
+
+    best_conversion = float(ranked_df.iloc[0]["Annual Conversion Strategy"])
+    best_result = detailed_results[best_conversion]
+
+    # Keep the displayed table sorted in the same way the winner is chosen
+    display_df = ranked_df.copy()
 
     return {
-        "summary_df": summary_df,
+        "summary_df": display_df,
         "best_conversion": best_conversion,
-        "best_result": detailed_results[best_conversion],
+        "best_result": best_result,
     }
-
 
 # -----------------------------
 # VALIDATION DISPLAY
