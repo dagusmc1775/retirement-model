@@ -34,11 +34,7 @@ def calculate_progressive_tax(taxable_income, brackets):
     tax = 0.0
 
     for i, (lower_bound, rate) in enumerate(brackets):
-        if i + 1 < len(brackets):
-            upper_bound = brackets[i + 1][0]
-        else:
-            upper_bound = float("inf")
-
+        upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
         if taxable_income > lower_bound:
             amount_in_bracket = min(taxable_income, upper_bound) - lower_bound
             tax += amount_in_bracket * rate
@@ -58,9 +54,7 @@ def calculate_taxable_ss(total_ss, other_income):
     elif provisional_income <= 44000:
         taxable_ss = 0.5 * (provisional_income - 32000)
     else:
-        part1 = 6000.0
-        part2 = 0.85 * (provisional_income - 44000)
-        taxable_ss = part1 + part2
+        taxable_ss = 6000.0 + 0.85 * (provisional_income - 44000)
 
     taxable_ss = min(taxable_ss, 0.85 * total_ss)
     taxable_ss = max(0.0, taxable_ss)
@@ -69,9 +63,9 @@ def calculate_taxable_ss(total_ss, other_income):
     return taxable_ss
 
 
-def calculate_federal_tax(ordinary_income, total_ss):
-    taxable_ss = calculate_taxable_ss(total_ss, ordinary_income)
-    agi = ordinary_income + taxable_ss
+def calculate_federal_tax(other_ordinary_income, total_ss):
+    taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income)
+    agi = other_ordinary_income + taxable_ss
     taxable_income = max(0.0, agi - STANDARD_DEDUCTION_MFJ)
     federal_tax = calculate_progressive_tax(taxable_income, FEDERAL_BRACKETS_MFJ)
 
@@ -105,13 +99,22 @@ def calculate_irmaa_cost(magi):
 # -----------------------------
 # CASH FLOW HELPERS
 # -----------------------------
-def withdraw_for_need(amount_needed, trad, roth, brokerage, cash):
+def deposit_cash(amount, cash):
+    assert amount >= 0, "Deposit amount cannot be negative"
+    cash += amount
+    assert cash >= 0, "Cash negative after deposit"
+    return cash
+
+
+def withdraw_for_spending(amount_needed, trad, roth, brokerage, cash):
     """
-    Withdrawal order:
+    Withdrawal order for spending/taxes/surcharges:
     1. Cash
     2. Brokerage
     3. Traditional
     4. Roth
+
+    Traditional withdrawals are tracked as taxable ordinary income.
     """
     starting_need = amount_needed
     assert amount_needed >= 0, "Amount needed cannot be negative"
@@ -146,15 +149,9 @@ def withdraw_for_need(amount_needed, trad, roth, brokerage, cash):
         "from_brokerage": from_brokerage,
         "from_trad": from_trad,
         "from_roth": from_roth,
+        "taxable_trad_withdrawal": from_trad,
         "shortfall": shortfall,
     }
-
-
-def deposit_cash(amount, cash):
-    assert amount >= 0, "Deposit amount cannot be negative"
-    cash += amount
-    assert cash >= 0, "Cash negative after deposit"
-    return cash
 
 
 # -----------------------------
@@ -168,14 +165,12 @@ def annual_ss_benefit(base_benefit_at_67, claim_age):
     - after 67: +8% per year
     """
     delta = claim_age - 67
-
     if delta < 0:
         benefit = base_benefit_at_67 * (1 - 0.06 * abs(delta))
     elif delta > 0:
         benefit = base_benefit_at_67 * (1 + 0.08 * delta)
     else:
         benefit = base_benefit_at_67
-
     return max(0.0, benefit)
 
 
@@ -239,24 +234,13 @@ def run_model(inputs):
         total_ss = owner_ss + spouse_ss
         cash = deposit_cash(total_ss, cash)
 
-        # Conversion
+        # Roth conversion
         conversion = min(annual_conversion, trad)
         trad -= conversion
         roth += conversion
 
-        # Tax and surcharges
-        tax_info = calculate_federal_tax(conversion, total_ss)
-        magi = tax_info["agi"]  # simplified placeholder
-        federal_tax = tax_info["federal_tax"]
-        aca_cost = calculate_aca_cost(magi)
-        irmaa_cost = calculate_irmaa_cost(magi)
-
-        total_federal_taxes += federal_tax
-        total_aca_cost += aca_cost
-        total_irmaa_cost += irmaa_cost
-
-        # Fund spending
-        spend_result = withdraw_for_need(
+        # Spending withdrawals — now taxable if from Traditional
+        spend_result = withdraw_for_spending(
             annual_spending, trad, roth, brokerage, cash
         )
         trad = spend_result["trad"]
@@ -264,8 +248,18 @@ def run_model(inputs):
         brokerage = spend_result["brokerage"]
         cash = spend_result["cash"]
 
-        # Fund federal tax
-        tax_result = withdraw_for_need(
+        # Ordinary income now includes:
+        # - Roth conversions
+        # - Traditional withdrawals used for spending
+        other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
+
+        # Federal tax based on real current-year ordinary income
+        tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
+        federal_tax = tax_info["federal_tax"]
+
+        # Pay federal tax — additional Traditional withdrawals here are also taxable,
+        # but to keep Phase 4.1 stable, we do NOT recursively gross-up tax-on-tax yet.
+        tax_result = withdraw_for_spending(
             federal_tax, trad, roth, brokerage, cash
         )
         trad = tax_result["trad"]
@@ -273,8 +267,12 @@ def run_model(inputs):
         brokerage = tax_result["brokerage"]
         cash = tax_result["cash"]
 
-        # Fund ACA
-        aca_result = withdraw_for_need(
+        # ACA / IRMAA based on MAGI placeholder
+        magi = tax_info["agi"]
+        aca_cost = calculate_aca_cost(magi)
+        irmaa_cost = calculate_irmaa_cost(magi)
+
+        aca_result = withdraw_for_spending(
             aca_cost, trad, roth, brokerage, cash
         )
         trad = aca_result["trad"]
@@ -282,14 +280,17 @@ def run_model(inputs):
         brokerage = aca_result["brokerage"]
         cash = aca_result["cash"]
 
-        # Fund IRMAA
-        irmaa_result = withdraw_for_need(
+        irmaa_result = withdraw_for_spending(
             irmaa_cost, trad, roth, brokerage, cash
         )
         trad = irmaa_result["trad"]
         roth = irmaa_result["roth"]
         brokerage = irmaa_result["brokerage"]
         cash = irmaa_result["cash"]
+
+        total_federal_taxes += federal_tax
+        total_aca_cost += aca_cost
+        total_irmaa_cost += irmaa_cost
 
         total_shortfall = (
             spend_result["shortfall"]
@@ -298,7 +299,6 @@ def run_model(inputs):
             + irmaa_result["shortfall"]
         )
 
-        # Validation
         assert trad >= -0.01, "Traditional balance negative"
         assert roth >= -0.01, "Roth balance negative"
         assert brokerage >= -0.01, "Brokerage balance negative"
@@ -324,6 +324,12 @@ def run_model(inputs):
             "Spouse SS": spouse_ss,
             "Total SS": total_ss,
             "Conversion": conversion,
+            "Spend from Cash": spend_result["from_cash"],
+            "Spend from Brokerage": spend_result["from_brokerage"],
+            "Spend from Trad": spend_result["from_trad"],
+            "Spend from Roth": spend_result["from_roth"],
+            "Taxable Trad Withdrawal": spend_result["taxable_trad_withdrawal"],
+            "Other Ordinary Income": other_ordinary_income,
             "Taxable SS": tax_info["taxable_ss"],
             "AGI": tax_info["agi"],
             "Taxable Income": tax_info["taxable_income"],
@@ -366,7 +372,6 @@ def build_candidate_strategies(max_conversion, step):
         candidates.append(round(current, 2))
         current += step
 
-    # Ensure the exact max is included
     if round(max_conversion, 2) not in candidates:
         candidates.append(round(max_conversion, 2))
 
@@ -376,12 +381,6 @@ def build_candidate_strategies(max_conversion, step):
 
 
 def score_result(result):
-    """
-    Higher score is better.
-    Heavy penalty on shortfall.
-    Then prefer higher final net worth.
-    Then prefer lower taxes/costs.
-    """
     final_net_worth = result["final_net_worth"]
     shortfall = result["total_shortfall"]
     total_drag = (
@@ -389,9 +388,7 @@ def score_result(result):
         + result["total_aca_cost"]
         + result["total_irmaa_cost"]
     )
-
-    score = final_net_worth - (shortfall * 1000.0) - total_drag
-    return score
+    return final_net_worth - (shortfall * 1000.0) - total_drag
 
 
 def run_optimizer(base_inputs, max_conversion, conversion_step):
@@ -429,12 +426,6 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
 
     summary_df = pd.DataFrame(summary_rows)
 
-    # Deterministic ranking:
-    # 1. Higher score is better
-    # 2. Higher final net worth is better
-    # 3. Lower shortfall is better
-    # 4. Lower government drag is better
-    # 5. Lower conversion wins ties
     summary_df = summary_df.sort_values(
         by=[
             "Score",
@@ -454,6 +445,8 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
         "best_conversion": best_conversion,
         "best_result": best_result,
     }
+
+
 # -----------------------------
 # VALIDATION DISPLAY
 # -----------------------------
@@ -491,7 +484,7 @@ def render_validation(validation_messages):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Phase 4")
+st.title("Retirement Model — Phase 4.1")
 
 st.header("Household Inputs")
 
@@ -527,7 +520,7 @@ base_inputs = {
     "cash": cash,
     "growth": growth,
     "annual_spending": annual_spending,
-    "annual_conversion": 0.0,  # overridden by optimizer
+    "annual_conversion": 0.0,
     "owner_current_age": owner_current_age,
     "spouse_current_age": spouse_current_age,
     "owner_claim_age": owner_claim_age,
