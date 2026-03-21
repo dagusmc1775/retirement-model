@@ -47,6 +47,16 @@ def calculate_progressive_tax(taxable_income: float) -> float:
     return max(0.0, tax)
 
 
+def get_marginal_rate_from_taxable_income(taxable_income: float) -> float:
+    taxable_income = max(0.0, float(taxable_income))
+    rate = 0.10
+    for i, (lower_bound, bracket_rate) in enumerate(FEDERAL_BRACKETS_MFJ):
+        upper_bound = FEDERAL_BRACKETS_MFJ[i + 1][0] if i + 1 < len(FEDERAL_BRACKETS_MFJ) else float("inf")
+        if lower_bound <= taxable_income <= upper_bound:
+            rate = bracket_rate
+    return rate
+
+
 def calculate_taxable_ss(total_ss: float, other_income: float) -> float:
     total_ss = max(0.0, float(total_ss))
     other_income = max(0.0, float(other_income))
@@ -68,12 +78,14 @@ def calculate_federal_tax(other_ordinary_income: float, total_ss: float) -> dict
     agi = other_ordinary_income + taxable_ss
     taxable_income = max(0.0, agi - STANDARD_DEDUCTION_MFJ)
     federal_tax = calculate_progressive_tax(taxable_income)
+    marginal_rate = get_marginal_rate_from_taxable_income(taxable_income)
 
     return {
         "taxable_ss": taxable_ss,
         "agi": agi,
         "taxable_income": taxable_income,
         "federal_tax": federal_tax,
+        "marginal_rate": marginal_rate,
     }
 
 
@@ -342,6 +354,12 @@ def estimate_future_tax_pressure(row: dict, params: dict) -> float:
     return projected_rmd + projected_ss
 
 
+def estimate_future_marginal_rate(row: dict, params: dict) -> float:
+    pressure = estimate_future_tax_pressure(row, params)
+    taxable_estimate = max(0.0, pressure - STANDARD_DEDUCTION_MFJ)
+    return get_marginal_rate_from_taxable_income(taxable_estimate)
+
+
 def summarize_run(df: pd.DataFrame, params: dict) -> dict:
     return {
         "df": df,
@@ -460,6 +478,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Other Ordinary Income": other_ordinary_income,
         "Taxable SS": tax_info["taxable_ss"],
         "AGI": tax_info["agi"],
+        "Taxable Income": tax_info["taxable_income"],
+        "Current Marginal Tax Rate": tax_info["marginal_rate"],
         "MAGI": magi,
         "Primary On ACA": coverage["primary_on_aca"],
         "Spouse On ACA": coverage["spouse_on_aca"],
@@ -517,7 +537,7 @@ def run_model_fixed(inputs: dict) -> dict:
 
 
 # -----------------------------
-# THRESHOLD-AWARE GOVERNOR
+# BETR-AWARE GOVERNOR
 # -----------------------------
 def conversion_needed_for_target_magi(state: dict, year: int, params: dict, target_magi: float) -> float:
     _, base_row = simulate_one_year(year, dict(state), params, 0.0)
@@ -526,7 +546,7 @@ def conversion_needed_for_target_magi(state: dict, year: int, params: dict, targ
     return needed
 
 
-def build_threshold_candidates(state: dict, year: int, params: dict, max_conversion: float) -> list:
+def build_betr_candidates(state: dict, year: int, params: dict, max_conversion: float) -> list:
     coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
@@ -548,12 +568,10 @@ def build_threshold_candidates(state: dict, year: int, params: dict, max_convers
     if aca_lives == 2:
         add_target(bracket_target_10)
         add_target(bracket_target_12)
-        add_target(min(bracket_target_22, ACA_CLIFF_MFJ - 1000.0))
         add_target(ACA_CLIFF_MFJ - 1000.0)
         add_target(ACA_CLIFF_MFJ - 1.0)
         add_target(ACA_CLIFF_MFJ + 1.0)
     elif aca_lives == 1 and medicare_lives == 1:
-        # Mixed years: allow more assertive exploration.
         add_target(bracket_target_10)
         add_target(bracket_target_12)
         add_target(bracket_target_22)
@@ -561,16 +579,16 @@ def build_threshold_candidates(state: dict, year: int, params: dict, max_convers
         add_target(ACA_CLIFF_MFJ - 1.0)
         add_target(ACA_CLIFF_MFJ + 1.0)
         add_target(ACA_CLIFF_MFJ + 15000.0)
+        add_target(ACA_CLIFF_MFJ + 30000.0)
         add_target(min(IRMAA_FIRST_CLIFF_MFJ - 1000.0, cap))
     else:
         add_target(bracket_target_10)
         add_target(bracket_target_12)
         add_target(bracket_target_22)
         add_target(bracket_target_24)
-        if medicare_lives > 0:
-            add_target(IRMAA_FIRST_CLIFF_MFJ - 1000.0)
-            add_target(IRMAA_FIRST_CLIFF_MFJ - 1.0)
-            add_target(IRMAA_FIRST_CLIFF_MFJ + 1.0)
+        add_target(IRMAA_FIRST_CLIFF_MFJ - 1000.0)
+        add_target(IRMAA_FIRST_CLIFF_MFJ - 1.0)
+        add_target(IRMAA_FIRST_CLIFF_MFJ + 1.0)
 
     candidates.append(min(cap, cap / 2.0))
     candidates.append(cap)
@@ -579,59 +597,71 @@ def build_threshold_candidates(state: dict, year: int, params: dict, max_convers
     return cleaned
 
 
-def score_threshold_candidate(row: dict, year: int, params: dict, rmd_pressure_weight: float) -> tuple:
+def score_betr_candidate(row: dict, baseline_row: dict, year: int, params: dict, rmd_pressure_weight: float, legacy_weight: float) -> tuple:
     shortfall_ok = row["Year Shortfall"] <= 0.01
-    drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
-    future_tax_pressure = estimate_future_tax_pressure(row, params)
 
     aca_lives = int(row["ACA Lives"])
     medicare_lives = int(row["Medicare Lives"])
+
+    drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
+    baseline_drag = baseline_row["Federal Tax"] + baseline_row["ACA Cost"] + baseline_row["IRMAA Cost"]
+
+    incremental_conversion = max(0.0, row["Chosen Conversion"] - baseline_row["Chosen Conversion"])
+    incremental_current_drag = max(0.0, drag - baseline_drag)
+
+    if incremental_conversion > 0:
+        current_effective_rate = incremental_current_drag / incremental_conversion
+    else:
+        current_effective_rate = 0.0
+
+    future_pressure = estimate_future_tax_pressure(row, params)
+    future_rate = estimate_future_marginal_rate(row, params)
+    betr_spread = future_rate - current_effective_rate
 
     over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
     over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
 
     if aca_lives == 2:
-        aca_penalty = over_aca * 100.0
-        irmaa_target_reward = 0.0
-        future_pressure_multiplier = 3.0
-        trad_penalty = row["EOY Trad"] * 0.02
+        aca_cost_weight = 120.0
+        mixed_reward = 0.0
+        irmaa_reward = 0.0
+        future_multiplier = 2.5
     elif aca_lives == 1 and medicare_lives == 1:
-        aca_penalty = over_aca * 35.0
-        # Reward using more room once only one person remains on ACA.
-        irmaa_target_reward = row["MAGI"] * 0.15
-        future_pressure_multiplier = 5.0
-        trad_penalty = row["EOY Trad"] * 0.035
+        aca_cost_weight = 35.0
+        mixed_reward = row["MAGI"] * 0.12
+        irmaa_reward = 0.0
+        future_multiplier = 5.0
     else:
-        aca_penalty = 0.0
-        if medicare_lives > 0:
-            irmaa_headroom = IRMAA_FIRST_CLIFF_MFJ - row["MAGI"]
-            irmaa_target_reward = -abs(irmaa_headroom) * 0.5
-        else:
-            irmaa_target_reward = 0.0
-        future_pressure_multiplier = 6.0
-        trad_penalty = row["EOY Trad"] * 0.04
+        aca_cost_weight = 0.0
+        mixed_reward = 0.0
+        irmaa_headroom = IRMAA_FIRST_CLIFF_MFJ - row["MAGI"]
+        irmaa_reward = -abs(irmaa_headroom) * 0.8
+        future_multiplier = 6.0
 
     adjusted_value = (
         row["Net Worth"]
         - drag
-        - aca_penalty
-        - (over_irmaa * 5.0)
-        - (future_tax_pressure * rmd_pressure_weight * future_pressure_multiplier)
-        - trad_penalty
-        + irmaa_target_reward
+        - (over_aca * aca_cost_weight)
+        - (over_irmaa * 8.0)
+        - (future_pressure * rmd_pressure_weight * future_multiplier)
+        - (row["EOY Trad"] * legacy_weight)
+        + mixed_reward
+        + irmaa_reward
+        + (betr_spread * 500000.0)
     )
 
     return (
         1 if shortfall_ok else 0,
-        -aca_penalty,
+        -over_aca,
         -over_irmaa,
         adjusted_value,
+        betr_spread,
         -drag,
         -row["Chosen Conversion"],
     )
 
 
-def run_model_threshold_governor(inputs: dict, max_conversion: float, rmd_pressure_weight: float) -> dict:
+def run_model_betr_governor(inputs: dict, max_conversion: float, rmd_pressure_weight: float, legacy_weight: float) -> dict:
     params = build_common_params(inputs)
     state = {
         "trad": float(inputs["trad"]),
@@ -644,18 +674,28 @@ def run_model_threshold_governor(inputs: dict, max_conversion: float, rmd_pressu
     decision_rows = []
 
     for year in range(START_YEAR, END_YEAR + 1):
-        candidates = build_threshold_candidates(state, year, params, max_conversion)
+        candidates = build_betr_candidates(state, year, params, max_conversion)
+
+        baseline_state, baseline_row = simulate_one_year(year, dict(state), params, 0.0)
 
         best_state = None
         best_row = None
 
         for c in candidates:
             next_state, row = simulate_one_year(year, dict(state), params, c)
-            future_tax_pressure = estimate_future_tax_pressure(row, params)
+
+            drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
+            baseline_drag = baseline_row["Federal Tax"] + baseline_row["ACA Cost"] + baseline_row["IRMAA Cost"]
+            incremental_conversion = max(0.0, row["Chosen Conversion"] - baseline_row["Chosen Conversion"])
+            incremental_current_drag = max(0.0, drag - baseline_drag)
+            current_effective_rate = (incremental_current_drag / incremental_conversion) if incremental_conversion > 0 else 0.0
+
+            future_pressure = estimate_future_tax_pressure(row, params)
+            future_rate = estimate_future_marginal_rate(row, params)
+            betr_spread = future_rate - current_effective_rate
 
             aca_lives = int(row["ACA Lives"])
             medicare_lives = int(row["Medicare Lives"])
-
             over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
             over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
 
@@ -674,10 +714,13 @@ def run_model_threshold_governor(inputs: dict, max_conversion: float, rmd_pressu
                 "Medicare Lives": medicare_lives,
                 "Over ACA Cliff": over_aca,
                 "Over IRMAA Cliff": over_irmaa,
-                "Projected Future Tax Pressure": future_tax_pressure,
+                "Projected Future Tax Pressure": future_pressure,
+                "Current Effective Rate": current_effective_rate,
+                "Estimated Future Rate": future_rate,
+                "BETR Spread": betr_spread,
             })
 
-            if best_row is None or score_threshold_candidate(row, year, params, rmd_pressure_weight) > score_threshold_candidate(best_row, year, params, rmd_pressure_weight):
+            if best_row is None or score_betr_candidate(row, baseline_row, year, params, rmd_pressure_weight, legacy_weight) > score_betr_candidate(best_row, baseline_row, year, params, rmd_pressure_weight, legacy_weight):
                 best_row = row
                 best_state = next_state
 
@@ -716,7 +759,7 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Threshold-Aware Governor")
+st.title("Retirement Model — BETR-Aware Governor")
 
 st.header("Household Inputs")
 
@@ -763,7 +806,7 @@ st.caption("This build falls back to Trad then Roth if the preferred source is i
 st.header("Flat Strategy Test")
 annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0)
 
-st.header("Threshold-Aware Governor Inputs")
+st.header("BETR-Aware Governor Inputs")
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=300000.0, step=5000.0)
 rmd_pressure_weight = st.number_input(
     "RMD Pressure Weight",
@@ -771,6 +814,13 @@ rmd_pressure_weight = st.number_input(
     value=20.0,
     step=1.0,
     help="Higher values push harder to reduce future RMD + SS tax pressure."
+)
+legacy_weight = st.number_input(
+    "Legacy Weight",
+    min_value=0.0,
+    value=0.03,
+    step=0.005,
+    help="Higher values push harder to reduce ending Traditional IRA for heirs."
 )
 
 inputs = {
@@ -802,9 +852,9 @@ with btn1:
         st.dataframe(result["df"], use_container_width=True)
 
 with btn2:
-    if st.button("Run Threshold-Aware Governor"):
-        result = run_model_threshold_governor(inputs, max_conversion, rmd_pressure_weight)
-        render_summary("Threshold-Aware Governor Summary", result)
+    if st.button("Run BETR-Aware Governor"):
+        result = run_model_betr_governor(inputs, max_conversion, rmd_pressure_weight, legacy_weight)
+        render_summary("BETR-Aware Governor Summary", result)
         st.subheader("Chosen Year-by-Year Path")
         st.dataframe(result["df"], use_container_width=True)
         st.subheader("Per-Year Candidate Testing")
