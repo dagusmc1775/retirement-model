@@ -545,13 +545,23 @@ def build_threshold_candidates(state: dict, year: int, params: dict, max_convers
         c = conversion_needed_for_target_magi(state, year, params, target)
         candidates.append(min(cap, max(0.0, round(c, 2))))
 
-    if aca_lives > 0:
+    if aca_lives == 2:
         add_target(bracket_target_10)
         add_target(bracket_target_12)
         add_target(min(bracket_target_22, ACA_CLIFF_MFJ - 1000.0))
         add_target(ACA_CLIFF_MFJ - 1000.0)
         add_target(ACA_CLIFF_MFJ - 1.0)
         add_target(ACA_CLIFF_MFJ + 1.0)
+    elif aca_lives == 1 and medicare_lives == 1:
+        # Mixed years: allow more assertive exploration.
+        add_target(bracket_target_10)
+        add_target(bracket_target_12)
+        add_target(bracket_target_22)
+        add_target(ACA_CLIFF_MFJ - 1000.0)
+        add_target(ACA_CLIFF_MFJ - 1.0)
+        add_target(ACA_CLIFF_MFJ + 1.0)
+        add_target(ACA_CLIFF_MFJ + 15000.0)
+        add_target(min(IRMAA_FIRST_CLIFF_MFJ - 1000.0, cap))
     else:
         add_target(bracket_target_10)
         add_target(bracket_target_12)
@@ -580,21 +590,34 @@ def score_threshold_candidate(row: dict, year: int, params: dict, rmd_pressure_w
     over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
     over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
 
-    aca_penalty = over_aca * 100.0 * (aca_lives / 2.0)
-
-    if aca_lives == 0 and medicare_lives > 0:
-        irmaa_headroom = IRMAA_FIRST_CLIFF_MFJ - row["MAGI"]
-        irmaa_target_reward = -abs(irmaa_headroom) * 0.5
-    else:
+    if aca_lives == 2:
+        aca_penalty = over_aca * 100.0
         irmaa_target_reward = 0.0
+        future_pressure_multiplier = 3.0
+        trad_penalty = row["EOY Trad"] * 0.02
+    elif aca_lives == 1 and medicare_lives == 1:
+        aca_penalty = over_aca * 35.0
+        # Reward using more room once only one person remains on ACA.
+        irmaa_target_reward = row["MAGI"] * 0.15
+        future_pressure_multiplier = 5.0
+        trad_penalty = row["EOY Trad"] * 0.035
+    else:
+        aca_penalty = 0.0
+        if medicare_lives > 0:
+            irmaa_headroom = IRMAA_FIRST_CLIFF_MFJ - row["MAGI"]
+            irmaa_target_reward = -abs(irmaa_headroom) * 0.5
+        else:
+            irmaa_target_reward = 0.0
+        future_pressure_multiplier = 6.0
+        trad_penalty = row["EOY Trad"] * 0.04
 
     adjusted_value = (
         row["Net Worth"]
         - drag
         - aca_penalty
         - (over_irmaa * 5.0)
-        - (future_tax_pressure * rmd_pressure_weight * 3.0)
-        - (row["EOY Trad"] * 0.02)
+        - (future_tax_pressure * rmd_pressure_weight * future_pressure_multiplier)
+        - trad_penalty
         + irmaa_target_reward
     )
 
