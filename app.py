@@ -238,14 +238,9 @@ def withdraw_for_spending(amount_needed: float, trad: float, roth: float, broker
 
 
 def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, preferred_policy: str) -> dict:
-    # First pass: preferred source
     preferred = withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, preferred_policy)
-
     remaining = preferred["shortfall"]
 
-    # Second pass: fallback only if needed
-    fallback_from_cash = 0.0
-    fallback_from_brokerage = 0.0
     fallback_from_trad = 0.0
     fallback_from_roth = 0.0
 
@@ -263,10 +258,7 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
         roth = fallback["roth"]
         brokerage = fallback["brokerage"]
         cash = fallback["cash"]
-
         true_shortfall = fallback["shortfall"]
-        fallback_from_cash = fallback["from_cash"]
-        fallback_from_brokerage = fallback["from_brokerage"]
         fallback_from_trad = fallback["from_trad"]
         fallback_from_roth = fallback["from_roth"]
     else:
@@ -285,9 +277,6 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
         "preferred_from_brokerage": preferred["from_brokerage"],
         "preferred_from_trad": preferred["from_trad"],
         "preferred_from_roth": preferred["from_roth"],
-        "preferred_shortfall": preferred["shortfall"],
-        "fallback_from_cash": fallback_from_cash,
-        "fallback_from_brokerage": fallback_from_brokerage,
         "fallback_from_trad": fallback_from_trad,
         "fallback_from_roth": fallback_from_roth,
         "true_tax_shortfall": true_shortfall,
@@ -304,263 +293,311 @@ def normalize_balances(trad: float, roth: float, brokerage: float, cash: float) 
 
 
 # -----------------------------
-# CORE MODEL
+# YEAR SIMULATION
 # -----------------------------
-def run_model(inputs: dict) -> dict:
-    trad = float(inputs["trad"])
-    roth = float(inputs["roth"])
-    brokerage = float(inputs["brokerage"])
-    cash = float(inputs["cash"])
-    growth = float(inputs["growth"])
-    annual_spending = float(inputs["annual_spending"])
-    annual_conversion = float(inputs["annual_conversion"])
-    conversion_tax_funding_policy = inputs["conversion_tax_funding_policy"]
+def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: float) -> tuple:
+    trad = float(state["trad"])
+    roth = float(state["roth"])
+    brokerage = float(state["brokerage"])
+    cash = float(state["cash"])
 
-    owner_current_age = int(inputs["owner_current_age"])
-    spouse_current_age = int(inputs["spouse_current_age"])
-    owner_claim_age = int(inputs["owner_claim_age"])
-    spouse_claim_age = int(inputs["spouse_claim_age"])
-    owner_ss_base = float(inputs["owner_ss_base"])
-    spouse_ss_base = float(inputs["spouse_ss_base"])
+    growth = float(params["growth"])
+    annual_spending = float(params["annual_spending"])
+    conversion_tax_funding_policy = params["conversion_tax_funding_policy"]
 
-    primary_aca_end_year = int(inputs["primary_aca_end_year"])
-    spouse_aca_end_year = int(inputs["spouse_aca_end_year"])
+    owner_ss_start = int(params["owner_ss_start"])
+    spouse_ss_start = int(params["spouse_ss_start"])
+    owner_ss_annual = float(params["owner_ss_annual"])
+    spouse_ss_annual = float(params["spouse_ss_annual"])
+    primary_aca_end_year = int(params["primary_aca_end_year"])
+    spouse_aca_end_year = int(params["spouse_aca_end_year"])
 
-    owner_ss_start = ss_start_year_from_current_age(START_YEAR, owner_current_age, owner_claim_age)
-    spouse_ss_start = ss_start_year_from_current_age(START_YEAR, spouse_current_age, spouse_claim_age)
+    soy_trad = trad
+    soy_roth = roth
+    soy_brokerage = brokerage
+    soy_cash = cash
 
-    owner_ss_annual = annual_ss_benefit(owner_ss_base, owner_claim_age)
-    spouse_ss_annual = annual_ss_benefit(spouse_ss_base, spouse_claim_age)
+    trad *= (1 + growth)
+    roth *= (1 + growth)
+    brokerage *= (1 + growth)
 
-    rows = []
+    owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
+    spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
+    total_ss = owner_ss + spouse_ss
+    cash += total_ss
 
-    total_federal_taxes = 0.0
-    total_aca_cost = 0.0
-    total_irmaa_cost = 0.0
-    total_shortfall = 0.0
-    max_magi = 0.0
+    conversion = min(float(annual_conversion), trad)
+    trad -= conversion
+    roth += conversion
 
-    aca_hit_years = 0
-    irmaa_hit_years = 0
-    first_irmaa_year = None
+    spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash)
+    trad = spend_result["trad"]
+    roth = spend_result["roth"]
+    brokerage = spend_result["brokerage"]
+    cash = spend_result["cash"]
 
-    for year in range(START_YEAR, END_YEAR + 1):
-        soy_trad = trad
-        soy_roth = roth
-        soy_brokerage = brokerage
-        soy_cash = cash
+    other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
+    tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
+    federal_tax = tax_info["federal_tax"]
 
-        # Growth
-        trad *= (1 + growth)
-        roth *= (1 + growth)
-        brokerage *= (1 + growth)
+    tax_result = withdraw_for_tax_with_fallback(
+        federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy
+    )
+    trad = tax_result["trad"]
+    roth = tax_result["roth"]
+    brokerage = tax_result["brokerage"]
+    cash = tax_result["cash"]
 
-        # SS inflow
-        owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
-        spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
-        total_ss = owner_ss + spouse_ss
-        cash += total_ss
+    magi = tax_info["agi"]
+    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
+    aca_lives = coverage["aca_lives"]
+    medicare_lives = coverage["medicare_lives"]
 
-        # Conversion
-        conversion = min(annual_conversion, trad)
-        trad -= conversion
-        roth += conversion
+    aca_cost = calculate_prorated_aca_cost(magi, aca_lives) if aca_lives > 0 else 0.0
+    irmaa_cost = calculate_prorated_irmaa_cost(magi, medicare_lives) if medicare_lives > 0 else 0.0
 
-        # Spending
-        spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash)
-        trad = spend_result["trad"]
-        roth = spend_result["roth"]
-        brokerage = spend_result["brokerage"]
-        cash = spend_result["cash"]
+    aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash)
+    trad = aca_result["trad"]
+    roth = aca_result["roth"]
+    brokerage = aca_result["brokerage"]
+    cash = aca_result["cash"]
 
-        # Tax
-        other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
-        tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
-        federal_tax = tax_info["federal_tax"]
+    irmaa_result = withdraw_for_spending(irmaa_cost, trad, roth, brokerage, cash)
+    trad = irmaa_result["trad"]
+    roth = irmaa_result["roth"]
+    brokerage = irmaa_result["brokerage"]
+    cash = irmaa_result["cash"]
 
-        tax_result = withdraw_for_tax_with_fallback(
-            federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy
-        )
-        trad = tax_result["trad"]
-        roth = tax_result["roth"]
-        brokerage = tax_result["brokerage"]
-        cash = tax_result["cash"]
+    trad, roth, brokerage, cash = normalize_balances(trad, roth, brokerage, cash)
 
-        # ACA / IRMAA
-        magi = tax_info["agi"]
-        coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
-        aca_lives = coverage["aca_lives"]
-        medicare_lives = coverage["medicare_lives"]
+    spend_shortfall = spend_result["shortfall"]
+    tax_shortfall = tax_result["true_tax_shortfall"]
+    aca_shortfall = aca_result["shortfall"]
+    irmaa_shortfall = irmaa_result["shortfall"]
+    year_shortfall = spend_shortfall + tax_shortfall + aca_shortfall + irmaa_shortfall
 
-        aca_cost = calculate_prorated_aca_cost(magi, aca_lives) if aca_lives > 0 else 0.0
-        irmaa_cost = calculate_prorated_irmaa_cost(magi, medicare_lives) if medicare_lives > 0 else 0.0
+    net_worth = trad + roth + brokerage + cash
 
-        aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash)
-        trad = aca_result["trad"]
-        roth = aca_result["roth"]
-        brokerage = aca_result["brokerage"]
-        cash = aca_result["cash"]
+    row = {
+        "Year": year,
+        "SOY Trad": soy_trad,
+        "SOY Roth": soy_roth,
+        "SOY Brokerage": soy_brokerage,
+        "SOY Cash": soy_cash,
+        "Owner SS": owner_ss,
+        "Spouse SS": spouse_ss,
+        "Total SS": total_ss,
+        "Chosen Conversion": conversion,
+        "Other Ordinary Income": other_ordinary_income,
+        "Taxable SS": tax_info["taxable_ss"],
+        "AGI": tax_info["agi"],
+        "MAGI": magi,
+        "Primary On ACA": coverage["primary_on_aca"],
+        "Spouse On ACA": coverage["spouse_on_aca"],
+        "ACA Lives": aca_lives,
+        "Medicare Lives": medicare_lives,
+        "Federal Tax": federal_tax,
+        "Tax Paid Preferred Cash": tax_result["preferred_from_cash"],
+        "Tax Paid Preferred Brokerage": tax_result["preferred_from_brokerage"],
+        "Tax Paid Fallback Trad": tax_result["fallback_from_trad"],
+        "Tax Paid Fallback Roth": tax_result["fallback_from_roth"],
+        "ACA Cost": aca_cost,
+        "IRMAA Cost": irmaa_cost,
+        "Spend Shortfall": spend_shortfall,
+        "Tax Shortfall": tax_shortfall,
+        "ACA Shortfall": aca_shortfall,
+        "IRMAA Shortfall": irmaa_shortfall,
+        "Year Shortfall": year_shortfall,
+        "EOY Trad": trad,
+        "EOY Roth": roth,
+        "EOY Brokerage": brokerage,
+        "EOY Cash": cash,
+        "Net Worth": net_worth,
+    }
 
-        irmaa_result = withdraw_for_spending(irmaa_cost, trad, roth, brokerage, cash)
-        trad = irmaa_result["trad"]
-        roth = irmaa_result["roth"]
-        brokerage = irmaa_result["brokerage"]
-        cash = irmaa_result["cash"]
+    next_state = {
+        "trad": trad,
+        "roth": roth,
+        "brokerage": brokerage,
+        "cash": cash,
+    }
 
-        trad, roth, brokerage, cash = normalize_balances(trad, roth, brokerage, cash)
+    return next_state, row
 
-        spend_shortfall = spend_result["shortfall"]
-        tax_shortfall = tax_result["true_tax_shortfall"]
-        aca_shortfall = aca_result["shortfall"]
-        irmaa_shortfall = irmaa_result["shortfall"]
-        year_shortfall = spend_shortfall + tax_shortfall + aca_shortfall + irmaa_shortfall
 
-        total_federal_taxes += federal_tax
-        total_aca_cost += aca_cost
-        total_irmaa_cost += irmaa_cost
-        total_shortfall += year_shortfall
-        max_magi = max(max_magi, magi)
+# -----------------------------
+# MULTI-YEAR RUNNERS
+# -----------------------------
+def build_common_params(inputs: dict) -> dict:
+    return {
+        "growth": float(inputs["growth"]),
+        "annual_spending": float(inputs["annual_spending"]),
+        "conversion_tax_funding_policy": inputs["conversion_tax_funding_policy"],
+        "owner_ss_start": ss_start_year_from_current_age(START_YEAR, int(inputs["owner_current_age"]), int(inputs["owner_claim_age"])),
+        "spouse_ss_start": ss_start_year_from_current_age(START_YEAR, int(inputs["spouse_current_age"]), int(inputs["spouse_claim_age"])),
+        "owner_ss_annual": annual_ss_benefit(float(inputs["owner_ss_base"]), int(inputs["owner_claim_age"])),
+        "spouse_ss_annual": annual_ss_benefit(float(inputs["spouse_ss_base"]), int(inputs["spouse_claim_age"])),
+        "primary_aca_end_year": int(inputs["primary_aca_end_year"]),
+        "spouse_aca_end_year": int(inputs["spouse_aca_end_year"]),
+    }
 
-        if aca_cost > 0:
-            aca_hit_years += 1
-        if irmaa_cost > 0:
-            irmaa_hit_years += 1
-            if first_irmaa_year is None:
-                first_irmaa_year = year
 
-        net_worth = trad + roth + brokerage + cash
-
-        rows.append({
-            "Year": year,
-            "SOY Trad": soy_trad,
-            "SOY Roth": soy_roth,
-            "SOY Brokerage": soy_brokerage,
-            "SOY Cash": soy_cash,
-            "Owner SS": owner_ss,
-            "Spouse SS": spouse_ss,
-            "Total SS": total_ss,
-            "Conversion": conversion,
-            "Other Ordinary Income": other_ordinary_income,
-            "Taxable SS": tax_info["taxable_ss"],
-            "AGI": tax_info["agi"],
-            "MAGI": magi,
-            "Primary On ACA": coverage["primary_on_aca"],
-            "Spouse On ACA": coverage["spouse_on_aca"],
-            "ACA Lives": aca_lives,
-            "Medicare Lives": medicare_lives,
-            "Federal Tax": federal_tax,
-            "Tax Paid Preferred Cash": tax_result["preferred_from_cash"],
-            "Tax Paid Preferred Brokerage": tax_result["preferred_from_brokerage"],
-            "Tax Paid Preferred Trad": tax_result["preferred_from_trad"],
-            "Tax Paid Preferred Roth": tax_result["preferred_from_roth"],
-            "Tax Paid Fallback Trad": tax_result["fallback_from_trad"],
-            "Tax Paid Fallback Roth": tax_result["fallback_from_roth"],
-            "ACA Cost": aca_cost,
-            "IRMAA Cost": irmaa_cost,
-            "Spend Shortfall": spend_shortfall,
-            "Tax Shortfall": tax_shortfall,
-            "ACA Shortfall": aca_shortfall,
-            "IRMAA Shortfall": irmaa_shortfall,
-            "Year Shortfall": year_shortfall,
-            "EOY Trad": trad,
-            "EOY Roth": roth,
-            "EOY Brokerage": brokerage,
-            "EOY Cash": cash,
-            "Net Worth": net_worth,
-        })
-
-    df = pd.DataFrame(rows)
-
+def summarize_run(df: pd.DataFrame, params: dict) -> dict:
     return {
         "df": df,
         "final_net_worth": float(df.iloc[-1]["Net Worth"]),
-        "total_federal_taxes": float(total_federal_taxes),
-        "total_aca_cost": float(total_aca_cost),
-        "total_irmaa_cost": float(total_irmaa_cost),
-        "total_shortfall": float(total_shortfall),
-        "max_magi": float(max_magi),
-        "aca_hit_years": int(aca_hit_years),
-        "irmaa_hit_years": int(irmaa_hit_years),
-        "first_irmaa_year": first_irmaa_year,
-        "owner_ss_start": owner_ss_start,
-        "spouse_ss_start": spouse_ss_start,
+        "total_federal_taxes": float(df["Federal Tax"].sum()),
+        "total_aca_cost": float(df["ACA Cost"].sum()),
+        "total_irmaa_cost": float(df["IRMAA Cost"].sum()),
+        "total_shortfall": float(df["Year Shortfall"].sum()),
+        "max_magi": float(df["MAGI"].max()),
+        "aca_hit_years": int((df["ACA Cost"] > 0).sum()),
+        "irmaa_hit_years": int((df["IRMAA Cost"] > 0).sum()),
+        "first_irmaa_year": int(df.loc[df["IRMAA Cost"] > 0, "Year"].iloc[0]) if (df["IRMAA Cost"] > 0).any() else None,
+        "owner_ss_start": int(params["owner_ss_start"]),
+        "spouse_ss_start": int(params["spouse_ss_start"]),
     }
 
 
-# -----------------------------
-# GOVERNOR DEBUG
-# -----------------------------
-def build_candidate_strategies(max_conversion: float, step: float) -> list:
-    max_conversion = int(max(0, max_conversion))
-    step = int(max(1, step))
-    vals = list(range(0, max_conversion + 1, step))
-    if vals[-1] != max_conversion:
-        vals.append(max_conversion)
-    return sorted(set(vals))
-
-
-def run_governor_debug(base_inputs: dict, max_conversion: float, step: float):
-    candidates = build_candidate_strategies(max_conversion, step)
+def run_model_fixed(inputs: dict) -> dict:
+    params = build_common_params(inputs)
+    state = {
+        "trad": float(inputs["trad"]),
+        "roth": float(inputs["roth"]),
+        "brokerage": float(inputs["brokerage"]),
+        "cash": float(inputs["cash"]),
+    }
+    annual_conversion = float(inputs["annual_conversion"])
 
     rows = []
-    details = {}
-
-    for conv in candidates:
-        test_inputs = dict(base_inputs)
-        test_inputs["annual_conversion"] = float(conv)
-
-        result = run_model(test_inputs)
-        drag = result["total_federal_taxes"] + result["total_aca_cost"] + result["total_irmaa_cost"]
-
-        row = {
-            "Conversion": float(conv),
-            "Final Net Worth": result["final_net_worth"],
-            "Total Shortfall": result["total_shortfall"],
-            "Shortfall OK": result["total_shortfall"] <= 0.01,
-            "Total Federal Taxes": result["total_federal_taxes"],
-            "Total ACA Cost": result["total_aca_cost"],
-            "Total IRMAA Cost": result["total_irmaa_cost"],
-            "Total Government Drag": drag,
-            "Max MAGI": result["max_magi"],
-            "ACA Hit Years": result["aca_hit_years"],
-            "IRMAA Hit Years": result["irmaa_hit_years"],
-            "First IRMAA Year": result["first_irmaa_year"] if result["first_irmaa_year"] is not None else "",
-        }
-
+    for year in range(START_YEAR, END_YEAR + 1):
+        state, row = simulate_one_year(year, state, params, annual_conversion)
         rows.append(row)
-        details[float(conv)] = result
 
     df = pd.DataFrame(rows)
+    return summarize_run(df, params)
 
-    best_raw = df.sort_values(
-        by=["Final Net Worth", "Total Government Drag", "Conversion"],
-        ascending=[False, True, True]
-    ).reset_index(drop=True)
 
-    feasible = df[df["Shortfall OK"]].copy()
-    if not feasible.empty:
-        best_feasible = feasible.sort_values(
-            by=["Final Net Worth", "Total Government Drag", "Conversion"],
-            ascending=[False, True, True]
-        ).reset_index(drop=True)
-    else:
-        best_feasible = df.sort_values(
-            by=["Total Shortfall", "Final Net Worth", "Total Government Drag", "Conversion"],
-            ascending=[True, False, True, True]
-        ).reset_index(drop=True)
+# -----------------------------
+# DYNAMIC GOVERNOR
+# -----------------------------
+def build_year_candidates(state: dict, year: int, params: dict, max_conversion: float, step: float) -> list:
+    max_conversion = max(0.0, float(max_conversion))
+    step = max(1000.0, float(step))
 
-    return {
-        "candidate_df": df.sort_values(by="Conversion").reset_index(drop=True),
-        "best_raw_df": best_raw,
-        "best_feasible_df": best_feasible,
-        "details": details,
+    coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
+    aca_lives = coverage["aca_lives"]
+    medicare_lives = coverage["medicare_lives"]
+
+    # Base grid
+    candidates = [0.0]
+    current = 0.0
+    while current <= max_conversion + 0.01:
+        candidates.append(round(current, 2))
+        current += step
+
+    # Add useful thresholds
+    candidates.append(min(max_conversion, STANDARD_DEDUCTION_MFJ))
+
+    if aca_lives > 0:
+        candidates.append(min(max_conversion, 84000.0))
+        candidates.append(min(max_conversion, 85000.0))
+
+    if medicare_lives > 0:
+        candidates.append(min(max_conversion, 218000.0))
+
+    # Can't convert more than available Trad after growth approximation would allow.
+    trad_cap = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
+    candidates = [min(c, trad_cap, max_conversion) for c in candidates]
+    candidates = sorted(set(round(c, 2) for c in candidates if c >= 0))
+
+    return candidates
+
+
+def score_year_candidate(row: dict) -> tuple:
+    # Feasibility first, then higher end net worth, then lower drag, then lower conversion
+    shortfall_ok = row["Year Shortfall"] <= 0.01
+    drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
+    return (
+        1 if shortfall_ok else 0,
+        row["Net Worth"],
+        -drag,
+        -row["Chosen Conversion"],
+    )
+
+
+def run_model_dynamic_greedy(inputs: dict, max_conversion: float, step: float) -> dict:
+    params = build_common_params(inputs)
+    state = {
+        "trad": float(inputs["trad"]),
+        "roth": float(inputs["roth"]),
+        "brokerage": float(inputs["brokerage"]),
+        "cash": float(inputs["cash"]),
     }
+
+    chosen_rows = []
+    decision_rows = []
+
+    for year in range(START_YEAR, END_YEAR + 1):
+        candidates = build_year_candidates(state, year, params, max_conversion, step)
+
+        tested = []
+        best_state = None
+        best_row = None
+
+        for c in candidates:
+            next_state, row = simulate_one_year(year, dict(state), params, c)
+            tested.append({
+                "Year": year,
+                "Candidate Conversion": c,
+                "Net Worth": row["Net Worth"],
+                "Year Shortfall": row["Year Shortfall"],
+                "Federal Tax": row["Federal Tax"],
+                "ACA Cost": row["ACA Cost"],
+                "IRMAA Cost": row["IRMAA Cost"],
+                "MAGI": row["MAGI"],
+                "Shortfall OK": row["Year Shortfall"] <= 0.01,
+            })
+
+            if best_row is None or score_year_candidate(row) > score_year_candidate(best_row):
+                best_row = row
+                best_state = next_state
+
+        decision_rows.extend(tested)
+        chosen_rows.append(best_row)
+        state = best_state
+
+    chosen_df = pd.DataFrame(chosen_rows)
+    decision_df = pd.DataFrame(decision_rows)
+
+    result = summarize_run(chosen_df, params)
+    result["decision_df"] = decision_df
+    return result
+
+
+# -----------------------------
+# DISPLAY
+# -----------------------------
+def render_summary(title: str, result: dict):
+    st.subheader(title)
+    st.write(f"Owner SS Start Year: {result['owner_ss_start']}")
+    st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
+    st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
+    st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
+    st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
+    st.write(f"Total IRMAA Cost: ${result['total_irmaa_cost']:,.0f}")
+    st.write(f"Total Government Drag: ${result['total_federal_taxes'] + result['total_aca_cost'] + result['total_irmaa_cost']:,.0f}")
+    st.write(f"Total Shortfall: ${result['total_shortfall']:,.0f}")
+    st.write(f"Max MAGI: ${result['max_magi']:,.0f}")
+    st.write(f"ACA Hit Years: {result['aca_hit_years']}")
+    st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
+    st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
 
 
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Debug Build with Tax Fallback")
+st.title("Retirement Model — Dynamic Governor")
 
 st.header("Household Inputs")
 
@@ -602,21 +639,23 @@ conversion_tax_funding_policy = st.selectbox(
     ],
     index=0,
 )
-st.caption("This build automatically falls back to Trad then Roth if the preferred source is insufficient.")
+st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
 
-st.header("Governor Debug Inputs")
+st.header("Flat Strategy Test")
+annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0)
+
+st.header("Dynamic Governor Inputs")
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=100000.0, step=5000.0)
 conversion_step = st.number_input("Conversion Step Size", min_value=1000.0, value=10000.0, step=1000.0)
-inspect_conversion = st.number_input("Inspect Conversion Amount", min_value=0.0, value=0.0, step=10000.0)
 
-base_inputs = {
+inputs = {
     "trad": trad,
     "roth": roth,
     "brokerage": brokerage,
     "cash": cash,
     "growth": growth,
     "annual_spending": annual_spending,
-    "annual_conversion": 0.0,
+    "annual_conversion": annual_conversion,
     "conversion_tax_funding_policy": conversion_tax_funding_policy,
     "owner_current_age": owner_current_age,
     "spouse_current_age": spouse_current_age,
@@ -628,31 +667,20 @@ base_inputs = {
     "spouse_aca_end_year": spouse_aca_end_year,
 }
 
-if st.button("Run Governor Debug"):
-    output = run_governor_debug(base_inputs, max_conversion, conversion_step)
+btn1, btn2 = st.columns(2)
 
-    st.subheader("Best RAW Strategy")
-    st.dataframe(output["best_raw_df"].head(5), use_container_width=True)
-
-    st.subheader("Best FEASIBLE Strategy")
-    st.dataframe(output["best_feasible_df"].head(5), use_container_width=True)
-
-    st.subheader("Governor Candidate Table")
-    st.dataframe(output["candidate_df"], use_container_width=True)
-
-    chosen = float(inspect_conversion)
-    if chosen not in output["details"]:
-        st.warning("Inspect Conversion Amount was not one of the tested candidates.")
-    else:
-        result = output["details"][chosen]
-        st.subheader(f"Yearly Debug for Chosen Conversion = ${chosen:,.0f}")
-        st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
-        st.write(f"Total Shortfall: ${result['total_shortfall']:,.0f}")
-        st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
-        st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
-        st.write(f"Total IRMAA Cost: ${result['total_irmaa_cost']:,.0f}")
-        st.write(f"Max MAGI: ${result['max_magi']:,.0f}")
-        st.write(f"ACA Hit Years: {result['aca_hit_years']}")
-        st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
-        st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
+with btn1:
+    if st.button("Run Flat Strategy Test"):
+        result = run_model_fixed(inputs)
+        render_summary("Flat Strategy Summary", result)
+        st.subheader("Flat Strategy Yearly Results")
         st.dataframe(result["df"], use_container_width=True)
+
+with btn2:
+    if st.button("Run Dynamic Year-by-Year Governor"):
+        result = run_model_dynamic_greedy(inputs, max_conversion, conversion_step)
+        render_summary("Dynamic Governor Summary", result)
+        st.subheader("Chosen Year-by-Year Path")
+        st.dataframe(result["df"], use_container_width=True)
+        st.subheader("Per-Year Candidate Testing")
+        st.dataframe(result["decision_df"], use_container_width=True)
