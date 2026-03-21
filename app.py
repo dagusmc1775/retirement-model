@@ -19,12 +19,6 @@ FEDERAL_BRACKETS_MFJ = [
 
 STANDARD_DEDUCTION_MFJ = 30000.0
 
-ACA_MAGI_THRESHOLD_MFJ = 80000.0
-ACA_SURCHARGE_RATE = 0.085
-
-IRMAA_THRESHOLD_MFJ = 206000.0
-IRMAA_SURCHARGE = 4000.0
-
 
 # -----------------------------
 # TAX HELPERS
@@ -81,10 +75,19 @@ def calculate_federal_tax(other_ordinary_income, total_ss):
     }
 
 
-def calculate_aca_cost(magi):
+# -----------------------------
+# ACA / IRMAA
+# -----------------------------
+def calculate_household_aca_cost(magi):
+    """
+    User-provided simplified ACA schedule:
+    - <= 30k: 1,103.76
+    - 84k: 8,364
+    - > 85k: 27,996 cliff
+    Linear interpolation between 30k and 84k.
+    """
     magi = max(0.0, float(magi))
 
-    # User-provided ACA pricing points
     low_income = 30000.0
     low_cost = 1103.76
 
@@ -100,7 +103,6 @@ def calculate_aca_cost(magi):
         slope = (high_cost - low_cost) / (high_income - low_income)
         aca_cost = low_cost + slope * (magi - low_income)
     elif magi <= cliff_income:
-        # Hold the 84k value until the cliff
         aca_cost = high_cost
     else:
         aca_cost = cliff_cost
@@ -108,11 +110,14 @@ def calculate_aca_cost(magi):
     assert aca_cost >= 0, "ACA cost negative"
     return aca_cost
 
-def calculate_irmaa_cost(magi):
+
+def calculate_household_irmaa_cost(magi):
+    """
+    User-provided IRMAA table.
+    Assumes 'Total IRMAA surcharge (mo)' is household monthly total.
+    """
     magi = max(0.0, float(magi))
 
-    # Assumes the "Total IRMAA surcharge (mo)" you gave is household total monthly surcharge.
-    # Annual IRMAA = monthly surcharge * 12
     if magi <= 218000:
         monthly_total = 0.0
     elif magi <= 274000:
@@ -127,9 +132,23 @@ def calculate_irmaa_cost(magi):
         monthly_total = 578.0
 
     irmaa_cost = monthly_total * 12.0
-
     assert irmaa_cost >= 0, "IRMAA cost negative"
     return irmaa_cost
+
+
+def calculate_prorated_aca_cost(magi, aca_lives):
+    household_cost = calculate_household_aca_cost(magi)
+    aca_cost = household_cost * (aca_lives / 2.0)
+    assert aca_cost >= 0, "Prorated ACA cost negative"
+    return aca_cost
+
+
+def calculate_prorated_irmaa_cost(magi, medicare_lives):
+    household_cost = calculate_household_irmaa_cost(magi)
+    irmaa_cost = household_cost * (medicare_lives / 2.0)
+    assert irmaa_cost >= 0, "Prorated IRMAA cost negative"
+    return irmaa_cost
+
 
 # -----------------------------
 # ACCOUNT HELPERS
@@ -246,6 +265,24 @@ def ss_start_year_from_current_age(start_year, current_age, claim_age):
 
 
 # -----------------------------
+# COVERAGE STATUS
+# -----------------------------
+def get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year):
+    primary_on_aca = year <= primary_aca_end_year
+    spouse_on_aca = year <= spouse_aca_end_year
+
+    aca_lives = int(primary_on_aca) + int(spouse_on_aca)
+    medicare_lives = 2 - aca_lives
+
+    return {
+        "primary_on_aca": primary_on_aca,
+        "spouse_on_aca": spouse_on_aca,
+        "aca_lives": aca_lives,
+        "medicare_lives": medicare_lives,
+    }
+
+
+# -----------------------------
 # CORE MODEL
 # -----------------------------
 def run_model(inputs):
@@ -267,6 +304,9 @@ def run_model(inputs):
     spouse_claim_age = int(inputs["spouse_claim_age"])
     owner_ss_base = float(inputs["owner_ss_base"])
     spouse_ss_base = float(inputs["spouse_ss_base"])
+
+    primary_aca_end_year = int(inputs["primary_aca_end_year"])
+    spouse_aca_end_year = int(inputs["spouse_aca_end_year"])
 
     owner_ss_start = ss_start_year_from_current_age(START_YEAR, owner_current_age, owner_claim_age)
     spouse_ss_start = ss_start_year_from_current_age(START_YEAR, spouse_current_age, spouse_claim_age)
@@ -331,8 +371,13 @@ def run_model(inputs):
         cash = tax_result["cash"]
 
         magi = tax_info["agi"]
-        aca_cost = calculate_aca_cost(magi)
-        irmaa_cost = calculate_irmaa_cost(magi)
+
+        coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
+        aca_lives = coverage["aca_lives"]
+        medicare_lives = coverage["medicare_lives"]
+
+        aca_cost = calculate_prorated_aca_cost(magi, aca_lives) if aca_lives > 0 else 0.0
+        irmaa_cost = calculate_prorated_irmaa_cost(magi, medicare_lives) if medicare_lives > 0 else 0.0
 
         aca_result = withdraw_for_spending(
             aca_cost, trad, roth, brokerage, cash
@@ -403,6 +448,10 @@ def run_model(inputs):
             "Taxable SS": tax_info["taxable_ss"],
             "AGI": tax_info["agi"],
             "MAGI": magi,
+            "Primary On ACA": coverage["primary_on_aca"],
+            "Spouse On ACA": coverage["spouse_on_aca"],
+            "ACA Lives": aca_lives,
+            "Medicare Lives": medicare_lives,
             "Federal Tax": federal_tax,
             "Tax Paid from Cash": tax_result["from_cash"],
             "Tax Paid from Brokerage": tax_result["from_brokerage"],
@@ -531,6 +580,8 @@ def build_validation_messages(df):
         ("AGI >= 0", (df["AGI"] >= 0).all()),
         ("Taxable SS >= 0", (df["Taxable SS"] >= 0).all()),
         ("Shortfall >= 0", (df["Shortfall"] >= 0).all()),
+        ("ACA Lives valid", df["ACA Lives"].isin([0, 1, 2]).all()),
+        ("Medicare Lives valid", df["Medicare Lives"].isin([0, 1, 2]).all()),
     ]
 
 
@@ -570,7 +621,7 @@ def render_result_block(title, result):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Phase 4.3")
+st.title("Retirement Model — Phase 4.4")
 
 st.header("Household Inputs")
 
@@ -593,6 +644,16 @@ with col2:
     annual_spending = st.number_input("Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0)
     owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=36000.0, step=1000.0)
     spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=24000.0, step=1000.0)
+
+st.header("Coverage Timing")
+
+coverage_col1, coverage_col2 = st.columns(2)
+
+with coverage_col1:
+    primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=2030, step=1)
+
+with coverage_col2:
+    spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=2034, step=1)
 
 st.header("Tax Funding Policy")
 
@@ -629,6 +690,8 @@ base_inputs = {
     "spouse_claim_age": spouse_claim_age,
     "owner_ss_base": owner_ss_base,
     "spouse_ss_base": spouse_ss_base,
+    "primary_aca_end_year": primary_aca_end_year,
+    "spouse_aca_end_year": spouse_aca_end_year,
 }
 
 col_a, col_b = st.columns(2)
