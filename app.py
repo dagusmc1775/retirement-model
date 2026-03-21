@@ -20,10 +20,10 @@ FEDERAL_BRACKETS_MFJ = [
 STANDARD_DEDUCTION_MFJ = 30000.0
 
 ACA_MAGI_THRESHOLD_MFJ = 80000.0
-ACA_SURCHARGE_RATE = 0.085  # simplified placeholder
+ACA_SURCHARGE_RATE = 0.085
 
 IRMAA_THRESHOLD_MFJ = 206000.0
-IRMAA_SURCHARGE = 4000.0  # simplified annual household placeholder
+IRMAA_SURCHARGE = 4000.0
 
 
 # -----------------------------
@@ -82,19 +82,54 @@ def calculate_federal_tax(other_ordinary_income, total_ss):
 
 
 def calculate_aca_cost(magi):
-    magi = max(0.0, magi)
-    excess = max(0.0, magi - ACA_MAGI_THRESHOLD_MFJ)
-    aca_cost = excess * ACA_SURCHARGE_RATE
+    magi = max(0.0, float(magi))
+
+    # User-provided ACA pricing points
+    low_income = 30000.0
+    low_cost = 1103.76
+
+    high_income = 84000.0
+    high_cost = 8364.0
+
+    cliff_income = 85000.0
+    cliff_cost = 27996.0
+
+    if magi <= low_income:
+        aca_cost = low_cost
+    elif magi <= high_income:
+        slope = (high_cost - low_cost) / (high_income - low_income)
+        aca_cost = low_cost + slope * (magi - low_income)
+    elif magi <= cliff_income:
+        # Hold the 84k value until the cliff
+        aca_cost = high_cost
+    else:
+        aca_cost = cliff_cost
+
     assert aca_cost >= 0, "ACA cost negative"
     return aca_cost
 
-
 def calculate_irmaa_cost(magi):
-    magi = max(0.0, magi)
-    irmaa_cost = IRMAA_SURCHARGE if magi > IRMAA_THRESHOLD_MFJ else 0.0
+    magi = max(0.0, float(magi))
+
+    # Assumes the "Total IRMAA surcharge (mo)" you gave is household total monthly surcharge.
+    # Annual IRMAA = monthly surcharge * 12
+    if magi <= 218000:
+        monthly_total = 0.0
+    elif magi <= 274000:
+        monthly_total = 96.0
+    elif magi <= 342000:
+        monthly_total = 240.0
+    elif magi <= 410000:
+        monthly_total = 385.0
+    elif magi <= 750000:
+        monthly_total = 530.0
+    else:
+        monthly_total = 578.0
+
+    irmaa_cost = monthly_total * 12.0
+
     assert irmaa_cost >= 0, "IRMAA cost negative"
     return irmaa_cost
-
 
 # -----------------------------
 # ACCOUNT HELPERS
@@ -115,15 +150,6 @@ def normalize_balances(trad, roth, brokerage, cash):
 
 
 def withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, policy_name):
-    """
-    Flexible withdrawal engine.
-
-    Policies:
-    - Cash then Brokerage then Trad then Roth
-    - Cash only
-    - Brokerage only
-    - Cash then Brokerage
-    """
     starting_need = amount_needed
     assert amount_needed >= 0, "Amount needed cannot be negative"
 
@@ -189,23 +215,15 @@ def withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, policy_name):
 
 def withdraw_for_spending(amount_needed, trad, roth, brokerage, cash):
     return withdraw_by_policy(
-        amount_needed,
-        trad,
-        roth,
-        brokerage,
-        cash,
-        "Cash then Brokerage then Trad then Roth",
+        amount_needed, trad, roth, brokerage, cash,
+        "Cash then Brokerage then Trad then Roth"
     )
 
 
 def withdraw_for_conversion_tax(amount_needed, trad, roth, brokerage, cash, conversion_tax_funding_policy):
     return withdraw_by_policy(
-        amount_needed,
-        trad,
-        roth,
-        brokerage,
-        cash,
-        conversion_tax_funding_policy,
+        amount_needed, trad, roth, brokerage, cash,
+        conversion_tax_funding_policy
     )
 
 
@@ -224,8 +242,7 @@ def annual_ss_benefit(base_benefit_at_67, claim_age):
 
 
 def ss_start_year_from_current_age(start_year, current_age, claim_age):
-    years_until_claim = claim_age - current_age
-    return int(start_year + years_until_claim)
+    return int(start_year + (claim_age - current_age))
 
 
 # -----------------------------
@@ -279,23 +296,19 @@ def run_model(inputs):
         soy_brokerage = brokerage
         soy_cash = cash
 
-        # Growth
         trad *= (1 + growth)
         roth *= (1 + growth)
         brokerage *= (1 + growth)
 
-        # Social Security to cash
         owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
         spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
         total_ss = owner_ss + spouse_ss
         cash = deposit_cash(total_ss, cash)
 
-        # Conversion
         conversion = min(annual_conversion, trad)
         trad -= conversion
         roth += conversion
 
-        # Spending first
         spend_result = withdraw_for_spending(
             annual_spending, trad, roth, brokerage, cash
         )
@@ -304,13 +317,11 @@ def run_model(inputs):
         brokerage = spend_result["brokerage"]
         cash = spend_result["cash"]
 
-        # Base tax calculation using conversion + trad spent for living
         other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
 
         tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
         federal_tax = tax_info["federal_tax"]
 
-        # Pay federal tax using user-selected conversion tax funding policy
         tax_result = withdraw_for_conversion_tax(
             federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy
         )
@@ -319,7 +330,6 @@ def run_model(inputs):
         brokerage = tax_result["brokerage"]
         cash = tax_result["cash"]
 
-        # ACA / IRMAA on simplified MAGI placeholder
         magi = tax_info["agi"]
         aca_cost = calculate_aca_cost(magi)
         irmaa_cost = calculate_irmaa_cost(magi)
@@ -412,14 +422,12 @@ def run_model(inputs):
 
     df = pd.DataFrame(results)
 
-    final_net_worth = float(df.iloc[-1]["Net Worth"])
-
     return {
         "df": df,
         "total_federal_taxes": total_federal_taxes,
         "total_aca_cost": total_aca_cost,
         "total_irmaa_cost": total_irmaa_cost,
-        "final_net_worth": final_net_worth,
+        "final_net_worth": float(df.iloc[-1]["Net Worth"]),
         "owner_ss_start": owner_ss_start,
         "spouse_ss_start": spouse_ss_start,
         "total_shortfall": total_shortfall,
@@ -452,14 +460,8 @@ def build_candidate_strategies(max_conversion, step):
 
 
 def score_result(result):
-    final_net_worth = result["final_net_worth"]
-    shortfall = result["total_shortfall"]
-    total_drag = (
-        result["total_federal_taxes"]
-        + result["total_aca_cost"]
-        + result["total_irmaa_cost"]
-    )
-    return final_net_worth - (shortfall * 1000.0) - total_drag
+    total_drag = result["total_federal_taxes"] + result["total_aca_cost"] + result["total_irmaa_cost"]
+    return result["final_net_worth"] - (result["total_shortfall"] * 1000.0) - total_drag
 
 
 def run_optimizer(base_inputs, max_conversion, conversion_step):
@@ -473,13 +475,7 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
         candidate_inputs["annual_conversion"] = candidate_conversion
 
         result = run_model(candidate_inputs)
-        score = score_result(result)
-
-        total_drag = (
-            result["total_federal_taxes"]
-            + result["total_aca_cost"]
-            + result["total_irmaa_cost"]
-        )
+        total_drag = result["total_federal_taxes"] + result["total_aca_cost"] + result["total_irmaa_cost"]
 
         row = {
             "Annual Conversion Strategy": candidate_conversion,
@@ -493,15 +489,13 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
             "ACA Hit Years": result["aca_hit_years"],
             "IRMAA Hit Years": result["irmaa_hit_years"],
             "First IRMAA Year": result["first_irmaa_year"] if result["first_irmaa_year"] is not None else "",
-            "Score": score,
+            "Score": score_result(result),
         }
 
         summary_rows.append(row)
         detailed_results[candidate_conversion] = result
 
-    summary_df = pd.DataFrame(summary_rows)
-
-    summary_df = summary_df.sort_values(
+    summary_df = pd.DataFrame(summary_rows).sort_values(
         by=[
             "Score",
             "Final Net Worth",
@@ -513,12 +507,11 @@ def run_optimizer(base_inputs, max_conversion, conversion_step):
     ).reset_index(drop=True)
 
     best_conversion = float(summary_df.iloc[0]["Annual Conversion Strategy"])
-    best_result = detailed_results[best_conversion]
 
     return {
         "summary_df": summary_df,
         "best_conversion": best_conversion,
-        "best_result": best_result,
+        "best_result": detailed_results[best_conversion],
     }
 
 
@@ -541,25 +534,43 @@ def build_validation_messages(df):
     ]
 
 
-def render_validation(validation_messages):
+def render_validation(df):
     all_pass = True
-    for label, passed in validation_messages:
+    for label, passed in build_validation_messages(df):
         if passed:
             st.success(f"PASS — {label}")
         else:
             st.error(f"FAIL — {label}")
             all_pass = False
-
     if all_pass:
         st.success("MODEL STATUS: PASS")
     else:
         st.error("MODEL STATUS: FAIL")
 
 
+def render_result_block(title, result):
+    df = result["df"]
+    st.subheader(title)
+    st.write(f"Owner SS Start Year: {result['owner_ss_start']}")
+    st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
+    st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
+    st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
+    st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
+    st.write(f"Total IRMAA Cost: ${result['total_irmaa_cost']:,.0f}")
+    st.write(f"Total Government Drag: ${result['total_federal_taxes'] + result['total_aca_cost'] + result['total_irmaa_cost']:,.0f}")
+    st.write(f"Total Shortfall: ${result['total_shortfall']:,.0f}")
+    st.write(f"Max MAGI: ${result['max_magi']:,.0f}")
+    st.write(f"ACA Hit Years: {result['aca_hit_years']}")
+    st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
+    st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
+    render_validation(df)
+    st.dataframe(df, use_container_width=True)
+
+
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Phase 4.2")
+st.title("Retirement Model — Phase 4.3")
 
 st.header("Household Inputs")
 
@@ -596,8 +607,10 @@ conversion_tax_funding_policy = st.selectbox(
     index=0,
 )
 
-st.header("Governor Inputs")
+st.header("Single Strategy Test")
+forced_conversion = st.number_input("Forced Annual Conversion", min_value=0.0, value=50000.0, step=5000.0)
 
+st.header("Governor Inputs")
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=100000.0, step=5000.0)
 conversion_step = st.number_input("Conversion Step Size", min_value=1000.0, value=10000.0, step=1000.0)
 
@@ -618,46 +631,29 @@ base_inputs = {
     "spouse_ss_base": spouse_ss_base,
 }
 
-if st.button("Run Governor"):
-    try:
-        optimizer_output = run_optimizer(base_inputs, max_conversion, conversion_step)
+col_a, col_b = st.columns(2)
 
-        summary_df = optimizer_output["summary_df"]
-        best_conversion = optimizer_output["best_conversion"]
-        best_result = optimizer_output["best_result"]
-        best_df = best_result["df"]
+with col_a:
+    if st.button("Run Single Strategy Test"):
+        try:
+            test_inputs = dict(base_inputs)
+            test_inputs["annual_conversion"] = forced_conversion
+            result = run_model(test_inputs)
+            render_result_block(f"Single Strategy Test — ${forced_conversion:,.0f}/year", result)
+        except AssertionError as e:
+            st.error(f"VALIDATION FAILED: {e}")
+        except Exception as e:
+            st.error(f"UNEXPECTED ERROR: {e}")
 
-        st.subheader("Winning Strategy")
-        st.write(f"Winning Annual Conversion: ${best_conversion:,.0f}")
-        st.write(f"Owner SS Start Year: {best_result['owner_ss_start']}")
-        st.write(f"Spouse SS Start Year: {best_result['spouse_ss_start']}")
-        st.write(f"Final Net Worth: ${best_result['final_net_worth']:,.0f}")
-        st.write(f"Total Federal Taxes: ${best_result['total_federal_taxes']:,.0f}")
-        st.write(f"Total ACA Cost: ${best_result['total_aca_cost']:,.0f}")
-        st.write(f"Total IRMAA Cost: ${best_result['total_irmaa_cost']:,.0f}")
-        st.write(
-            f"Total Government Drag: "
-            f"${best_result['total_federal_taxes'] + best_result['total_aca_cost'] + best_result['total_irmaa_cost']:,.0f}"
-        )
-        st.write(f"Total Shortfall: ${best_result['total_shortfall']:,.0f}")
-        st.write(f"Max MAGI: ${best_result['max_magi']:,.0f}")
-        st.write(f"ACA Hit Years: {best_result['aca_hit_years']}")
-        st.write(f"IRMAA Hit Years: {best_result['irmaa_hit_years']}")
-        st.write(
-            f"First IRMAA Year: "
-            f"{best_result['first_irmaa_year'] if best_result['first_irmaa_year'] is not None else 'None'}"
-        )
-
-        st.subheader("Winning Strategy Validation")
-        render_validation(build_validation_messages(best_df))
-
-        st.subheader("Strategy Comparison")
-        st.dataframe(summary_df, use_container_width=True)
-
-        st.subheader("Winning Strategy Yearly Results")
-        st.dataframe(best_df, use_container_width=True)
-
-    except AssertionError as e:
-        st.error(f"VALIDATION FAILED: {e}")
-    except Exception as e:
-        st.error(f"UNEXPECTED ERROR: {e}")
+with col_b:
+    if st.button("Run Governor"):
+        try:
+            optimizer_output = run_optimizer(base_inputs, max_conversion, conversion_step)
+            st.subheader("Winning Strategy")
+            st.write(f"Winning Annual Conversion: ${optimizer_output['best_conversion']:,.0f}")
+            st.dataframe(optimizer_output["summary_df"], use_container_width=True)
+            render_result_block("Winning Strategy Details", optimizer_output["best_result"])
+        except AssertionError as e:
+            st.error(f"VALIDATION FAILED: {e}")
+        except Exception as e:
+            st.error(f"UNEXPECTED ERROR: {e}")
