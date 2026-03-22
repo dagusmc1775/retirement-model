@@ -10,6 +10,7 @@ END_YEAR = 2045
 UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
 ACA_CLIFF_MFJ = 85000.0
+ACA_HEADROOM_BUFFER = 1.0
 IRMAA_FIRST_CLIFF_MFJ = 218000.0
 
 # -----------------------------
@@ -360,6 +361,22 @@ def calculate_magi(agi: float, year: int) -> float:
     return max(0.0, float(agi))
 
 
+def get_aca_magi_limit(year: int, aca_lives: int) -> float:
+    _ = year
+    if aca_lives <= 0:
+        return float('inf')
+    return max(0.0, ACA_CLIFF_MFJ - ACA_HEADROOM_BUFFER)
+
+
+def get_earned_income_for_year(year: int, params: dict) -> float:
+    amount = float(params.get('earned_income_annual', 0.0))
+    start_year = int(params.get('earned_income_start_year', START_YEAR))
+    end_year = int(params.get('earned_income_end_year', START_YEAR - 1))
+    if start_year <= year <= end_year:
+        return amount
+    return 0.0
+
+
 # -----------------------------
 # ACCOUNTING CONTRACT / VALIDATION
 # -----------------------------
@@ -370,7 +387,7 @@ def approx_equal(a: float, b: float, tol: float = 0.01) -> bool:
 def validate_row_accounting(row: dict, year: int) -> list:
     issues = []
 
-    expected_other_ordinary = float(row["Conversion Income Component"] + row["Trad Withdrawal Income Component"])
+    expected_other_ordinary = float(row["Conversion Income Component"] + row["Trad Withdrawal Income Component"] + row.get("Earned Income", 0.0))
     expected_agi = float(row["Other Ordinary Income"] + row["Taxable SS"] + row.get("Brokerage Realized LTCG", 0.0))
     expected_magi = calculate_magi(expected_agi, year)
     expected_taxable_income = max(0.0, row.get("Ordinary Taxable Income", 0.0) + row.get("LTCG Taxable Income", 0.0))
@@ -406,6 +423,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
                 "spouse_ss_base": 0.0,
+                "earned_income_annual": 0.0,
+                "earned_income_start_year": 2024,
+                "earned_income_end_year": 2024,
                 "primary_aca_end_year": 2024,
                 "spouse_aca_end_year": 2024,
             },
@@ -432,6 +452,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
                 "spouse_ss_base": 0.0,
+                "earned_income_annual": 0.0,
+                "earned_income_start_year": 2024,
+                "earned_income_end_year": 2024,
                 "primary_aca_end_year": 2024,
                 "spouse_aca_end_year": 2024,
             },
@@ -511,6 +534,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
                 "spouse_ss_base": 0.0,
+                "earned_income_annual": 0.0,
+                "earned_income_start_year": 2024,
+                "earned_income_end_year": 2024,
                 "primary_aca_end_year": 2024,
                 "spouse_aca_end_year": 2024,
             },
@@ -805,6 +831,9 @@ def build_common_params(inputs: dict) -> dict:
         "spouse_ss_start": spouse_ss_start,
         "owner_ss_annual": owner_ss_annual,
         "spouse_ss_annual": spouse_ss_annual,
+        "earned_income_annual": float(inputs.get("earned_income_annual", 0.0)),
+        "earned_income_start_year": int(inputs.get("earned_income_start_year", START_YEAR)),
+        "earned_income_end_year": int(inputs.get("earned_income_end_year", START_YEAR - 1)),
         "primary_aca_end_year": int(inputs["primary_aca_end_year"]),
         "spouse_aca_end_year": int(inputs["spouse_aca_end_year"]),
         "household_rmd_start": household_rmd_start,
@@ -868,7 +897,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
     spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
     total_ss = owner_ss + spouse_ss
-    cash += total_ss
+    earned_income = get_earned_income_for_year(year, params)
+    cash += total_ss + earned_income
 
     conversion = min(float(annual_conversion), trad)
     trad -= conversion
@@ -881,7 +911,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     brokerage_basis = spend_result["brokerage_basis"]
     cash = spend_result["cash"]
 
-    other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
+    other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"] + earned_income
     realized_ltcg = spend_result["realized_ltcg"]
     tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
     federal_tax = tax_info["federal_tax"]
@@ -948,6 +978,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Spouse SS": spouse_ss,
         "Total SS": total_ss,
         "Chosen Conversion": conversion,
+        "Earned Income": earned_income,
         "Conversion Income Component": conversion,
         "Trad Withdrawal Income Component": spend_result["taxable_trad_withdrawal"],
         "Other Ordinary Income": other_ordinary_income,
@@ -1096,6 +1127,7 @@ def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conve
 def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_conversion: float, step_size: float) -> tuple:
     cap = get_year_conversion_cap(state, params, max_conversion)
     step_size = max(1.0, float(step_size))
+    coverage = get_coverage_status(year, int(params["primary_aca_end_year"]), int(params["spouse_aca_end_year"]))
 
     if cap <= 0.0:
         zero_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
@@ -1109,9 +1141,45 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Future Avoided Cost": 0.0,
             "Net Benefit": 0.0,
             "Break-Even Reached": True,
+            "Decision Mode": "No Conversion Available",
             "Reason": "No available traditional balance to convert",
         }])
         return 0.0, zero_row, diag
+
+    if coverage["aca_lives"] > 0:
+        aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
+        tested_rows = []
+        selected_conversion = 0.0
+        selected_row = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+
+        current_conversion = 0.0
+        while current_conversion <= cap + 0.01:
+            path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
+            row = path["df"].iloc[0].to_dict()
+            tested_rows.append({
+                "Year": year,
+                "Decision Mode": "ACA Headroom",
+                "Test Conversion": float(current_conversion),
+                "Test MAGI": float(row["MAGI"]),
+                "ACA MAGI Limit": float(aca_limit),
+                "Within ACA Limit": bool(float(row["MAGI"]) <= aca_limit + 0.01),
+                "Federal Tax": float(row["Federal Tax"]),
+                "ACA Cost": float(row["ACA Cost"]),
+                "IRMAA Cost": float(row["IRMAA Cost"]),
+                "EOY Trad": float(row["EOY Trad"]),
+                "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
+            })
+            if float(row["MAGI"]) <= aca_limit + 0.01:
+                selected_conversion = float(current_conversion)
+                selected_row = row
+                current_conversion += step_size
+            else:
+                break
+
+        diag_df = pd.DataFrame(tested_rows)
+        if not diag_df.empty:
+            diag_df["Selected Conversion After Test"] = selected_conversion
+        return round(selected_conversion, 2), selected_row, diag_df
 
     tested_rows = []
     current_conversion = 0.0
@@ -1119,6 +1187,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     while current_conversion < cap - 0.01:
         next_conversion = min(cap, current_conversion + step_size)
         eval_row = evaluate_conversion_pair(year, state, params, current_conversion, next_conversion)
+        eval_row["Decision Mode"] = "Break-Even"
         tested_rows.append(eval_row)
 
         # Keep stepping while the next increment still has positive or neutral economic value.
@@ -1239,6 +1308,15 @@ with cov1:
 with cov2:
     spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=2034, step=1)
 
+st.header("Earned Income")
+earn1, earn2, earn3 = st.columns(3)
+with earn1:
+    earned_income_annual = st.number_input("Annual Wage Income", min_value=0.0, value=15000.0, step=1000.0)
+with earn2:
+    earned_income_start_year = st.number_input("Wage Income Start Year", min_value=START_YEAR, value=2026, step=1)
+with earn3:
+    earned_income_end_year = st.number_input("Wage Income End Year", min_value=START_YEAR, value=2031, step=1)
+
 st.header("Tax Funding Policy")
 conversion_tax_funding_policy = st.selectbox(
     "Preferred tax funding source",
@@ -1281,6 +1359,9 @@ inputs = {
     "spouse_claim_age": spouse_claim_age,
     "owner_ss_base": owner_ss_base,
     "spouse_ss_base": spouse_ss_base,
+    "earned_income_annual": earned_income_annual,
+    "earned_income_start_year": earned_income_start_year,
+    "earned_income_end_year": earned_income_end_year,
     "primary_aca_end_year": primary_aca_end_year,
     "spouse_aca_end_year": spouse_aca_end_year,
 }
