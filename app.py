@@ -1,45 +1,201 @@
 import streamlit as st
 import pandas as pd
+from bisect import bisect_left
 
 # -----------------------------
 # CONSTANTS
 # -----------------------------
 START_YEAR = 2025
 END_YEAR = 2045
+UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
-STANDARD_DEDUCTION_MFJ = 30000.0
-ACA_CLIFF_MFJ = 85000.0
-IRMAA_FIRST_CLIFF_MFJ = 218000.0
+# -----------------------------
+# YEARLY TABLES
+# Update these over time.
+# Structure is designed so you can add more years later.
+# If a specific year is missing, the model uses the latest prior year available.
+# -----------------------------
 
-BRACKET_TOPS_MFJ = {
-    "10%": 23200.0,
-    "12%": 94300.0,
-    "22%": 201050.0,
-    "24%": 383900.0,
+STANDARD_DEDUCTION_BY_YEAR = {
+    2026: 30000.0,
 }
 
-FEDERAL_BRACKETS_MFJ = [
-    (0, 0.10),
-    (23200, 0.12),
-    (94300, 0.22),
-    (201050, 0.24),
-    (383900, 0.32),
-    (487450, 0.35),
-    (731200, 0.37),
-]
+FEDERAL_BRACKETS_MFJ_BY_YEAR = {
+    2026: [
+        (0, 0.10),
+        (23200, 0.12),
+        (94300, 0.22),
+        (201050, 0.24),
+        (383900, 0.32),
+        (487450, 0.35),
+        (731200, 0.37),
+    ]
+}
 
-UNIFORM_LIFETIME_DIVISOR_73 = 26.5
+BRACKET_TOPS_MFJ_BY_YEAR = {
+    2026: {
+        "10%": 23200.0,
+        "12%": 94300.0,
+        "22%": 201050.0,
+        "24%": 383900.0,
+    }
+}
+
+IRMAA_TABLE_BY_YEAR = {
+    2026: [
+        (-1, 218000, 0.0),
+        (218000, 274000, 96.0),
+        (274000, 342000, 240.0),
+        (342000, 410000, 385.0),
+        (410000, 750000, 530.0),
+        (750000, 99999999, 578.0),
+    ]
+}
+
+# ACA COST TABLES
+# Overall annual cost, not subsidy.
+# 2-person table for MFJ from your provided 2026 values.
+ACA_COST_TABLES = {
+    "2_person": {
+        2026: [
+            (30000, 1104),
+            (31000, 1224),
+            (32000, 1356),
+            (33000, 1476),
+            (34000, 1596),
+            (35000, 1716),
+            (36000, 1848),
+            (37000, 1992),
+            (38000, 2124),
+            (39000, 2280),
+            (40000, 2424),
+            (41000, 2580),
+            (42000, 2736),
+            (43000, 2880),
+            (44000, 3024),
+            (45000, 3180),
+            (46000, 3324),
+            (47000, 3480),
+            (48000, 3636),
+            (49000, 3804),
+            (50000, 3960),
+            (51000, 4128),
+            (52000, 4308),
+            (53000, 4476),
+            (54000, 4644),
+            (55000, 4800),
+            (56000, 4968),
+            (57000, 5148),
+            (58000, 5316),
+            (59000, 5496),
+            (60000, 5676),
+            (61000, 5856),
+            (62000, 6036),
+            (63000, 6228),
+            (64000, 6372),
+            (65000, 6468),
+            (66000, 6564),
+            (67000, 6672),
+            (68000, 6768),
+            (69000, 6864),
+            (70000, 6972),
+            (71000, 7068),
+            (72000, 7164),
+            (73000, 7260),
+            (74000, 7368),
+            (75000, 7464),
+            (76000, 7560),
+            (77000, 7668),
+            (78000, 7764),
+            (79000, 7860),
+            (80000, 7968),
+            (81000, 8064),
+            (82000, 8160),
+            (83000, 8256),
+            (84000, 8364),
+            (85000, 27996),
+        ]
+    },
+    # Placeholder until you provide a true 1-person ACA table.
+    "1_person": {
+        # leave empty for now; code will fallback to half of 2_person
+    }
+}
+
+
+# -----------------------------
+# TABLE LOOKUP HELPERS
+# -----------------------------
+def get_latest_year_value(table_by_year: dict, year: int):
+    available_years = sorted(table_by_year.keys())
+    eligible = [y for y in available_years if y <= year]
+    if not eligible:
+        return table_by_year[available_years[0]]
+    return table_by_year[max(eligible)]
+
+
+def get_standard_deduction(year: int) -> float:
+    return float(get_latest_year_value(STANDARD_DEDUCTION_BY_YEAR, year))
+
+
+def get_federal_brackets(year: int):
+    return get_latest_year_value(FEDERAL_BRACKETS_MFJ_BY_YEAR, year)
+
+
+def get_bracket_tops(year: int):
+    return get_latest_year_value(BRACKET_TOPS_MFJ_BY_YEAR, year)
+
+
+def get_irmaa_table(year: int):
+    return get_latest_year_value(IRMAA_TABLE_BY_YEAR, year)
+
+
+def get_aca_cost_table(year: int, household_key: str):
+    tables = ACA_COST_TABLES.get(household_key, {})
+    if not tables:
+        return None
+    return get_latest_year_value(tables, year)
+
+
+def interpolate_cost_from_table(income: float, points: list) -> float:
+    """
+    points = [(income, overall_cost), ...] ascending by income
+    Uses exact match if present, otherwise linear interpolation between points.
+    If income is above max point, uses last point.
+    If income is below min point, uses first point.
+    """
+    income = float(income)
+    points = sorted(points, key=lambda x: x[0])
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+
+    if income <= xs[0]:
+        return float(ys[0])
+    if income >= xs[-1]:
+        return float(ys[-1])
+
+    idx = bisect_left(xs, income)
+    if xs[idx] == income:
+        return float(ys[idx])
+
+    x0, y0 = xs[idx - 1], ys[idx - 1]
+    x1, y1 = xs[idx], ys[idx]
+
+    slope = (y1 - y0) / (x1 - x0)
+    return float(y0 + slope * (income - x0))
 
 
 # -----------------------------
 # TAX HELPERS
 # -----------------------------
-def calculate_progressive_tax(taxable_income: float) -> float:
+def calculate_progressive_tax(taxable_income: float, year: int) -> float:
     taxable_income = max(0.0, float(taxable_income))
     tax = 0.0
+    brackets = get_federal_brackets(year)
 
-    for i, (lower_bound, rate) in enumerate(FEDERAL_BRACKETS_MFJ):
-        upper_bound = FEDERAL_BRACKETS_MFJ[i + 1][0] if i + 1 < len(FEDERAL_BRACKETS_MFJ) else float("inf")
+    for i, (lower_bound, rate) in enumerate(brackets):
+        upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
         if taxable_income > lower_bound:
             amount_in_bracket = min(taxable_income, upper_bound) - lower_bound
             tax += amount_in_bracket * rate
@@ -47,14 +203,17 @@ def calculate_progressive_tax(taxable_income: float) -> float:
     return max(0.0, tax)
 
 
-def get_marginal_rate_from_taxable_income(taxable_income: float) -> float:
+def get_marginal_rate_from_taxable_income(taxable_income: float, year: int) -> float:
     taxable_income = max(0.0, float(taxable_income))
-    rate = 0.10
-    for i, (lower_bound, bracket_rate) in enumerate(FEDERAL_BRACKETS_MFJ):
-        upper_bound = FEDERAL_BRACKETS_MFJ[i + 1][0] if i + 1 < len(FEDERAL_BRACKETS_MFJ) else float("inf")
+    brackets = get_federal_brackets(year)
+    rate = brackets[0][1]
+
+    for i, (lower_bound, bracket_rate) in enumerate(brackets):
+        upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
         if lower_bound <= taxable_income <= upper_bound:
             rate = bracket_rate
-    return rate
+
+    return float(rate)
 
 
 def calculate_taxable_ss(total_ss: float, other_income: float) -> float:
@@ -73,12 +232,12 @@ def calculate_taxable_ss(total_ss: float, other_income: float) -> float:
     return max(0.0, min(taxable_ss, 0.85 * total_ss))
 
 
-def calculate_federal_tax(other_ordinary_income: float, total_ss: float) -> dict:
+def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: int) -> dict:
     taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income)
     agi = other_ordinary_income + taxable_ss
-    taxable_income = max(0.0, agi - STANDARD_DEDUCTION_MFJ)
-    federal_tax = calculate_progressive_tax(taxable_income)
-    marginal_rate = get_marginal_rate_from_taxable_income(taxable_income)
+    taxable_income = max(0.0, agi - get_standard_deduction(year))
+    federal_tax = calculate_progressive_tax(taxable_income, year)
+    marginal_rate = get_marginal_rate_from_taxable_income(taxable_income, year)
 
     return {
         "taxable_ss": taxable_ss,
@@ -92,54 +251,47 @@ def calculate_federal_tax(other_ordinary_income: float, total_ss: float) -> dict
 # -----------------------------
 # ACA / IRMAA
 # -----------------------------
-def calculate_household_aca_cost(magi: float) -> float:
+def calculate_aca_cost(magi: float, year: int, aca_lives: int) -> float:
+    """
+    Table-driven ACA cost.
+    - 2 lives: uses 2-person ACA table
+    - 1 life: uses 1-person table if available, otherwise half of 2-person table
+    - 0 lives: zero
+    """
     magi = max(0.0, float(magi))
 
-    low_income = 30000.0
-    low_cost = 1103.76
-    high_income = 84000.0
-    high_cost = 8364.0
-    cliff_income = 85000.0
-    cliff_cost = 27996.0
+    if aca_lives <= 0:
+        return 0.0
 
-    if magi <= low_income:
-        aca_cost = low_cost
-    elif magi <= high_income:
-        slope = (high_cost - low_cost) / (high_income - low_income)
-        aca_cost = low_cost + slope * (magi - low_income)
-    elif magi <= cliff_income:
-        aca_cost = high_cost
-    else:
-        aca_cost = cliff_cost
+    if aca_lives == 2:
+        table = get_aca_cost_table(year, "2_person")
+        return interpolate_cost_from_table(magi, table)
 
-    return max(0.0, aca_cost)
+    # aca_lives == 1
+    one_person_table = get_aca_cost_table(year, "1_person")
+    if one_person_table is not None:
+        return interpolate_cost_from_table(magi, one_person_table)
+
+    # fallback until true 1-person table is provided
+    two_person_table = get_aca_cost_table(year, "2_person")
+    return interpolate_cost_from_table(magi, two_person_table) / 2.0
 
 
-def calculate_household_irmaa_cost(magi: float) -> float:
+def calculate_irmaa_cost(magi: float, year: int, medicare_lives: int) -> float:
     magi = max(0.0, float(magi))
+    if medicare_lives <= 0:
+        return 0.0
 
-    if magi <= 218000:
-        monthly_total = 0.0
-    elif magi <= 274000:
-        monthly_total = 96.0
-    elif magi <= 342000:
-        monthly_total = 240.0
-    elif magi <= 410000:
-        monthly_total = 385.0
-    elif magi <= 750000:
-        monthly_total = 530.0
-    else:
-        monthly_total = 578.0
+    table = get_irmaa_table(year)
+    monthly_total_for_household = 0.0
 
-    return max(0.0, monthly_total * 12.0)
+    for start_exclusive, end_inclusive, monthly_total in table:
+        if magi > start_exclusive and magi <= end_inclusive:
+            monthly_total_for_household = monthly_total
+            break
 
-
-def calculate_prorated_aca_cost(magi: float, aca_lives: int) -> float:
-    return calculate_household_aca_cost(magi) * (aca_lives / 2.0)
-
-
-def calculate_prorated_irmaa_cost(magi: float, medicare_lives: int) -> float:
-    return calculate_household_irmaa_cost(magi) * (medicare_lives / 2.0)
+    annual_household = monthly_total_for_household * 12.0
+    return annual_household * (medicare_lives / 2.0)
 
 
 # -----------------------------
@@ -354,10 +506,10 @@ def estimate_future_tax_pressure(row: dict, params: dict) -> float:
     return projected_rmd + projected_ss
 
 
-def estimate_future_marginal_rate(row: dict, params: dict) -> float:
+def estimate_future_marginal_rate(row: dict, params: dict, year: int) -> float:
     pressure = estimate_future_tax_pressure(row, params)
-    taxable_estimate = max(0.0, pressure - STANDARD_DEDUCTION_MFJ)
-    return get_marginal_rate_from_taxable_income(taxable_estimate)
+    taxable_estimate = max(0.0, pressure - get_standard_deduction(year))
+    return get_marginal_rate_from_taxable_income(taxable_estimate, year)
 
 
 def summarize_run(df: pd.DataFrame, params: dict) -> dict:
@@ -424,7 +576,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = spend_result["cash"]
 
     other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
-    tax_info = calculate_federal_tax(other_ordinary_income, total_ss)
+    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year)
     federal_tax = tax_info["federal_tax"]
 
     tax_result = withdraw_for_tax_with_fallback(
@@ -440,8 +592,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
 
-    aca_cost = calculate_prorated_aca_cost(magi, aca_lives) if aca_lives > 0 else 0.0
-    irmaa_cost = calculate_prorated_irmaa_cost(magi, medicare_lives) if medicare_lives > 0 else 0.0
+    aca_cost = calculate_aca_cost(magi, year, aca_lives)
+    irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
 
     aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash)
     trad = aca_result["trad"]
@@ -492,7 +644,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Tax Paid Fallback Roth": tax_result["fallback_from_roth"],
         "ACA Cost": aca_cost,
         "IRMAA Cost": irmaa_cost,
-        "Spend Shortfall": spend_shortfall,
+        "Spend Shortfall": spend_result["shortfall"],
         "Tax Shortfall": tax_shortfall,
         "ACA Shortfall": aca_shortfall,
         "IRMAA Shortfall": irmaa_shortfall,
@@ -555,11 +707,12 @@ def build_betr_candidates(state: dict, year: int, params: dict, max_conversion: 
     cap = min(float(max_conversion), trad_cap)
 
     candidates = [0.0]
+    bracket_tops = get_bracket_tops(year)
 
-    bracket_target_10 = BRACKET_TOPS_MFJ["10%"] + STANDARD_DEDUCTION_MFJ
-    bracket_target_12 = BRACKET_TOPS_MFJ["12%"] + STANDARD_DEDUCTION_MFJ
-    bracket_target_22 = BRACKET_TOPS_MFJ["22%"] + STANDARD_DEDUCTION_MFJ
-    bracket_target_24 = BRACKET_TOPS_MFJ["24%"] + STANDARD_DEDUCTION_MFJ
+    bracket_target_10 = bracket_tops["10%"] + get_standard_deduction(year)
+    bracket_target_12 = bracket_tops["12%"] + get_standard_deduction(year)
+    bracket_target_22 = bracket_tops["22%"] + get_standard_deduction(year)
+    bracket_target_24 = bracket_tops["24%"] + get_standard_deduction(year)
 
     def add_target(target):
         c = conversion_needed_for_target_magi(state, year, params, target)
@@ -609,13 +762,10 @@ def score_betr_candidate(row: dict, baseline_row: dict, year: int, params: dict,
     incremental_conversion = max(0.0, row["Chosen Conversion"] - baseline_row["Chosen Conversion"])
     incremental_current_drag = max(0.0, drag - baseline_drag)
 
-    if incremental_conversion > 0:
-        current_effective_rate = incremental_current_drag / incremental_conversion
-    else:
-        current_effective_rate = 0.0
+    current_effective_rate = (incremental_current_drag / incremental_conversion) if incremental_conversion > 0 else 0.0
 
     future_pressure = estimate_future_tax_pressure(row, params)
-    future_rate = estimate_future_marginal_rate(row, params)
+    future_rate = estimate_future_marginal_rate(row, params, year)
     betr_spread = future_rate - current_effective_rate
 
     over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
@@ -676,7 +826,7 @@ def run_model_betr_governor(inputs: dict, max_conversion: float, rmd_pressure_we
     for year in range(START_YEAR, END_YEAR + 1):
         candidates = build_betr_candidates(state, year, params, max_conversion)
 
-        baseline_state, baseline_row = simulate_one_year(year, dict(state), params, 0.0)
+        _, baseline_row = simulate_one_year(year, dict(state), params, 0.0)
 
         best_state = None
         best_row = None
@@ -691,7 +841,7 @@ def run_model_betr_governor(inputs: dict, max_conversion: float, rmd_pressure_we
             current_effective_rate = (incremental_current_drag / incremental_conversion) if incremental_conversion > 0 else 0.0
 
             future_pressure = estimate_future_tax_pressure(row, params)
-            future_rate = estimate_future_marginal_rate(row, params)
+            future_rate = estimate_future_marginal_rate(row, params, year)
             betr_spread = future_rate - current_effective_rate
 
             aca_lives = int(row["ACA Lives"])
