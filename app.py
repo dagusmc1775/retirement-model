@@ -1149,36 +1149,54 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     if coverage["aca_lives"] > 0:
         aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
         tested_rows = []
+        baseline_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
+        baseline_row = baseline_path["df"].iloc[0].to_dict()
+        baseline_magi = float(baseline_row["MAGI"])
         selected_conversion = 0.0
-        selected_row = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+        selected_row = baseline_row
 
-        current_conversion = 0.0
-        while current_conversion <= cap + 0.01:
+        step_index = 0
+        while True:
+            current_conversion = min(cap, step_index * step_size)
+            if current_conversion > cap + 0.01:
+                break
+
             path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
             row = path["df"].iloc[0].to_dict()
+            within_limit = bool(float(row["MAGI"]) <= aca_limit + 0.01)
             tested_rows.append({
                 "Year": year,
                 "Decision Mode": "ACA Headroom",
+                "Baseline MAGI (0 Conv)": baseline_magi,
+                "ACA MAGI Limit": float(aca_limit),
+                "MAGI Headroom Before Conversion": float(max(0.0, aca_limit - baseline_magi)),
                 "Test Conversion": float(current_conversion),
                 "Test MAGI": float(row["MAGI"]),
-                "ACA MAGI Limit": float(aca_limit),
-                "Within ACA Limit": bool(float(row["MAGI"]) <= aca_limit + 0.01),
+                "MAGI Remaining To Limit": float(aca_limit - float(row["MAGI"])),
+                "Within ACA Limit": within_limit,
                 "Federal Tax": float(row["Federal Tax"]),
                 "ACA Cost": float(row["ACA Cost"]),
                 "IRMAA Cost": float(row["IRMAA Cost"]),
                 "EOY Trad": float(row["EOY Trad"]),
+                "EOY Brokerage": float(row["EOY Brokerage"]),
+                "EOY Cash": float(row["EOY Cash"]),
                 "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
             })
-            if float(row["MAGI"]) <= aca_limit + 0.01:
+            if within_limit:
                 selected_conversion = float(current_conversion)
                 selected_row = row
-                current_conversion += step_size
             else:
                 break
+
+            if current_conversion >= cap - 0.01:
+                break
+            step_index += 1
 
         diag_df = pd.DataFrame(tested_rows)
         if not diag_df.empty:
             diag_df["Selected Conversion After Test"] = selected_conversion
+            diag_df["Selected MAGI"] = float(selected_row["MAGI"])
+            diag_df["ACA Solver Note"] = "ACA years use highest tested conversion that stays within ACA MAGI limit"
         return round(selected_conversion, 2), selected_row, diag_df
 
     tested_rows = []
@@ -1232,6 +1250,19 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         )
 
         state, chosen_row = simulate_one_year(year, dict(state), params, optimal_conversion)
+        coverage = get_coverage_status(year, int(params["primary_aca_end_year"]), int(params["spouse_aca_end_year"]))
+        aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
+        baseline_row = run_projection_from_state(year, dict({
+            "trad": chosen_row["SOY Trad"],
+            "roth": chosen_row["SOY Roth"],
+            "brokerage": chosen_row["SOY Brokerage"],
+            "brokerage_basis": chosen_row["SOY Brokerage Basis"],
+            "cash": chosen_row["SOY Cash"],
+        }), params, first_year_conversion=0.0, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+        chosen_row["ACA MAGI Limit"] = float(aca_limit) if coverage["aca_lives"] > 0 else float('inf')
+        chosen_row["Baseline MAGI (0 Conv)"] = float(baseline_row["MAGI"])
+        chosen_row["ACA Headroom Before Conversion"] = float(max(0.0, aca_limit - baseline_row["MAGI"])) if coverage["aca_lives"] > 0 else 0.0
+        chosen_row["MAGI Remaining To ACA Limit"] = float(aca_limit - chosen_row["MAGI"]) if coverage["aca_lives"] > 0 else float('inf')
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
