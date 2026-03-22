@@ -837,6 +837,8 @@ def build_common_params(inputs: dict) -> dict:
         "primary_aca_end_year": int(inputs["primary_aca_end_year"]),
         "spouse_aca_end_year": int(inputs["spouse_aca_end_year"]),
         "household_rmd_start": household_rmd_start,
+        "post_aca_target_bracket": str(inputs.get("post_aca_target_bracket", "22%")),
+        "rmd_era_target_bracket": str(inputs.get("rmd_era_target_bracket", "22%")),
     }
 
 
@@ -1230,32 +1232,64 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             diag_df["ACA Solver Note"] = "ACA years use highest tested conversion that stays within ACA MAGI limit"
         return round(selected_conversion, 2), selected_row, diag_df
 
+    # Non-ACA years: fill ordinary taxable income to the selected target bracket.
+    target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
+    target_top = get_target_bracket_top(year, target_label)
+    baseline_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
+    baseline_row = baseline_path["df"].iloc[0].to_dict()
+    baseline_ordinary_taxable = float(baseline_row.get("Ordinary Taxable Income", 0.0))
+    target_headroom = max(0.0, float(target_top) - baseline_ordinary_taxable)
+
+    max_test = min(cap, floor_to_step(target_headroom, step_size))
     tested_rows = []
-    current_conversion = 0.0
+    selected_conversion = 0.0
+    selected_row = baseline_row
 
-    while current_conversion < cap - 0.01:
-        next_conversion = min(cap, current_conversion + step_size)
-        eval_row = evaluate_conversion_pair(year, state, params, current_conversion, next_conversion)
-        eval_row["Decision Mode"] = "Break-Even"
-        tested_rows.append(eval_row)
+    step_index = 0
+    while True:
+        current_conversion = min(max_test, step_index * step_size)
+        if current_conversion > max_test + 0.01:
+            break
 
-        # Keep stepping while the next increment still has positive or neutral economic value.
-        if eval_row["Current Marginal Cost"] <= eval_row["Future Avoided Cost"] + 0.01:
-            current_conversion = next_conversion
-            if next_conversion >= cap - 0.01:
-                break
+        path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
+        row = path["df"].iloc[0].to_dict()
+        ordinary_taxable = float(row.get("Ordinary Taxable Income", 0.0))
+        within_limit = bool(ordinary_taxable <= float(target_top) + 0.01)
+        tested_rows.append({
+            "Year": year,
+            "Decision Mode": "Bracket Fill",
+            "Target Bracket": str(target_label),
+            "Target Ordinary Taxable Income": float(target_top),
+            "Baseline Ordinary Taxable Income (0 Conv)": baseline_ordinary_taxable,
+            "Ordinary Income Headroom Before Conversion": float(max(0.0, target_top - baseline_ordinary_taxable)),
+            "Test Conversion": float(current_conversion),
+            "Test Ordinary Taxable Income": ordinary_taxable,
+            "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
+            "Within Target Bracket": within_limit,
+            "Federal Tax": float(row["Federal Tax"]),
+            "ACA Cost": float(row["ACA Cost"]),
+            "IRMAA Cost": float(row["IRMAA Cost"]),
+            "EOY Trad": float(row["EOY Trad"]),
+            "EOY Brokerage": float(row["EOY Brokerage"]),
+            "EOY Cash": float(row["EOY Cash"]),
+            "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
+        })
+        if within_limit:
+            selected_conversion = float(current_conversion)
+            selected_row = row
         else:
             break
 
-    optimal_conversion = round(current_conversion, 2)
-    optimal_path = run_projection_from_state(year, state, params, first_year_conversion=optimal_conversion, later_year_conversion=0.0)
-    optimal_row = optimal_path["df"].iloc[0].to_dict()
+        if current_conversion >= max_test - 0.01:
+            break
+        step_index += 1
 
     diag_df = pd.DataFrame(tested_rows)
     if not diag_df.empty:
-        diag_df["Selected Conversion After Test"] = optimal_conversion
-
-    return optimal_conversion, optimal_row, diag_df
+        diag_df["Selected Conversion After Test"] = selected_conversion
+        diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
+        diag_df["Bracket Solver Note"] = "Non-ACA years use highest tested conversion that stays within target ordinary-income bracket"
+    return round(selected_conversion, 2), selected_row, diag_df
 
 
 def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size: float) -> dict:
@@ -1294,6 +1328,14 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         chosen_row["Baseline MAGI (0 Conv)"] = float(baseline_row["MAGI"])
         chosen_row["ACA Headroom Before Conversion"] = float(max(0.0, aca_limit - baseline_row["MAGI"])) if coverage["aca_lives"] > 0 else 0.0
         chosen_row["MAGI Remaining To ACA Limit"] = float(aca_limit - chosen_row["MAGI"]) if coverage["aca_lives"] > 0 else float('inf')
+        target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
+        target_top = get_target_bracket_top(year, target_label)
+        baseline_ord = float(baseline_row.get("Ordinary Taxable Income", 0.0))
+        chosen_row["Target Bracket"] = "ACA" if coverage["aca_lives"] > 0 else str(target_label)
+        chosen_row["Target Ordinary Taxable Income"] = float(target_top) if coverage["aca_lives"] == 0 else 0.0
+        chosen_row["Baseline Ordinary Taxable Income (0 Conv)"] = baseline_ord
+        chosen_row["Ordinary Income Headroom Before Conversion"] = float(max(0.0, target_top - baseline_ord)) if coverage["aca_lives"] == 0 else 0.0
+        chosen_row["Ordinary Income Remaining To Target"] = float(target_top - float(chosen_row.get("Ordinary Taxable Income", 0.0))) if coverage["aca_lives"] == 0 else 0.0
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
@@ -1405,6 +1447,22 @@ step_size = st.number_input(
     help="Smaller steps improve accuracy but run slower.",
 )
 
+br1, br2 = st.columns(2)
+with br1:
+    post_aca_target_bracket = st.selectbox(
+        "Post-ACA Target Bracket",
+        ["12%", "22%", "24%"],
+        index=1,
+        help="Used in non-ACA years before household RMDs begin.",
+    )
+with br2:
+    rmd_era_target_bracket = st.selectbox(
+        "RMD-Era Target Bracket",
+        ["12%", "22%", "24%"],
+        index=1,
+        help="Used once the household reaches the first RMD year.",
+    )
+
 inputs = {
     "trad": trad,
     "roth": roth,
@@ -1426,6 +1484,8 @@ inputs = {
     "earned_income_end_year": earned_income_end_year,
     "primary_aca_end_year": primary_aca_end_year,
     "spouse_aca_end_year": spouse_aca_end_year,
+    "post_aca_target_bracket": post_aca_target_bracket,
+    "rmd_era_target_bracket": rmd_era_target_bracket,
 }
 
 btn1, btn2 = st.columns(2)
