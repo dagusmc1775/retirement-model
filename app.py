@@ -797,6 +797,30 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
     }
 
 
+
+
+TAX_SOURCE_PENALTY = {
+    "cash": 0.0,
+    "brokerage": 0.02,
+    "trad": 0.08,
+    "roth": 0.25,
+}
+
+
+def determine_tax_source_mix_from_row(row: dict) -> tuple[list[str], float]:
+    sources = []
+    if float(row.get("Tax Paid Preferred Cash", 0.0)) > 1e-9:
+        sources.append("cash")
+    if float(row.get("Tax Paid Preferred Brokerage", 0.0)) > 1e-9:
+        sources.append("brokerage")
+    if float(row.get("Tax Paid Preferred Trad", 0.0)) > 1e-9 or float(row.get("Tax Paid Fallback Trad", 0.0)) > 1e-9:
+        sources.append("trad")
+    if float(row.get("Tax Paid Preferred Roth", 0.0)) > 1e-9 or float(row.get("Tax Paid Fallback Roth", 0.0)) > 1e-9:
+        sources.append("roth")
+    penalty = max((TAX_SOURCE_PENALTY[s] for s in sources), default=0.0)
+    return sources, penalty
+
+
 def normalize_balances(trad: float, roth: float, brokerage: float, cash: float, brokerage_basis: float) -> tuple:
     brokerage = max(0.0, float(brokerage))
     brokerage_basis = min(max(0.0, float(brokerage_basis)), brokerage)
@@ -1047,6 +1071,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "LTCG Tax": tax_info["ltcg_tax"],
         "Tax Paid Preferred Cash": tax_result["preferred_from_cash"],
         "Tax Paid Preferred Brokerage": tax_result["preferred_from_brokerage"],
+        "Tax Paid Preferred Trad": tax_result["preferred_from_trad"],
+        "Tax Paid Preferred Roth": tax_result["preferred_from_roth"],
         "Tax Paid Fallback Trad": tax_result["fallback_from_trad"],
         "Tax Paid Fallback Roth": tax_result["fallback_from_roth"],
         "ACA Cost": aca_cost,
@@ -1060,6 +1086,11 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "EOY Cash": cash,
         "Net Worth": net_worth,
     }
+
+    tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(row)
+    row["Tax Funding Source"] = " + ".join(tax_sources) if tax_sources else "none"
+    row["Tax Funding Penalty"] = tax_source_penalty
+    row["Effective Current Rate (Adjusted)"] = float(row.get("Current Marginal Tax Rate", 0.0)) + tax_source_penalty
 
     accounting_issues = validate_row_accounting(row, year)
     row["Accounting Status"] = "PASS" if not accounting_issues else "FAIL"
@@ -1357,8 +1388,11 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         ordinary_taxable = float(row.get("Ordinary Taxable Income", 0.0))
         current_rate = float(row.get("Current Marginal Tax Rate", 0.0))
         within_target = bool(ordinary_taxable <= float(target_top) + 0.01)
-        betr_ok = bool(current_rate < future_rate - 1e-9) if current_conversion > 0 else True
-        within_limit = within_target and betr_ok
+        tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(row)
+        effective_current_rate = current_rate + tax_source_penalty
+        roth_tax_used = "roth" in tax_sources
+        betr_ok = bool(effective_current_rate < future_rate - 1e-9) if current_conversion > 0 else True
+        within_limit = within_target and betr_ok and (not roth_tax_used)
 
         tested_rows.append({
             "Year": year,
@@ -1372,6 +1406,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
             "Current Marginal Tax Rate": current_rate,
             "Estimated Future Marginal Rate": future_rate,
+            "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
+            "Tax Funding Penalty": float(tax_source_penalty),
+            "Effective Current Rate (Adjusted)": float(effective_current_rate),
+            "Roth Used For Tax Payment": bool(roth_tax_used),
             "Projected Future RMD": float(future_rate_info["projected_future_rmd"]),
             "Projected Future Ordinary Income": float(future_rate_info["projected_future_ordinary_income"]),
             "BETR Stop Trigger Hit": bool(current_rate >= future_rate and current_conversion > 0),
@@ -1443,6 +1481,10 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             "cash": chosen_row["SOY Cash"],
         }), params)
         chosen_row["Estimated Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"])
+        tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(chosen_row)
+        chosen_row["Tax Funding Source"] = " + ".join(tax_sources) if tax_sources else "none"
+        chosen_row["Tax Funding Penalty"] = float(tax_source_penalty)
+        chosen_row["Effective Current Rate (Adjusted)"] = float(chosen_row.get("Current Marginal Tax Rate", 0.0)) + float(tax_source_penalty)
         chosen_row["Projected Future RMD"] = float(future_rate_info["projected_future_rmd"])
         chosen_row["Projected Future Ordinary Income"] = float(future_rate_info["projected_future_ordinary_income"])
         chosen_row["Future Rate Projection Year"] = str(int(future_rate_info["future_year"]))
