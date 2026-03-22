@@ -1445,7 +1445,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         chosen_row["Estimated Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"])
         chosen_row["Projected Future RMD"] = float(future_rate_info["projected_future_rmd"])
         chosen_row["Projected Future Ordinary Income"] = float(future_rate_info["projected_future_ordinary_income"])
-        chosen_row["Future Rate Projection Year"] = int(future_rate_info["future_year"])
+        chosen_row["Future Rate Projection Year"] = str(int(future_rate_info["future_year"]))
         chosen_row["BETR Stop Trigger Hit"] = bool(float(chosen_row.get("Current Marginal Tax Rate", 0.0)) >= float(chosen_row["Estimated Future Marginal Rate"]) and coverage["aca_lives"] == 0 and float(chosen_row.get("Chosen Conversion", 0.0)) > 0)
         chosen_row["ACA MAGI Limit"] = float(aca_limit) if coverage["aca_lives"] > 0 else float('inf')
         chosen_row["Baseline MAGI (0 Conv)"] = float(baseline_row["MAGI"])
@@ -1466,7 +1466,16 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             decision_frames.append(diag_df)
 
     chosen_df = pd.DataFrame(chosen_rows)
+    if not chosen_df.empty:
+        chosen_df = chosen_df.loc[:, ~chosen_df.columns.duplicated()].copy()
+        chosen_df = chosen_df.sort_values("Year").reset_index(drop=True)
+        expected_years = list(range(START_YEAR, START_YEAR + len(chosen_df)))
+        chosen_df["Year"] = expected_years
+        chosen_df = chosen_df.drop_duplicates(subset=["Year"], keep="last").reset_index(drop=True)
+
     decision_df = pd.concat(decision_frames, ignore_index=True) if decision_frames else pd.DataFrame()
+    if not decision_df.empty:
+        decision_df = decision_df.loc[:, ~decision_df.columns.duplicated()].copy()
 
     result = summarize_run(chosen_df, params)
     result["decision_df"] = decision_df
