@@ -34,6 +34,14 @@ FEDERAL_BRACKETS_MFJ_BY_YEAR = {
     ]
 }
 
+LTCG_BRACKETS_MFJ_BY_YEAR = {
+    2026: [
+        (0, 0.00),
+        (96950, 0.15),
+        (600050, 0.20),
+    ]
+}
+
 BRACKET_TOPS_MFJ_BY_YEAR = {
     2026: {
         "10%": 23200.0,
@@ -202,6 +210,10 @@ def get_bracket_tops(year: int):
     return get_latest_year_value(BRACKET_TOPS_MFJ_BY_YEAR, year)
 
 
+def get_ltcg_brackets(year: int):
+    return get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)
+
+
 def get_irmaa_table(year: int):
     return get_latest_year_value(IRMAA_TABLE_BY_YEAR, year)
 
@@ -282,17 +294,61 @@ def calculate_taxable_ss(total_ss: float, other_income: float) -> float:
     return max(0.0, min(taxable_ss, 0.85 * total_ss))
 
 
-def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: int) -> dict:
-    taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income)
-    agi = other_ordinary_income + taxable_ss
-    taxable_income = max(0.0, agi - get_standard_deduction(year))
-    federal_tax = calculate_progressive_tax(taxable_income, year)
-    marginal_rate = get_marginal_rate_from_taxable_income(taxable_income, year)
+def calculate_ltcg_tax(ordinary_taxable_income: float, ltcg_taxable_income: float, year: int) -> float:
+    ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
+    ltcg_taxable_income = max(0.0, float(ltcg_taxable_income))
+    if ltcg_taxable_income <= 0.0:
+        return 0.0
+
+    brackets = get_ltcg_brackets(year)
+    tax = 0.0
+    remaining = ltcg_taxable_income
+    stack_start = ordinary_taxable_income
+
+    for i, (threshold, rate) in enumerate(brackets):
+        next_threshold = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
+        band_start = max(stack_start, threshold)
+        band_end = next_threshold
+        available = max(0.0, band_end - band_start)
+        if available <= 0.0:
+            continue
+        taxed_here = min(remaining, available)
+        tax += taxed_here * rate
+        remaining -= taxed_here
+        stack_start = band_start + taxed_here
+        if remaining <= 0.0:
+            break
+
+    return max(0.0, tax)
+
+
+def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: int, realized_ltcg: float = 0.0) -> dict:
+    other_ordinary_income = max(0.0, float(other_ordinary_income))
+    realized_ltcg = max(0.0, float(realized_ltcg))
+    taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income + realized_ltcg)
+    agi = other_ordinary_income + taxable_ss + realized_ltcg
+
+    standard_deduction = get_standard_deduction(year)
+    ordinary_income_before_deduction = other_ordinary_income + taxable_ss
+    ordinary_taxable_income = max(0.0, ordinary_income_before_deduction - standard_deduction)
+    deduction_remaining_for_ltcg = max(0.0, standard_deduction - ordinary_income_before_deduction)
+    ltcg_taxable_income = max(0.0, realized_ltcg - deduction_remaining_for_ltcg)
+    taxable_income = ordinary_taxable_income + ltcg_taxable_income
+
+    ordinary_tax = calculate_progressive_tax(ordinary_taxable_income, year)
+    ltcg_tax = calculate_ltcg_tax(ordinary_taxable_income, ltcg_taxable_income, year)
+    federal_tax = ordinary_tax + ltcg_tax
+    marginal_rate = get_marginal_rate_from_taxable_income(ordinary_taxable_income, year)
 
     return {
         "taxable_ss": taxable_ss,
         "agi": agi,
         "taxable_income": taxable_income,
+        "ordinary_taxable_income": ordinary_taxable_income,
+        "ltcg_taxable_income": ltcg_taxable_income,
+        "realized_ltcg": realized_ltcg,
+        "ordinary_tax": ordinary_tax,
+        "ltcg_tax": ltcg_tax,
         "federal_tax": federal_tax,
         "marginal_rate": marginal_rate,
     }
@@ -315,19 +371,19 @@ def validate_row_accounting(row: dict, year: int) -> list:
     issues = []
 
     expected_other_ordinary = float(row["Conversion Income Component"] + row["Trad Withdrawal Income Component"])
-    expected_agi = float(row["Other Ordinary Income"] + row["Taxable SS"])
+    expected_agi = float(row["Other Ordinary Income"] + row["Taxable SS"] + row.get("Brokerage Realized LTCG", 0.0))
     expected_magi = calculate_magi(expected_agi, year)
-    expected_taxable_income = max(0.0, expected_agi - get_standard_deduction(year))
+    expected_taxable_income = max(0.0, row.get("Ordinary Taxable Income", 0.0) + row.get("LTCG Taxable Income", 0.0))
     expected_net_worth = float(row["EOY Trad"] + row["EOY Roth"] + row["EOY Brokerage"] + row["EOY Cash"])
 
     if not approx_equal(row["Other Ordinary Income"], expected_other_ordinary):
         issues.append("Other Ordinary Income does not equal conversion + taxable Trad withdrawals")
     if not approx_equal(row["AGI"], expected_agi):
-        issues.append("AGI does not equal Other Ordinary Income + Taxable SS")
+        issues.append("AGI does not equal Other Ordinary Income + Taxable SS + Brokerage Realized LTCG")
     if not approx_equal(row["MAGI"], expected_magi):
         issues.append("MAGI does not match canonical MAGI function")
     if not approx_equal(row["Taxable Income"], expected_taxable_income):
-        issues.append("Taxable Income does not equal max(0, AGI - standard deduction)")
+        issues.append("Taxable Income does not equal Ordinary Taxable Income + LTCG Taxable Income")
     if not approx_equal(row["Net Worth"], expected_net_worth):
         issues.append("Net Worth does not equal ending balances sum")
 
@@ -577,17 +633,20 @@ def ss_start_year_from_current_age(start_year: int, current_age: int, claim_age:
 # -----------------------------
 # WITHDRAWAL ENGINE
 # -----------------------------
-def withdraw_by_policy(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, policy_name: str) -> dict:
+def withdraw_by_policy(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, policy_name: str, brokerage_basis: float | None = None) -> dict:
     amount_needed = max(0.0, float(amount_needed))
     trad = float(trad)
     roth = float(roth)
     brokerage = float(brokerage)
     cash = float(cash)
+    brokerage_basis = brokerage if brokerage_basis is None else max(0.0, float(brokerage_basis))
+    brokerage_basis = min(brokerage_basis, brokerage)
 
     from_cash = 0.0
     from_brokerage = 0.0
     from_trad = 0.0
     from_roth = 0.0
+    realized_ltcg = 0.0
 
     if policy_name == "Cash then Brokerage then Trad then Roth":
         draw_order = ["cash", "brokerage", "trad", "roth"]
@@ -615,6 +674,12 @@ def withdraw_by_policy(amount_needed: float, trad: float, roth: float, brokerage
             from_cash += take
         elif source == "brokerage":
             take = min(brokerage, amount_needed)
+            if brokerage > 0 and take > 0:
+                gain_ratio = max(0.0, (brokerage - brokerage_basis) / brokerage)
+                realized_gain = take * gain_ratio
+                basis_used = take - realized_gain
+                brokerage_basis = max(0.0, brokerage_basis - basis_used)
+                realized_ltcg += realized_gain
             brokerage -= take
             amount_needed -= take
             from_brokerage += take
@@ -639,22 +704,24 @@ def withdraw_by_policy(amount_needed: float, trad: float, roth: float, brokerage
         "trad": trad,
         "roth": roth,
         "brokerage": brokerage,
+        "brokerage_basis": brokerage_basis,
         "cash": cash,
         "from_cash": from_cash,
         "from_brokerage": from_brokerage,
         "from_trad": from_trad,
         "from_roth": from_roth,
         "taxable_trad_withdrawal": from_trad,
+        "realized_ltcg": realized_ltcg,
         "shortfall": shortfall,
     }
 
 
-def withdraw_for_spending(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float) -> dict:
-    return withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, "Cash then Brokerage then Trad then Roth")
+def withdraw_for_spending(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, brokerage_basis: float) -> dict:
+    return withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, "Cash then Brokerage then Trad then Roth", brokerage_basis)
 
 
-def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, preferred_policy: str) -> dict:
-    preferred = withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, preferred_policy)
+def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: float, brokerage: float, cash: float, preferred_policy: str, brokerage_basis: float) -> dict:
+    preferred = withdraw_by_policy(amount_needed, trad, roth, brokerage, cash, preferred_policy, brokerage_basis)
     remaining = preferred["shortfall"]
 
     fallback_from_trad = 0.0
@@ -667,12 +734,14 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
             preferred["roth"],
             preferred["brokerage"],
             preferred["cash"],
-            "Trad then Roth"
+            "Trad then Roth",
+            preferred["brokerage_basis"],
         )
 
         trad = fallback["trad"]
         roth = fallback["roth"]
         brokerage = fallback["brokerage"]
+        brokerage_basis = fallback["brokerage_basis"]
         cash = fallback["cash"]
         true_shortfall = fallback["shortfall"]
         fallback_from_trad = fallback["from_trad"]
@@ -681,6 +750,7 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
         trad = preferred["trad"]
         roth = preferred["roth"]
         brokerage = preferred["brokerage"]
+        brokerage_basis = preferred["brokerage_basis"]
         cash = preferred["cash"]
         true_shortfall = 0.0
 
@@ -688,6 +758,7 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
         "trad": trad,
         "roth": roth,
         "brokerage": brokerage,
+        "brokerage_basis": brokerage_basis,
         "cash": cash,
         "preferred_from_cash": preferred["from_cash"],
         "preferred_from_brokerage": preferred["from_brokerage"],
@@ -695,16 +766,20 @@ def withdraw_for_tax_with_fallback(amount_needed: float, trad: float, roth: floa
         "preferred_from_roth": preferred["from_roth"],
         "fallback_from_trad": fallback_from_trad,
         "fallback_from_roth": fallback_from_roth,
+        "realized_ltcg": preferred["realized_ltcg"] + (fallback["realized_ltcg"] if remaining > 0 else 0.0),
         "true_tax_shortfall": true_shortfall,
     }
 
 
-def normalize_balances(trad: float, roth: float, brokerage: float, cash: float) -> tuple:
+def normalize_balances(trad: float, roth: float, brokerage: float, cash: float, brokerage_basis: float) -> tuple:
+    brokerage = max(0.0, float(brokerage))
+    brokerage_basis = min(max(0.0, float(brokerage_basis)), brokerage)
     return (
         max(0.0, float(trad)),
         max(0.0, float(roth)),
-        max(0.0, float(brokerage)),
+        brokerage,
         max(0.0, float(cash)),
+        brokerage_basis,
     )
 
 
@@ -766,6 +841,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     trad = float(state["trad"])
     roth = float(state["roth"])
     brokerage = float(state["brokerage"])
+    brokerage_basis = min(float(state.get("brokerage_basis", state["brokerage"])), brokerage)
     cash = float(state["cash"])
 
     growth = float(params["growth"])
@@ -782,6 +858,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     soy_trad = trad
     soy_roth = roth
     soy_brokerage = brokerage
+    soy_brokerage_basis = brokerage_basis
     soy_cash = cash
 
     trad *= (1 + growth)
@@ -797,24 +874,30 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     trad -= conversion
     roth += conversion
 
-    spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash)
+    spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash, brokerage_basis)
     trad = spend_result["trad"]
     roth = spend_result["roth"]
     brokerage = spend_result["brokerage"]
+    brokerage_basis = spend_result["brokerage_basis"]
     cash = spend_result["cash"]
 
     other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"]
-    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year)
+    realized_ltcg = spend_result["realized_ltcg"]
+    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
     federal_tax = tax_info["federal_tax"]
 
     tax_result = withdraw_for_tax_with_fallback(
-        federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy
+        federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy, brokerage_basis
     )
     trad = tax_result["trad"]
     roth = tax_result["roth"]
     brokerage = tax_result["brokerage"]
+    brokerage_basis = tax_result["brokerage_basis"]
     cash = tax_result["cash"]
+    realized_ltcg += tax_result["realized_ltcg"]
 
+    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
+    federal_tax = tax_info["federal_tax"]
     magi = calculate_magi(tax_info["agi"], year)
     coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
     aca_lives = coverage["aca_lives"]
@@ -823,19 +906,27 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     aca_cost = calculate_aca_cost(magi, year, aca_lives)
     irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
 
-    aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash)
+    aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash, brokerage_basis)
     trad = aca_result["trad"]
     roth = aca_result["roth"]
     brokerage = aca_result["brokerage"]
+    brokerage_basis = aca_result["brokerage_basis"]
     cash = aca_result["cash"]
+    realized_ltcg += aca_result["realized_ltcg"]
 
-    irmaa_result = withdraw_for_spending(irmaa_cost, trad, roth, brokerage, cash)
+    irmaa_result = withdraw_for_spending(irmaa_cost, trad, roth, brokerage, cash, brokerage_basis)
     trad = irmaa_result["trad"]
     roth = irmaa_result["roth"]
     brokerage = irmaa_result["brokerage"]
+    brokerage_basis = irmaa_result["brokerage_basis"]
     cash = irmaa_result["cash"]
+    realized_ltcg += irmaa_result["realized_ltcg"]
 
-    trad, roth, brokerage, cash = normalize_balances(trad, roth, brokerage, cash)
+    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
+    federal_tax = tax_info["federal_tax"]
+    magi = calculate_magi(tax_info["agi"], year)
+
+    trad, roth, brokerage, cash, brokerage_basis = normalize_balances(trad, roth, brokerage, cash, brokerage_basis)
 
     year_shortfall = (
         spend_result["shortfall"]
@@ -851,6 +942,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "SOY Trad": soy_trad,
         "SOY Roth": soy_roth,
         "SOY Brokerage": soy_brokerage,
+        "SOY Brokerage Basis": soy_brokerage_basis,
         "SOY Cash": soy_cash,
         "Owner SS": owner_ss,
         "Spouse SS": spouse_ss,
@@ -859,9 +951,12 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Conversion Income Component": conversion,
         "Trad Withdrawal Income Component": spend_result["taxable_trad_withdrawal"],
         "Other Ordinary Income": other_ordinary_income,
+        "Brokerage Realized LTCG": realized_ltcg,
         "Taxable SS": tax_info["taxable_ss"],
         "AGI": tax_info["agi"],
         "Taxable Income": tax_info["taxable_income"],
+        "Ordinary Taxable Income": tax_info["ordinary_taxable_income"],
+        "LTCG Taxable Income": tax_info["ltcg_taxable_income"],
         "Current Marginal Tax Rate": tax_info["marginal_rate"],
         "MAGI": magi,
         "Primary On ACA": coverage["primary_on_aca"],
@@ -869,6 +964,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "ACA Lives": aca_lives,
         "Medicare Lives": medicare_lives,
         "Federal Tax": federal_tax,
+        "Ordinary Tax": tax_info["ordinary_tax"],
+        "LTCG Tax": tax_info["ltcg_tax"],
         "Tax Paid Preferred Cash": tax_result["preferred_from_cash"],
         "Tax Paid Preferred Brokerage": tax_result["preferred_from_brokerage"],
         "Tax Paid Fallback Trad": tax_result["fallback_from_trad"],
@@ -879,6 +976,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "EOY Trad": trad,
         "EOY Roth": roth,
         "EOY Brokerage": brokerage,
+        "EOY Brokerage Basis": brokerage_basis,
+        "EOY Brokerage Unrealized Gain": max(0.0, brokerage - brokerage_basis),
         "EOY Cash": cash,
         "Net Worth": net_worth,
     }
@@ -891,6 +990,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "trad": trad,
         "roth": roth,
         "brokerage": brokerage,
+        "brokerage_basis": brokerage_basis,
         "cash": cash,
     }
 
@@ -905,6 +1005,7 @@ def run_projection_from_state(start_year: int, starting_state: dict, params: dic
         "trad": float(starting_state["trad"]),
         "roth": float(starting_state["roth"]),
         "brokerage": float(starting_state["brokerage"]),
+        "brokerage_basis": float(starting_state.get("brokerage_basis", starting_state["brokerage"])),
         "cash": float(starting_state["cash"]),
     }
     rows = []
@@ -926,6 +1027,7 @@ def run_model_fixed(inputs: dict) -> dict:
         "trad": float(inputs["trad"]),
         "roth": float(inputs["roth"]),
         "brokerage": float(inputs["brokerage"]),
+        "brokerage_basis": float(inputs.get("brokerage_basis", inputs["brokerage"])),
         "cash": float(inputs["cash"]),
     }
     annual_conversion = float(inputs["annual_conversion"])
@@ -1044,6 +1146,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         "trad": float(inputs["trad"]),
         "roth": float(inputs["roth"]),
         "brokerage": float(inputs["brokerage"]),
+        "brokerage_basis": float(inputs.get("brokerage_basis", inputs["brokerage"])),
         "cash": float(inputs["cash"]),
     }
 
@@ -1159,6 +1262,7 @@ inputs = {
     "trad": trad,
     "roth": roth,
     "brokerage": brokerage,
+    "brokerage_basis": min(brokerage_basis, brokerage),
     "cash": cash,
     "growth": growth,
     "annual_spending": annual_spending,
