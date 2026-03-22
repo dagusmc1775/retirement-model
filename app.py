@@ -1217,6 +1217,13 @@ with col1:
     trad = st.number_input("Traditional Balance", min_value=0.0, value=1100000.0, step=1000.0)
     roth = st.number_input("Roth Balance", min_value=0.0, value=1700000.0, step=1000.0)
     brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=300000.0, step=1000.0)
+    brokerage_basis = st.number_input(
+        "Brokerage Cost Basis",
+        min_value=0.0,
+        value=300000.0,
+        step=1000.0,
+        help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
+    )
     cash = st.number_input("Cash", min_value=0.0, value=10000.0, step=1000.0)
 
 with col2:
