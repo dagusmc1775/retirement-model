@@ -215,6 +215,14 @@ def get_ltcg_brackets(year: int):
     return get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)
 
 
+def get_target_bracket_top(year: int, label: str) -> float:
+    tops = get_bracket_tops(year)
+    if label not in tops:
+        raise ValueError(f"Unsupported target bracket label: {label}")
+    standard_deduction = get_standard_deduction(year)
+    return float(tops[label] - standard_deduction)
+
+
 def get_irmaa_table(year: int):
     return get_latest_year_value(IRMAA_TABLE_BY_YEAR, year)
 
