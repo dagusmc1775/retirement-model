@@ -890,34 +890,73 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     soy_brokerage_basis = brokerage_basis
     soy_cash = cash
 
+    # Grow assets first
     trad *= (1 + growth)
     roth *= (1 + growth)
     brokerage *= (1 + growth)
 
+    # Cash-like inflows arrive
     owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
     spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
     total_ss = owner_ss + spouse_ss
     earned_income = get_earned_income_for_year(year, params)
     cash += total_ss + earned_income
 
-    conversion = min(float(annual_conversion), trad)
-    trad -= conversion
-    roth += conversion
-
-    spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash, brokerage_basis)
+    # 1) FUND MANDATORY SPENDING FIRST
+    spend_result = withdraw_for_spending(
+        annual_spending, trad, roth, brokerage, cash, brokerage_basis
+    )
     trad = spend_result["trad"]
     roth = spend_result["roth"]
     brokerage = spend_result["brokerage"]
     brokerage_basis = spend_result["brokerage_basis"]
     cash = spend_result["cash"]
 
-    other_ordinary_income = conversion + spend_result["taxable_trad_withdrawal"] + earned_income
-    realized_ltcg = spend_result["realized_ltcg"]
-    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
+    spending_trad_withdrawal = float(spend_result["taxable_trad_withdrawal"])
+    spending_realized_ltcg = float(spend_result["realized_ltcg"])
+
+    # 2) BASELINE MAGI AFTER MANDATORY SPENDING, BEFORE OPTIONAL CONVERSION
+    baseline_other_ordinary_income = spending_trad_withdrawal + earned_income
+    baseline_tax_info = calculate_federal_tax(
+        baseline_other_ordinary_income,
+        total_ss,
+        year,
+        realized_ltcg=spending_realized_ltcg,
+    )
+    baseline_magi = calculate_magi(baseline_tax_info["agi"], year)
+
+    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
+    aca_lives = coverage["aca_lives"]
+    medicare_lives = coverage["medicare_lives"]
+
+    # 3) APPLY OPTIONAL CONVERSION ON TOP OF THE MANDATORY BASELINE
+    # annual_conversion is assumed to already be chosen by the governor.
+    # We cap it at remaining trad.
+    conversion = min(float(annual_conversion), trad)
+    trad -= conversion
+    roth += conversion
+
+    # 4) FINAL INCOME STACK
+    other_ordinary_income = earned_income + spending_trad_withdrawal + conversion
+    realized_ltcg = spending_realized_ltcg
+
+    tax_info = calculate_federal_tax(
+        other_ordinary_income,
+        total_ss,
+        year,
+        realized_ltcg=realized_ltcg,
+    )
     federal_tax = tax_info["federal_tax"]
 
+    # 5) PAY FEDERAL TAX
     tax_result = withdraw_for_tax_with_fallback(
-        federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy, brokerage_basis
+        federal_tax,
+        trad,
+        roth,
+        brokerage,
+        cash,
+        conversion_tax_funding_policy,
+        brokerage_basis,
     )
     trad = tax_result["trad"]
     roth = tax_result["roth"]
@@ -926,17 +965,24 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = tax_result["cash"]
     realized_ltcg += tax_result["realized_ltcg"]
 
-    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
+    # Recompute tax after tax-funding LTCG effects
+    tax_info = calculate_federal_tax(
+        other_ordinary_income,
+        total_ss,
+        year,
+        realized_ltcg=realized_ltcg,
+    )
     federal_tax = tax_info["federal_tax"]
     magi = calculate_magi(tax_info["agi"], year)
-    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
-    aca_lives = coverage["aca_lives"]
-    medicare_lives = coverage["medicare_lives"]
 
+    # 6) ACA / IRMAA OFF FINAL MAGI
     aca_cost = calculate_aca_cost(magi, year, aca_lives)
     irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
 
-    aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash, brokerage_basis)
+    # 7) PAY ACA / IRMAA
+    aca_result = withdraw_for_spending(
+        aca_cost, trad, roth, brokerage, cash, brokerage_basis
+    )
     trad = aca_result["trad"]
     roth = aca_result["roth"]
     brokerage = aca_result["brokerage"]
@@ -944,7 +990,9 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = aca_result["cash"]
     realized_ltcg += aca_result["realized_ltcg"]
 
-    irmaa_result = withdraw_for_spending(irmaa_cost, trad, roth, brokerage, cash, brokerage_basis)
+    irmaa_result = withdraw_for_spending(
+        irmaa_cost, trad, roth, brokerage, cash, brokerage_basis
+    )
     trad = irmaa_result["trad"]
     roth = irmaa_result["roth"]
     brokerage = irmaa_result["brokerage"]
@@ -952,11 +1000,19 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = irmaa_result["cash"]
     realized_ltcg += irmaa_result["realized_ltcg"]
 
-    tax_info = calculate_federal_tax(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
+    # Final recompute after all brokerage gain realizations
+    tax_info = calculate_federal_tax(
+        other_ordinary_income,
+        total_ss,
+        year,
+        realized_ltcg=realized_ltcg,
+    )
     federal_tax = tax_info["federal_tax"]
     magi = calculate_magi(tax_info["agi"], year)
 
-    trad, roth, brokerage, cash, brokerage_basis = normalize_balances(trad, roth, brokerage, cash, brokerage_basis)
+    trad, roth, brokerage, cash, brokerage_basis = normalize_balances(
+        trad, roth, brokerage, cash, brokerage_basis
+    )
 
     year_shortfall = (
         spend_result["shortfall"]
@@ -980,7 +1036,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Chosen Conversion": conversion,
         "Earned Income": earned_income,
         "Conversion Income Component": conversion,
-        "Trad Withdrawal Income Component": spend_result["taxable_trad_withdrawal"],
+        "Trad Withdrawal Income Component": spending_trad_withdrawal,
         "Other Ordinary Income": other_ordinary_income,
         "Brokerage Realized LTCG": realized_ltcg,
         "Taxable SS": tax_info["taxable_ss"],
@@ -989,6 +1045,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Ordinary Taxable Income": tax_info["ordinary_taxable_income"],
         "LTCG Taxable Income": tax_info["ltcg_taxable_income"],
         "Current Marginal Tax Rate": tax_info["marginal_rate"],
+        "Baseline MAGI Before Conversion": baseline_magi,
         "MAGI": magi,
         "Primary On ACA": coverage["primary_on_aca"],
         "Spouse On ACA": coverage["spouse_on_aca"],
@@ -1026,8 +1083,6 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     }
 
     return next_state, row
-
-
 # -----------------------------
 # PATH RUNNERS
 # -----------------------------
