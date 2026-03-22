@@ -5,7 +5,7 @@ from bisect import bisect_left
 # -----------------------------
 # CONSTANTS
 # -----------------------------
-START_YEAR = 2025
+START_YEAR = 2026
 END_YEAR = 2045
 UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
@@ -837,6 +837,10 @@ def build_common_params(inputs: dict) -> dict:
         "primary_aca_end_year": int(inputs["primary_aca_end_year"]),
         "spouse_aca_end_year": int(inputs["spouse_aca_end_year"]),
         "household_rmd_start": household_rmd_start,
+        "post_aca_target_bracket": str(inputs.get("post_aca_target_bracket", "22%")),
+        "rmd_era_target_bracket": str(inputs.get("rmd_era_target_bracket", "22%")),
+        "owner_current_age": int(inputs["owner_current_age"]),
+        "spouse_current_age": int(inputs["spouse_current_age"]),
     }
 
 
@@ -866,6 +870,7 @@ def calc_total_drag(row: dict) -> float:
 # -----------------------------
 # YEAR SIMULATION
 # -----------------------------
+
 def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: float) -> tuple:
     trad = float(state["trad"])
     roth = float(state["roth"])
@@ -890,22 +895,25 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     soy_brokerage_basis = brokerage_basis
     soy_cash = cash
 
-    # Grow assets first
+    # Grow investable assets
     trad *= (1 + growth)
     roth *= (1 + growth)
     brokerage *= (1 + growth)
 
-    # Cash-like inflows arrive
+    # Cash-like inflows arrive during the year
     owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
     spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
     total_ss = owner_ss + spouse_ss
     earned_income = get_earned_income_for_year(year, params)
     cash += total_ss + earned_income
 
-    # 1) FUND MANDATORY SPENDING FIRST
-    spend_result = withdraw_for_spending(
-        annual_spending, trad, roth, brokerage, cash, brokerage_basis
-    )
+    # Coverage status is based on the calendar year, not the funding sequence
+    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
+    aca_lives = coverage["aca_lives"]
+    medicare_lives = coverage["medicare_lives"]
+
+    # 1) Fund mandatory spending first. This creates unavoidable taxable withdrawals/LTCG.
+    spend_result = withdraw_for_spending(annual_spending, trad, roth, brokerage, cash, brokerage_basis)
     trad = spend_result["trad"]
     roth = spend_result["roth"]
     brokerage = spend_result["brokerage"]
@@ -915,8 +923,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     spending_trad_withdrawal = float(spend_result["taxable_trad_withdrawal"])
     spending_realized_ltcg = float(spend_result["realized_ltcg"])
 
-    # 2) BASELINE MAGI AFTER MANDATORY SPENDING, BEFORE OPTIONAL CONVERSION
-    baseline_other_ordinary_income = spending_trad_withdrawal + earned_income
+    # 2) Baseline income stack before any optional conversion
+    baseline_other_ordinary_income = earned_income + spending_trad_withdrawal
     baseline_tax_info = calculate_federal_tax(
         baseline_other_ordinary_income,
         total_ss,
@@ -925,18 +933,12 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     )
     baseline_magi = calculate_magi(baseline_tax_info["agi"], year)
 
-    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
-    aca_lives = coverage["aca_lives"]
-    medicare_lives = coverage["medicare_lives"]
-
-    # 3) APPLY OPTIONAL CONVERSION ON TOP OF THE MANDATORY BASELINE
-    # annual_conversion is assumed to already be chosen by the governor.
-    # We cap it at remaining trad.
+    # 3) Apply optional conversion on top of the mandatory baseline
     conversion = min(float(annual_conversion), trad)
     trad -= conversion
     roth += conversion
 
-    # 4) FINAL INCOME STACK
+    # 4) Final income stack for the year
     other_ordinary_income = earned_income + spending_trad_withdrawal + conversion
     realized_ltcg = spending_realized_ltcg
 
@@ -948,15 +950,9 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     )
     federal_tax = tax_info["federal_tax"]
 
-    # 5) PAY FEDERAL TAX
+    # 5) Pay federal tax. Brokerage sales here can realize additional LTCG.
     tax_result = withdraw_for_tax_with_fallback(
-        federal_tax,
-        trad,
-        roth,
-        brokerage,
-        cash,
-        conversion_tax_funding_policy,
-        brokerage_basis,
+        federal_tax, trad, roth, brokerage, cash, conversion_tax_funding_policy, brokerage_basis
     )
     trad = tax_result["trad"]
     roth = tax_result["roth"]
@@ -975,14 +971,12 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     federal_tax = tax_info["federal_tax"]
     magi = calculate_magi(tax_info["agi"], year)
 
-    # 6) ACA / IRMAA OFF FINAL MAGI
+    # 6) ACA / IRMAA are determined off final MAGI
     aca_cost = calculate_aca_cost(magi, year, aca_lives)
     irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
 
-    # 7) PAY ACA / IRMAA
-    aca_result = withdraw_for_spending(
-        aca_cost, trad, roth, brokerage, cash, brokerage_basis
-    )
+    # 7) Pay ACA / IRMAA; brokerage sales here can also realize additional LTCG
+    aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash, brokerage_basis)
     trad = aca_result["trad"]
     roth = aca_result["roth"]
     brokerage = aca_result["brokerage"]
@@ -990,9 +984,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = aca_result["cash"]
     realized_ltcg += aca_result["realized_ltcg"]
 
-    irmaa_result = withdraw_for_spending(
-        irmaa_cost, trad, roth, brokerage, cash, brokerage_basis
-    )
+    irmaa_result = withdraw_for_spending(irmaa_cost, trad, roth, brokerage, cash, brokerage_basis)
     trad = irmaa_result["trad"]
     roth = irmaa_result["roth"]
     brokerage = irmaa_result["brokerage"]
@@ -1000,7 +992,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = irmaa_result["cash"]
     realized_ltcg += irmaa_result["realized_ltcg"]
 
-    # Final recompute after all brokerage gain realizations
+    # Final recompute after all realized LTCG for the year
     tax_info = calculate_federal_tax(
         other_ordinary_income,
         total_ss,
@@ -1010,9 +1002,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     federal_tax = tax_info["federal_tax"]
     magi = calculate_magi(tax_info["agi"], year)
 
-    trad, roth, brokerage, cash, brokerage_basis = normalize_balances(
-        trad, roth, brokerage, cash, brokerage_basis
-    )
+    trad, roth, brokerage, cash, brokerage_basis = normalize_balances(trad, roth, brokerage, cash, brokerage_basis)
 
     year_shortfall = (
         spend_result["shortfall"]
@@ -1045,6 +1035,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Ordinary Taxable Income": tax_info["ordinary_taxable_income"],
         "LTCG Taxable Income": tax_info["ltcg_taxable_income"],
         "Current Marginal Tax Rate": tax_info["marginal_rate"],
+        "Estimated Future Marginal Rate": 0.0,
         "Baseline MAGI Before Conversion": baseline_magi,
         "MAGI": magi,
         "Primary On ACA": coverage["primary_on_aca"],
@@ -1083,6 +1074,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     }
 
     return next_state, row
+
+
 # -----------------------------
 # PATH RUNNERS
 # -----------------------------
@@ -1210,6 +1203,58 @@ def get_target_bracket_top(year: int, label: str) -> float:
     return float(tops_2025[bracket_label] * inflation)
 
 
+
+def estimate_future_marginal_rate(year: int, state: dict, params: dict) -> dict:
+    """
+    Estimate future marginal ordinary-income tax rate based on the first RMD-era year.
+    Uses projected traditional balance, projected Social Security, and current earned-income schedule.
+    """
+    growth = float(params["growth"])
+    future_year = max(int(params["household_rmd_start"]), year + 1)
+
+    years_forward = max(0, future_year - year)
+    projected_trad = float(state.get("trad", 0.0)) * ((1.0 + growth) ** years_forward)
+
+    owner_ss = float(params["owner_ss_annual"]) if future_year >= int(params["owner_ss_start"]) else 0.0
+    spouse_ss = float(params["spouse_ss_annual"]) if future_year >= int(params["spouse_ss_start"]) else 0.0
+    total_ss = owner_ss + spouse_ss
+
+    earned_income = 0.0
+    if int(params.get("earned_income_start_year", START_YEAR)) <= future_year <= int(params.get("earned_income_end_year", START_YEAR - 1)):
+        earned_income = float(params.get("earned_income_annual", 0.0))
+
+    # Approximate first RMD using Uniform Lifetime divisors.
+    owner_age_future = int(params.get("owner_current_age", 0)) + (future_year - START_YEAR)
+    spouse_age_future = int(params.get("spouse_current_age", 0)) + (future_year - START_YEAR)
+    oldest_age = max(owner_age_future, spouse_age_future)
+
+    divisor_map = {
+        73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
+        80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2,
+        87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2
+    }
+    divisor = divisor_map.get(oldest_age, 26.5 if oldest_age < 73 else 12.2 if oldest_age > 90 else 26.5)
+    projected_rmd = projected_trad / divisor if future_year >= int(params["household_rmd_start"]) and projected_trad > 0 else 0.0
+
+    tax_info = calculate_federal_tax(
+        other_ordinary_income=earned_income + projected_rmd,
+        total_ss=total_ss,
+        year=future_year,
+        realized_ltcg=0.0,
+    )
+
+    return {
+        "future_year": future_year,
+        "projected_trad_balance": projected_trad,
+        "projected_future_rmd": projected_rmd,
+        "projected_future_total_ss": total_ss,
+        "projected_future_taxable_ss": float(tax_info["taxable_ss"]),
+        "projected_future_ordinary_income": float(earned_income + projected_rmd + tax_info["taxable_ss"]),
+        "estimated_future_marginal_rate": float(tax_info["marginal_rate"]),
+        "estimated_future_ordinary_taxable_income": float(tax_info["ordinary_taxable_income"]),
+    }
+
+
 def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_conversion: float, step_size: float) -> tuple:
     cap = get_year_conversion_cap(state, params, max_conversion)
     step_size = max(1.0, float(step_size))
@@ -1285,32 +1330,77 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             diag_df["ACA Solver Note"] = "ACA years use highest tested conversion that stays within ACA MAGI limit"
         return round(selected_conversion, 2), selected_row, diag_df
 
+    # Non-ACA years: fill ordinary taxable income to the selected target bracket,
+    # but stop once current marginal rate reaches or exceeds the estimated future marginal rate.
+    target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
+    target_top = get_target_bracket_top(year, target_label)
+    baseline_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
+    baseline_row = baseline_path["df"].iloc[0].to_dict()
+    baseline_ordinary_taxable = float(baseline_row.get("Ordinary Taxable Income", 0.0))
+    target_headroom = max(0.0, float(target_top) - baseline_ordinary_taxable)
+    future_rate_info = estimate_future_marginal_rate(year, state, params)
+    future_rate = float(future_rate_info["estimated_future_marginal_rate"])
+
+    max_test = min(cap, floor_to_step(target_headroom, step_size))
     tested_rows = []
-    current_conversion = 0.0
+    selected_conversion = 0.0
+    selected_row = baseline_row
 
-    while current_conversion < cap - 0.01:
-        next_conversion = min(cap, current_conversion + step_size)
-        eval_row = evaluate_conversion_pair(year, state, params, current_conversion, next_conversion)
-        eval_row["Decision Mode"] = "Break-Even"
-        tested_rows.append(eval_row)
+    step_index = 0
+    while True:
+        current_conversion = min(max_test, step_index * step_size)
+        if current_conversion > max_test + 0.01:
+            break
 
-        # Keep stepping while the next increment still has positive or neutral economic value.
-        if eval_row["Current Marginal Cost"] <= eval_row["Future Avoided Cost"] + 0.01:
-            current_conversion = next_conversion
-            if next_conversion >= cap - 0.01:
-                break
+        path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
+        row = path["df"].iloc[0].to_dict()
+        ordinary_taxable = float(row.get("Ordinary Taxable Income", 0.0))
+        current_rate = float(row.get("Current Marginal Tax Rate", 0.0))
+        within_target = bool(ordinary_taxable <= float(target_top) + 0.01)
+        betr_ok = bool(current_rate < future_rate - 1e-9) if current_conversion > 0 else True
+        within_limit = within_target and betr_ok
+
+        tested_rows.append({
+            "Year": year,
+            "Decision Mode": "Bracket Fill + Future Rate Guardrail",
+            "Target Bracket": str(target_label),
+            "Target Ordinary Taxable Income": float(target_top),
+            "Baseline Ordinary Taxable Income (0 Conv)": baseline_ordinary_taxable,
+            "Ordinary Income Headroom Before Conversion": float(max(0.0, target_top - baseline_ordinary_taxable)),
+            "Test Conversion": float(current_conversion),
+            "Test Ordinary Taxable Income": ordinary_taxable,
+            "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
+            "Current Marginal Tax Rate": current_rate,
+            "Estimated Future Marginal Rate": future_rate,
+            "Projected Future RMD": float(future_rate_info["projected_future_rmd"]),
+            "Projected Future Ordinary Income": float(future_rate_info["projected_future_ordinary_income"]),
+            "BETR Stop Trigger Hit": bool(current_rate >= future_rate and current_conversion > 0),
+            "Within Target Bracket": within_target,
+            "Within Full Guardrails": within_limit,
+            "Federal Tax": float(row["Federal Tax"]),
+            "ACA Cost": float(row["ACA Cost"]),
+            "IRMAA Cost": float(row["IRMAA Cost"]),
+            "EOY Trad": float(row["EOY Trad"]),
+            "EOY Brokerage": float(row["EOY Brokerage"]),
+            "EOY Cash": float(row["EOY Cash"]),
+            "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
+        })
+        if within_limit:
+            selected_conversion = float(current_conversion)
+            selected_row = row
         else:
             break
 
-    optimal_conversion = round(current_conversion, 2)
-    optimal_path = run_projection_from_state(year, state, params, first_year_conversion=optimal_conversion, later_year_conversion=0.0)
-    optimal_row = optimal_path["df"].iloc[0].to_dict()
+        if current_conversion >= max_test - 0.01:
+            break
+        step_index += 1
 
     diag_df = pd.DataFrame(tested_rows)
     if not diag_df.empty:
-        diag_df["Selected Conversion After Test"] = optimal_conversion
-
-    return optimal_conversion, optimal_row, diag_df
+        diag_df["Selected Conversion After Test"] = selected_conversion
+        diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
+        diag_df["Bracket Solver Note"] = "Non-ACA years use highest tested conversion that stays within target ordinary-income bracket"
+    return round(selected_conversion, 2), selected_row, diag_df
 
 
 def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size: float) -> dict:
@@ -1345,10 +1435,30 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             "brokerage_basis": chosen_row["SOY Brokerage Basis"],
             "cash": chosen_row["SOY Cash"],
         }), params, first_year_conversion=0.0, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+        future_rate_info = estimate_future_marginal_rate(year, dict({
+            "trad": chosen_row["SOY Trad"],
+            "roth": chosen_row["SOY Roth"],
+            "brokerage": chosen_row["SOY Brokerage"],
+            "brokerage_basis": chosen_row["SOY Brokerage Basis"],
+            "cash": chosen_row["SOY Cash"],
+        }), params)
+        chosen_row["Estimated Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"])
+        chosen_row["Projected Future RMD"] = float(future_rate_info["projected_future_rmd"])
+        chosen_row["Projected Future Ordinary Income"] = float(future_rate_info["projected_future_ordinary_income"])
+        chosen_row["Future Rate Projection Year"] = int(future_rate_info["future_year"])
+        chosen_row["BETR Stop Trigger Hit"] = bool(float(chosen_row.get("Current Marginal Tax Rate", 0.0)) >= float(chosen_row["Estimated Future Marginal Rate"]) and coverage["aca_lives"] == 0 and float(chosen_row.get("Chosen Conversion", 0.0)) > 0)
         chosen_row["ACA MAGI Limit"] = float(aca_limit) if coverage["aca_lives"] > 0 else float('inf')
         chosen_row["Baseline MAGI (0 Conv)"] = float(baseline_row["MAGI"])
         chosen_row["ACA Headroom Before Conversion"] = float(max(0.0, aca_limit - baseline_row["MAGI"])) if coverage["aca_lives"] > 0 else 0.0
         chosen_row["MAGI Remaining To ACA Limit"] = float(aca_limit - chosen_row["MAGI"]) if coverage["aca_lives"] > 0 else float('inf')
+        target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
+        target_top = get_target_bracket_top(year, target_label)
+        baseline_ord = float(baseline_row.get("Ordinary Taxable Income", 0.0))
+        chosen_row["Target Bracket"] = "ACA" if coverage["aca_lives"] > 0 else str(target_label)
+        chosen_row["Target Ordinary Taxable Income"] = float(target_top) if coverage["aca_lives"] == 0 else 0.0
+        chosen_row["Baseline Ordinary Taxable Income (0 Conv)"] = baseline_ord
+        chosen_row["Ordinary Income Headroom Before Conversion"] = float(max(0.0, target_top - baseline_ord)) if coverage["aca_lives"] == 0 else 0.0
+        chosen_row["Ordinary Income Remaining To Target"] = float(target_top - float(chosen_row.get("Ordinary Taxable Income", 0.0))) if coverage["aca_lives"] == 0 else 0.0
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
@@ -1460,6 +1570,22 @@ step_size = st.number_input(
     help="Smaller steps improve accuracy but run slower.",
 )
 
+br1, br2 = st.columns(2)
+with br1:
+    post_aca_target_bracket = st.selectbox(
+        "Post-ACA Target Bracket",
+        ["12%", "22%", "24%"],
+        index=1,
+        help="Used in non-ACA years before household RMDs begin.",
+    )
+with br2:
+    rmd_era_target_bracket = st.selectbox(
+        "RMD-Era Target Bracket",
+        ["12%", "22%", "24%"],
+        index=1,
+        help="Used once the household reaches the first RMD year.",
+    )
+
 inputs = {
     "trad": trad,
     "roth": roth,
@@ -1481,6 +1607,8 @@ inputs = {
     "earned_income_end_year": earned_income_end_year,
     "primary_aca_end_year": primary_aca_end_year,
     "spouse_aca_end_year": spouse_aca_end_year,
+    "post_aca_target_bracket": post_aca_target_bracket,
+    "rmd_era_target_bracket": rmd_era_target_bracket,
 }
 
 btn1, btn2 = st.columns(2)
