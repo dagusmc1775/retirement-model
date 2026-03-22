@@ -15,7 +15,6 @@ IRMAA_FIRST_CLIFF_MFJ = 218000.0
 # -----------------------------
 # YEARLY TABLES
 # Update these over time.
-# Structure is designed so you can add more years later.
 # If a specific year is missing, the model uses the latest prior year available.
 # -----------------------------
 
@@ -55,9 +54,7 @@ IRMAA_TABLE_BY_YEAR = {
     ]
 }
 
-# ACA COST TABLES
-# Overall annual cost, not subsidy.
-# 2-person table for MFJ from your provided 2026 values.
+# Overall annual ACA cost from your Healthcare.gov pulls
 ACA_COST_TABLES = {
     "2_person": {
         2026: [
@@ -119,9 +116,65 @@ ACA_COST_TABLES = {
             (85000, 27996),
         ]
     },
-    # Placeholder until you provide a true 1-person ACA table.
     "1_person": {
-        # leave empty for now; code will fallback to half of 2_person
+        2026: [
+            (30000, 1094),
+            (31000, 1226),
+            (32000, 1358),
+            (33000, 1478),
+            (34000, 1598),
+            (35000, 1718),
+            (36000, 1850),
+            (37000, 1994),
+            (38000, 2126),
+            (39000, 2270),
+            (40000, 2426),
+            (41000, 2582),
+            (42000, 2738),
+            (43000, 2882),
+            (44000, 3026),
+            (45000, 3170),
+            (46000, 3326),
+            (47000, 3482),
+            (48000, 3638),
+            (49000, 3794),
+            (50000, 3962),
+            (51000, 4130),
+            (52000, 4298),
+            (53000, 4478),
+            (54000, 4634),
+            (55000, 4802),
+            (56000, 4970),
+            (57000, 5138),
+            (58000, 5318),
+            (59000, 5498),
+            (60000, 5678),
+            (61000, 5858),
+            (62000, 6038),
+            (63000, 6230),
+            (64000, 6374),
+            (65000, 6470),
+            (66000, 6566),
+            (67000, 6662),
+            (68000, 6770),
+            (69000, 6866),
+            (70000, 6962),
+            (71000, 7070),
+            (72000, 7166),
+            (73000, 7262),
+            (74000, 7370),
+            (75000, 7466),
+            (76000, 7562),
+            (77000, 7658),
+            (78000, 7766),
+            (79000, 7862),
+            (80000, 7958),
+            (81000, 8066),
+            (82000, 8162),
+            (83000, 8258),
+            (84000, 8366),
+            (85000, 29582),
+        ]
     }
 }
 
@@ -161,12 +214,6 @@ def get_aca_cost_table(year: int, household_key: str):
 
 
 def interpolate_cost_from_table(income: float, points: list) -> float:
-    """
-    points = [(income, overall_cost), ...] ascending by income
-    Uses exact match if present, otherwise linear interpolation between points.
-    If income is above max point, uses last point.
-    If income is below min point, uses first point.
-    """
     income = float(income)
     points = sorted(points, key=lambda x: x[0])
 
@@ -255,12 +302,6 @@ def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: i
 # ACA / IRMAA
 # -----------------------------
 def calculate_aca_cost(magi: float, year: int, aca_lives: int) -> float:
-    """
-    Table-driven ACA cost.
-    - 2 lives: uses 2-person ACA table
-    - 1 life: uses 1-person table if available, otherwise half of 2-person table
-    - 0 lives: zero
-    """
     magi = max(0.0, float(magi))
 
     if aca_lives <= 0:
@@ -270,12 +311,11 @@ def calculate_aca_cost(magi: float, year: int, aca_lives: int) -> float:
         table = get_aca_cost_table(year, "2_person")
         return interpolate_cost_from_table(magi, table)
 
-    # aca_lives == 1
-    one_person_table = get_aca_cost_table(year, "1_person")
-    if one_person_table is not None:
-        return interpolate_cost_from_table(magi, one_person_table)
+    table = get_aca_cost_table(year, "1_person")
+    if table is not None:
+        return interpolate_cost_from_table(magi, table)
 
-    # fallback until true 1-person table is provided
+    # emergency fallback only if 1-person table is missing for a future year
     two_person_table = get_aca_cost_table(year, "2_person")
     return interpolate_cost_from_table(magi, two_person_table) / 2.0
 
@@ -612,11 +652,12 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
 
     trad, roth, brokerage, cash = normalize_balances(trad, roth, brokerage, cash)
 
-    spend_shortfall = spend_result["shortfall"]
-    tax_shortfall = tax_result["true_tax_shortfall"]
-    aca_shortfall = aca_result["shortfall"]
-    irmaa_shortfall = irmaa_result["shortfall"]
-    year_shortfall = spend_shortfall + tax_shortfall + aca_shortfall + irmaa_shortfall
+    year_shortfall = (
+        spend_result["shortfall"]
+        + tax_result["true_tax_shortfall"]
+        + aca_result["shortfall"]
+        + irmaa_result["shortfall"]
+    )
 
     net_worth = trad + roth + brokerage + cash
 
@@ -647,10 +688,6 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Tax Paid Fallback Roth": tax_result["fallback_from_roth"],
         "ACA Cost": aca_cost,
         "IRMAA Cost": irmaa_cost,
-        "Spend Shortfall": spend_result["shortfall"],
-        "Tax Shortfall": tax_shortfall,
-        "ACA Shortfall": aca_shortfall,
-        "IRMAA Shortfall": irmaa_shortfall,
         "Year Shortfall": year_shortfall,
         "EOY Trad": trad,
         "EOY Roth": roth,
