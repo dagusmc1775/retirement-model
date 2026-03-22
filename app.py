@@ -315,7 +315,6 @@ def calculate_aca_cost(magi: float, year: int, aca_lives: int) -> float:
     if table is not None:
         return interpolate_cost_from_table(magi, table)
 
-    # emergency fallback only if 1-person table is missing for a future year
     two_person_table = get_aca_cost_table(year, "2_person")
     return interpolate_cost_from_table(magi, two_person_table) / 2.0
 
@@ -538,23 +537,6 @@ def build_common_params(inputs: dict) -> dict:
     }
 
 
-def estimate_first_rmd(trad_balance: float) -> float:
-    trad_balance = max(0.0, float(trad_balance))
-    return trad_balance / UNIFORM_LIFETIME_DIVISOR_73
-
-
-def estimate_future_tax_pressure(row: dict, params: dict) -> float:
-    projected_rmd = estimate_first_rmd(row["EOY Trad"])
-    projected_ss = row["Total SS"]
-    return projected_rmd + projected_ss
-
-
-def estimate_future_marginal_rate(row: dict, params: dict, year: int) -> float:
-    pressure = estimate_future_tax_pressure(row, params)
-    taxable_estimate = max(0.0, pressure - get_standard_deduction(year))
-    return get_marginal_rate_from_taxable_income(taxable_estimate, year)
-
-
 def summarize_run(df: pd.DataFrame, params: dict) -> dict:
     return {
         "df": df,
@@ -572,6 +554,10 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
         "household_rmd_start": int(params["household_rmd_start"]),
         "total_conversions": float(df["Chosen Conversion"].sum()),
     }
+
+
+def calc_total_drag(row: dict) -> float:
+    return float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
 
 
 # -----------------------------
@@ -707,8 +693,28 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
 
 
 # -----------------------------
-# RUNNERS
+# PATH RUNNERS
 # -----------------------------
+def run_projection_from_state(start_year: int, starting_state: dict, params: dict, first_year_conversion: float = 0.0, later_year_conversion: float = 0.0) -> dict:
+    state = {
+        "trad": float(starting_state["trad"]),
+        "roth": float(starting_state["roth"]),
+        "brokerage": float(starting_state["brokerage"]),
+        "cash": float(starting_state["cash"]),
+    }
+    rows = []
+
+    for year in range(start_year, END_YEAR + 1):
+        conversion = float(first_year_conversion) if year == start_year else float(later_year_conversion)
+        state, row = simulate_one_year(year, state, params, conversion)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    result = summarize_run(df, params)
+    result["start_year"] = start_year
+    return result
+
+
 def run_model_fixed(inputs: dict) -> dict:
     params = build_common_params(inputs)
     state = {
@@ -729,129 +735,105 @@ def run_model_fixed(inputs: dict) -> dict:
 
 
 # -----------------------------
-# BETR-AWARE GOVERNOR
+# BREAK-EVEN CONVERSION ENGINE
 # -----------------------------
-def conversion_needed_for_target_magi(state: dict, year: int, params: dict, target_magi: float) -> float:
-    _, base_row = simulate_one_year(year, dict(state), params, 0.0)
-    base_magi = float(base_row["MAGI"])
-    needed = max(0.0, float(target_magi) - base_magi)
-    return needed
+def get_year_conversion_cap(state: dict, params: dict, max_conversion: float) -> float:
+    trad_after_growth = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
+    return max(0.0, min(float(max_conversion), trad_after_growth))
 
 
-def build_betr_candidates(state: dict, year: int, params: dict, max_conversion: float) -> list:
-    coverage = get_coverage_status(year, params["primary_aca_end_year"], params["spouse_aca_end_year"])
-    aca_lives = coverage["aca_lives"]
-    medicare_lives = coverage["medicare_lives"]
+def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
+    current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
+    next_path = run_projection_from_state(year, state, params, first_year_conversion=next_conversion, later_year_conversion=0.0)
 
-    trad_cap = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
-    cap = min(float(max_conversion), trad_cap)
+    current_row = current_path["df"].iloc[0]
+    next_row = next_path["df"].iloc[0]
 
-    candidates = [0.0]
-    bracket_tops = get_bracket_tops(year)
+    current_year_drag_now = calc_total_drag(current_row)
+    current_year_drag_next = calc_total_drag(next_row)
+    current_marginal_cost = current_year_drag_next - current_year_drag_now
 
-    bracket_target_10 = bracket_tops["10%"] + get_standard_deduction(year)
-    bracket_target_12 = bracket_tops["12%"] + get_standard_deduction(year)
-    bracket_target_22 = bracket_tops["22%"] + get_standard_deduction(year)
-    bracket_target_24 = bracket_tops["24%"] + get_standard_deduction(year)
+    future_drag_now = float(current_path["df"].iloc[1:][["Federal Tax", "ACA Cost", "IRMAA Cost"]].sum().sum())
+    future_drag_next = float(next_path["df"].iloc[1:][["Federal Tax", "ACA Cost", "IRMAA Cost"]].sum().sum())
+    future_avoided_cost = future_drag_now - future_drag_next
 
-    def add_target(target):
-        c = conversion_needed_for_target_magi(state, year, params, target)
-        candidates.append(min(cap, max(0.0, round(c, 2))))
+    step_amount = next_conversion - current_conversion
+    net_benefit = future_avoided_cost - current_marginal_cost
 
-    if aca_lives == 2:
-        add_target(bracket_target_10)
-        add_target(bracket_target_12)
-        add_target(ACA_CLIFF_MFJ - 1000.0)
-        add_target(ACA_CLIFF_MFJ - 1.0)
-        add_target(ACA_CLIFF_MFJ + 1.0)
-    elif aca_lives == 1 and medicare_lives == 1:
-        add_target(bracket_target_10)
-        add_target(bracket_target_12)
-        add_target(bracket_target_22)
-        add_target(ACA_CLIFF_MFJ - 1000.0)
-        add_target(ACA_CLIFF_MFJ - 1.0)
-        add_target(ACA_CLIFF_MFJ + 1.0)
-        add_target(ACA_CLIFF_MFJ + 15000.0)
-        add_target(ACA_CLIFF_MFJ + 30000.0)
-        add_target(min(IRMAA_FIRST_CLIFF_MFJ - 1000.0, cap))
-    else:
-        add_target(bracket_target_10)
-        add_target(bracket_target_12)
-        add_target(bracket_target_22)
-        add_target(bracket_target_24)
-        add_target(IRMAA_FIRST_CLIFF_MFJ - 1000.0)
-        add_target(IRMAA_FIRST_CLIFF_MFJ - 1.0)
-        add_target(IRMAA_FIRST_CLIFF_MFJ + 1.0)
-
-    candidates.append(min(cap, cap / 2.0))
-    candidates.append(cap)
-
-    cleaned = sorted(set(round(min(cap, max(0.0, c)), 2) for c in candidates))
-    return cleaned
+    return {
+        "Year": year,
+        "Base Conversion": float(current_conversion),
+        "Test Conversion": float(next_conversion),
+        "Step Amount": float(step_amount),
+        "Base MAGI": float(current_row["MAGI"]),
+        "Test MAGI": float(next_row["MAGI"]),
+        "Base Taxable Income": float(current_row["Taxable Income"]),
+        "Test Taxable Income": float(next_row["Taxable Income"]),
+        "Current Year Federal Tax Delta": float(next_row["Federal Tax"] - current_row["Federal Tax"]),
+        "Current Year ACA Delta": float(next_row["ACA Cost"] - current_row["ACA Cost"]),
+        "Current Year IRMAA Delta": float(next_row["IRMAA Cost"] - current_row["IRMAA Cost"]),
+        "Current Marginal Cost": float(current_marginal_cost),
+        "Future Avoided Federal Tax": float(current_path["df"].iloc[1:]["Federal Tax"].sum() - next_path["df"].iloc[1:]["Federal Tax"].sum()),
+        "Future Avoided ACA Cost": float(current_path["df"].iloc[1:]["ACA Cost"].sum() - next_path["df"].iloc[1:]["ACA Cost"].sum()),
+        "Future Avoided IRMAA Cost": float(current_path["df"].iloc[1:]["IRMAA Cost"].sum() - next_path["df"].iloc[1:]["IRMAA Cost"].sum()),
+        "Future Avoided Cost": float(future_avoided_cost),
+        "Net Benefit": float(net_benefit),
+        "Break-Even Reached": bool(current_marginal_cost >= future_avoided_cost),
+        "Base EOY Trad": float(current_row["EOY Trad"]),
+        "Test EOY Trad": float(next_row["EOY Trad"]),
+        "Base Final Net Worth": float(current_path["final_net_worth"]),
+        "Test Final Net Worth": float(next_path["final_net_worth"]),
+    }
 
 
-def score_betr_candidate(row: dict, baseline_row: dict, year: int, params: dict, rmd_pressure_weight: float, legacy_weight: float) -> tuple:
-    shortfall_ok = row["Year Shortfall"] <= 0.01
+def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_conversion: float, step_size: float) -> tuple:
+    cap = get_year_conversion_cap(state, params, max_conversion)
+    step_size = max(1.0, float(step_size))
 
-    aca_lives = int(row["ACA Lives"])
-    medicare_lives = int(row["Medicare Lives"])
+    if cap <= 0.0:
+        zero_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
+        zero_row = zero_path["df"].iloc[0].to_dict()
+        diag = pd.DataFrame([{
+            "Year": year,
+            "Base Conversion": 0.0,
+            "Test Conversion": 0.0,
+            "Step Amount": 0.0,
+            "Current Marginal Cost": 0.0,
+            "Future Avoided Cost": 0.0,
+            "Net Benefit": 0.0,
+            "Break-Even Reached": True,
+            "Reason": "No available traditional balance to convert",
+        }])
+        return 0.0, zero_row, diag
 
-    drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
-    baseline_drag = baseline_row["Federal Tax"] + baseline_row["ACA Cost"] + baseline_row["IRMAA Cost"]
+    tested_rows = []
+    current_conversion = 0.0
 
-    incremental_conversion = max(0.0, row["Chosen Conversion"] - baseline_row["Chosen Conversion"])
-    incremental_current_drag = max(0.0, drag - baseline_drag)
+    while current_conversion < cap - 0.01:
+        next_conversion = min(cap, current_conversion + step_size)
+        eval_row = evaluate_conversion_pair(year, state, params, current_conversion, next_conversion)
+        tested_rows.append(eval_row)
 
-    current_effective_rate = (incremental_current_drag / incremental_conversion) if incremental_conversion > 0 else 0.0
+        # Keep stepping while the next increment still has positive or neutral economic value.
+        if eval_row["Current Marginal Cost"] <= eval_row["Future Avoided Cost"] + 0.01:
+            current_conversion = next_conversion
+            if next_conversion >= cap - 0.01:
+                break
+        else:
+            break
 
-    future_pressure = estimate_future_tax_pressure(row, params)
-    future_rate = estimate_future_marginal_rate(row, params, year)
-    betr_spread = future_rate - current_effective_rate
+    optimal_conversion = round(current_conversion, 2)
+    optimal_path = run_projection_from_state(year, state, params, first_year_conversion=optimal_conversion, later_year_conversion=0.0)
+    optimal_row = optimal_path["df"].iloc[0].to_dict()
 
-    over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
-    over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
+    diag_df = pd.DataFrame(tested_rows)
+    if not diag_df.empty:
+        diag_df["Selected Conversion After Test"] = optimal_conversion
 
-    if aca_lives == 2:
-        aca_cost_weight = 120.0
-        mixed_reward = 0.0
-        irmaa_reward = 0.0
-        future_multiplier = 2.5
-    elif aca_lives == 1 and medicare_lives == 1:
-        aca_cost_weight = 35.0
-        mixed_reward = row["MAGI"] * 0.12
-        irmaa_reward = 0.0
-        future_multiplier = 5.0
-    else:
-        aca_cost_weight = 0.0
-        mixed_reward = 0.0
-        irmaa_headroom = IRMAA_FIRST_CLIFF_MFJ - row["MAGI"]
-        irmaa_reward = -abs(irmaa_headroom) * 0.8
-        future_multiplier = 6.0
-
-    adjusted_value = (
-        row["Net Worth"]
-        - drag
-        - (over_aca * aca_cost_weight)
-        - (over_irmaa * 8.0)
-        - (future_pressure * rmd_pressure_weight * future_multiplier)
-        - (row["EOY Trad"] * legacy_weight)
-        + mixed_reward
-        + irmaa_reward
-        + (betr_spread * 500000.0)
-    )
-
-    return (
-        1 if shortfall_ok else 0,
-        -over_aca,
-        -over_irmaa,
-        adjusted_value,
-        betr_spread,
-        -drag,
-        -row["Chosen Conversion"],
-    )
+    return optimal_conversion, optimal_row, diag_df
 
 
-def run_model_betr_governor(inputs: dict, max_conversion: float, rmd_pressure_weight: float, legacy_weight: float) -> dict:
+def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size: float) -> dict:
     params = build_common_params(inputs)
     state = {
         "trad": float(inputs["trad"]),
@@ -861,64 +843,26 @@ def run_model_betr_governor(inputs: dict, max_conversion: float, rmd_pressure_we
     }
 
     chosen_rows = []
-    decision_rows = []
+    decision_frames = []
 
     for year in range(START_YEAR, END_YEAR + 1):
-        candidates = build_betr_candidates(state, year, params, max_conversion)
+        optimal_conversion, _, diag_df = find_optimal_conversion_for_year(
+            year=year,
+            state=dict(state),
+            params=params,
+            max_conversion=max_conversion,
+            step_size=step_size,
+        )
 
-        _, baseline_row = simulate_one_year(year, dict(state), params, 0.0)
+        state, chosen_row = simulate_one_year(year, dict(state), params, optimal_conversion)
+        chosen_rows.append(chosen_row)
 
-        best_state = None
-        best_row = None
-
-        for c in candidates:
-            next_state, row = simulate_one_year(year, dict(state), params, c)
-
-            drag = row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"]
-            baseline_drag = baseline_row["Federal Tax"] + baseline_row["ACA Cost"] + baseline_row["IRMAA Cost"]
-            incremental_conversion = max(0.0, row["Chosen Conversion"] - baseline_row["Chosen Conversion"])
-            incremental_current_drag = max(0.0, drag - baseline_drag)
-            current_effective_rate = (incremental_current_drag / incremental_conversion) if incremental_conversion > 0 else 0.0
-
-            future_pressure = estimate_future_tax_pressure(row, params)
-            future_rate = estimate_future_marginal_rate(row, params, year)
-            betr_spread = future_rate - current_effective_rate
-
-            aca_lives = int(row["ACA Lives"])
-            medicare_lives = int(row["Medicare Lives"])
-            over_aca = max(0.0, row["MAGI"] - ACA_CLIFF_MFJ) if aca_lives > 0 else 0.0
-            over_irmaa = max(0.0, row["MAGI"] - IRMAA_FIRST_CLIFF_MFJ) if medicare_lives > 0 else 0.0
-
-            decision_rows.append({
-                "Year": year,
-                "Candidate Conversion": c,
-                "Net Worth": row["Net Worth"],
-                "EOY Trad": row["EOY Trad"],
-                "MAGI": row["MAGI"],
-                "Federal Tax": row["Federal Tax"],
-                "ACA Cost": row["ACA Cost"],
-                "IRMAA Cost": row["IRMAA Cost"],
-                "Year Shortfall": row["Year Shortfall"],
-                "Shortfall OK": row["Year Shortfall"] <= 0.01,
-                "ACA Lives": aca_lives,
-                "Medicare Lives": medicare_lives,
-                "Over ACA Cliff": over_aca,
-                "Over IRMAA Cliff": over_irmaa,
-                "Projected Future Tax Pressure": future_pressure,
-                "Current Effective Rate": current_effective_rate,
-                "Estimated Future Rate": future_rate,
-                "BETR Spread": betr_spread,
-            })
-
-            if best_row is None or score_betr_candidate(row, baseline_row, year, params, rmd_pressure_weight, legacy_weight) > score_betr_candidate(best_row, baseline_row, year, params, rmd_pressure_weight, legacy_weight):
-                best_row = row
-                best_state = next_state
-
-        chosen_rows.append(best_row)
-        state = best_state
+        if not diag_df.empty:
+            diag_df["Applied Conversion"] = float(optimal_conversion)
+            decision_frames.append(diag_df)
 
     chosen_df = pd.DataFrame(chosen_rows)
-    decision_df = pd.DataFrame(decision_rows)
+    decision_df = pd.concat(decision_frames, ignore_index=True) if decision_frames else pd.DataFrame()
 
     result = summarize_run(chosen_df, params)
     result["decision_df"] = decision_df
@@ -949,7 +893,7 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — BETR-Aware Governor")
+st.title("Retirement Model — Break-Even Roth Conversion Engine")
 
 st.header("Household Inputs")
 
@@ -996,21 +940,14 @@ st.caption("This build falls back to Trad then Roth if the preferred source is i
 st.header("Flat Strategy Test")
 annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0)
 
-st.header("BETR-Aware Governor Inputs")
+st.header("Break-Even Governor Inputs")
 max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=300000.0, step=5000.0)
-rmd_pressure_weight = st.number_input(
-    "RMD Pressure Weight",
-    min_value=0.0,
-    value=20.0,
-    step=1.0,
-    help="Higher values push harder to reduce future RMD + SS tax pressure."
-)
-legacy_weight = st.number_input(
-    "Legacy Weight",
-    min_value=0.0,
-    value=0.03,
-    step=0.005,
-    help="Higher values push harder to reduce ending Traditional IRA for heirs."
+step_size = st.number_input(
+    "Break-Even Step Size",
+    min_value=1000.0,
+    value=5000.0,
+    step=1000.0,
+    help="Smaller steps improve accuracy but run slower.",
 )
 
 inputs = {
@@ -1042,10 +979,10 @@ with btn1:
         st.dataframe(result["df"], use_container_width=True)
 
 with btn2:
-    if st.button("Run BETR-Aware Governor"):
-        result = run_model_betr_governor(inputs, max_conversion, rmd_pressure_weight, legacy_weight)
-        render_summary("BETR-Aware Governor Summary", result)
+    if st.button("Run Break-Even Governor"):
+        result = run_model_break_even_governor(inputs, max_conversion, step_size)
+        render_summary("Break-Even Governor Summary", result)
         st.subheader("Chosen Year-by-Year Path")
         st.dataframe(result["df"], use_container_width=True)
-        st.subheader("Per-Year Candidate Testing")
+        st.subheader("Per-Step Break-Even Testing")
         st.dataframe(result["decision_df"], use_container_width=True)
