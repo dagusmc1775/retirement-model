@@ -9,6 +9,9 @@ START_YEAR = 2025
 END_YEAR = 2045
 UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
+ACA_CLIFF_MFJ = 85000.0
+IRMAA_FIRST_CLIFF_MFJ = 218000.0
+
 # -----------------------------
 # YEARLY TABLES
 # Update these over time.
