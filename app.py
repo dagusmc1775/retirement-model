@@ -298,6 +298,205 @@ def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: i
     }
 
 
+def calculate_magi(agi: float, year: int) -> float:
+    # Placeholder for future MAGI add-backs. Keep this as the only MAGI entry point.
+    _ = year
+    return max(0.0, float(agi))
+
+
+# -----------------------------
+# ACCOUNTING CONTRACT / VALIDATION
+# -----------------------------
+def approx_equal(a: float, b: float, tol: float = 0.01) -> bool:
+    return abs(float(a) - float(b)) <= tol
+
+
+def validate_row_accounting(row: dict, year: int) -> list:
+    issues = []
+
+    expected_other_ordinary = float(row["Conversion Income Component"] + row["Trad Withdrawal Income Component"])
+    expected_agi = float(row["Other Ordinary Income"] + row["Taxable SS"])
+    expected_magi = calculate_magi(expected_agi, year)
+    expected_taxable_income = max(0.0, expected_agi - get_standard_deduction(year))
+    expected_net_worth = float(row["EOY Trad"] + row["EOY Roth"] + row["EOY Brokerage"] + row["EOY Cash"])
+
+    if not approx_equal(row["Other Ordinary Income"], expected_other_ordinary):
+        issues.append("Other Ordinary Income does not equal conversion + taxable Trad withdrawals")
+    if not approx_equal(row["AGI"], expected_agi):
+        issues.append("AGI does not equal Other Ordinary Income + Taxable SS")
+    if not approx_equal(row["MAGI"], expected_magi):
+        issues.append("MAGI does not match canonical MAGI function")
+    if not approx_equal(row["Taxable Income"], expected_taxable_income):
+        issues.append("Taxable Income does not equal max(0, AGI - standard deduction)")
+    if not approx_equal(row["Net Worth"], expected_net_worth):
+        issues.append("Net Worth does not equal ending balances sum")
+
+    return issues
+
+
+def run_contract_validation_suite() -> pd.DataFrame:
+    scenarios = [
+        {
+            "Scenario": "Conversion only, no SS, no spending",
+            "year": 2026,
+            "state": {"trad": 100000.0, "roth": 0.0, "brokerage": 0.0, "cash": 0.0},
+            "inputs": {
+                "growth": 0.0,
+                "annual_spending": 0.0,
+                "conversion_tax_funding_policy": "Cash then Brokerage",
+                "owner_current_age": 60,
+                "spouse_current_age": 60,
+                "owner_claim_age": 67,
+                "spouse_claim_age": 67,
+                "owner_ss_base": 0.0,
+                "spouse_ss_base": 0.0,
+                "primary_aca_end_year": 2024,
+                "spouse_aca_end_year": 2024,
+            },
+            "conversion": 30000.0,
+            "expected": {
+                "Other Ordinary Income": 30000.0,
+                "Taxable SS": 0.0,
+                "AGI": 30000.0,
+                "MAGI": 30000.0,
+                "Taxable Income": 0.0,
+            },
+        },
+        {
+            "Scenario": "Conversion plus Trad spending withdrawal",
+            "year": 2026,
+            "state": {"trad": 100000.0, "roth": 0.0, "brokerage": 0.0, "cash": 0.0},
+            "inputs": {
+                "growth": 0.0,
+                "annual_spending": 20000.0,
+                "conversion_tax_funding_policy": "Cash then Brokerage",
+                "owner_current_age": 60,
+                "spouse_current_age": 60,
+                "owner_claim_age": 67,
+                "spouse_claim_age": 67,
+                "owner_ss_base": 0.0,
+                "spouse_ss_base": 0.0,
+                "primary_aca_end_year": 2024,
+                "spouse_aca_end_year": 2024,
+            },
+            "conversion": 30000.0,
+            "expected": {
+                "Conversion Income Component": 30000.0,
+                "Trad Withdrawal Income Component": 20000.0,
+                "Other Ordinary Income": 50000.0,
+                "Taxable SS": 0.0,
+                "AGI": 50000.0,
+                "MAGI": 50000.0,
+                "Taxable Income": 20000.0,
+            },
+        },
+        {
+            "Scenario": "SS taxation interacts with ordinary income",
+            "year": 2032,
+            "state": {"trad": 100000.0, "roth": 0.0, "brokerage": 0.0, "cash": 0.0},
+            "inputs": {
+                "growth": 0.0,
+                "annual_spending": 0.0,
+                "conversion_tax_funding_policy": "Cash then Brokerage",
+                "owner_current_age": 60,
+                "spouse_current_age": 60,
+                "owner_claim_age": 67,
+                "spouse_claim_age": 67,
+                "owner_ss_base": 43000.0,
+                "spouse_ss_base": 15000.0,
+                "primary_aca_end_year": 2024,
+                "spouse_aca_end_year": 2024,
+            },
+            "conversion": 30000.0,
+            "expected": {
+                "Other Ordinary Income": 30000.0,
+                "Total SS": 58000.0,
+                "Taxable SS": 18750.0,
+                "AGI": 48750.0,
+                "MAGI": 48750.0,
+                "Taxable Income": 18750.0,
+            },
+        },
+        {
+            "Scenario": "ACA responds to MAGI for 2 lives",
+            "year": 2026,
+            "state": {"trad": 100000.0, "roth": 0.0, "brokerage": 0.0, "cash": 0.0},
+            "inputs": {
+                "growth": 0.0,
+                "annual_spending": 0.0,
+                "conversion_tax_funding_policy": "Cash then Brokerage",
+                "owner_current_age": 60,
+                "spouse_current_age": 60,
+                "owner_claim_age": 67,
+                "spouse_claim_age": 67,
+                "owner_ss_base": 0.0,
+                "spouse_ss_base": 0.0,
+                "primary_aca_end_year": 2035,
+                "spouse_aca_end_year": 2035,
+            },
+            "conversion": 60000.0,
+            "expected": {
+                "MAGI": 60000.0,
+                "ACA Lives": 2,
+                "ACA Cost": 5676.0,
+            },
+        },
+        {
+            "Scenario": "IRMAA stays zero below first cliff",
+            "year": 2036,
+            "state": {"trad": 300000.0, "roth": 0.0, "brokerage": 0.0, "cash": 0.0},
+            "inputs": {
+                "growth": 0.0,
+                "annual_spending": 0.0,
+                "conversion_tax_funding_policy": "Cash then Brokerage",
+                "owner_current_age": 70,
+                "spouse_current_age": 70,
+                "owner_claim_age": 67,
+                "spouse_claim_age": 67,
+                "owner_ss_base": 0.0,
+                "spouse_ss_base": 0.0,
+                "primary_aca_end_year": 2024,
+                "spouse_aca_end_year": 2024,
+            },
+            "conversion": 200000.0,
+            "expected": {
+                "MAGI": 200000.0,
+                "Medicare Lives": 2,
+                "IRMAA Cost": 0.0,
+            },
+        },
+    ]
+
+    results = []
+    for scenario in scenarios:
+        params = build_common_params(scenario["inputs"])
+        _, row = simulate_one_year(scenario["year"], dict(scenario["state"]), params, scenario["conversion"])
+        issues = validate_row_accounting(row, scenario["year"])
+        mismatches = []
+        for key, expected_value in scenario["expected"].items():
+            actual_value = row[key]
+            if isinstance(expected_value, (int, float)):
+                if not approx_equal(actual_value, expected_value):
+                    mismatches.append(f"{key}: expected {expected_value:,.2f}, got {float(actual_value):,.2f}")
+            else:
+                if actual_value != expected_value:
+                    mismatches.append(f"{key}: expected {expected_value}, got {actual_value}")
+        results.append({
+            "Scenario": scenario["Scenario"],
+            "Status": "PASS" if not issues and not mismatches else "FAIL",
+            "Accounting Issues": " | ".join(issues) if issues else "",
+            "Expectation Mismatches": " | ".join(mismatches) if mismatches else "",
+            "AGI": float(row["AGI"]),
+            "MAGI": float(row["MAGI"]),
+            "Taxable Income": float(row["Taxable Income"]),
+            "Federal Tax": float(row["Federal Tax"]),
+            "ACA Cost": float(row["ACA Cost"]),
+            "IRMAA Cost": float(row["IRMAA Cost"]),
+        })
+
+    return pd.DataFrame(results)
+
+
 # -----------------------------
 # ACA / IRMAA
 # -----------------------------
@@ -616,7 +815,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     brokerage = tax_result["brokerage"]
     cash = tax_result["cash"]
 
-    magi = tax_info["agi"]
+    magi = calculate_magi(tax_info["agi"], year)
     coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
@@ -657,6 +856,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Spouse SS": spouse_ss,
         "Total SS": total_ss,
         "Chosen Conversion": conversion,
+        "Conversion Income Component": conversion,
+        "Trad Withdrawal Income Component": spend_result["taxable_trad_withdrawal"],
         "Other Ordinary Income": other_ordinary_income,
         "Taxable SS": tax_info["taxable_ss"],
         "AGI": tax_info["agi"],
@@ -681,6 +882,10 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "EOY Cash": cash,
         "Net Worth": net_worth,
     }
+
+    accounting_issues = validate_row_accounting(row, year)
+    row["Accounting Status"] = "PASS" if not accounting_issues else "FAIL"
+    row["Accounting Issues"] = " | ".join(accounting_issues)
 
     next_state = {
         "trad": trad,
