@@ -1525,7 +1525,7 @@ with col1:
     brokerage_basis = st.number_input(
         "Brokerage Cost Basis",
         min_value=0.0,
-        value=300000.0,
+        value=180000.0,
         step=1000.0,
         help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
     )
