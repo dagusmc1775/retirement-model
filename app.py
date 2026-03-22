@@ -1278,7 +1278,7 @@ owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, 67)
 spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, 67)
 
 owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60, step=1)
-spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=56, step=1)
+spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=57, step=1)
 
 col1, col2 = st.columns(2)
 
