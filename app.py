@@ -892,6 +892,140 @@ def calc_total_drag(row: dict) -> float:
 
 
 # -----------------------------
+# DISPLAY COLUMN ORGANIZATION
+# -----------------------------
+def _ordered_subset(existing_cols, preferred_order):
+    seen = set()
+    ordered = []
+    for c in preferred_order:
+        if c in existing_cols and c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    for c in existing_cols:
+        if c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    return ordered
+
+
+def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    preferred = [
+        # Core timing / decision
+        "Year",
+        "Chosen Conversion",
+
+        # Starting balances
+        "SOY Trad", "SOY Roth", "SOY Brokerage", "SOY Brokerage Basis", "SOY Cash",
+
+        # Cash inflows / income sources
+        "Earned Income", "Owner SS", "Spouse SS", "Total SS",
+        "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
+
+        # Aggregated income
+        "Other Ordinary Income", "Taxable SS", "AGI", "MAGI",
+        "Taxable Income", "Ordinary Taxable Income", "LTCG Taxable Income",
+
+        # Rates / policy outputs
+        "Current Marginal Tax Rate", "Estimated Future Marginal Rate",
+        "Effective Current Rate (Adjusted)",
+        "ACA Lives", "Medicare Lives", "Primary On ACA", "Spouse On ACA",
+
+        # Costs
+        "Federal Tax", "Ordinary Tax", "LTCG Tax", "ACA Cost", "IRMAA Cost", "Year Shortfall",
+
+        # Tax funding mechanics
+        "Tax Funding Source", "Tax Funding Penalty",
+        "Tax Paid Preferred Cash", "Tax Paid Preferred Brokerage",
+        "Tax Paid Preferred Trad", "Tax Paid Preferred Roth",
+        "Tax Paid Fallback Trad", "Tax Paid Fallback Roth",
+
+        # Ending balances
+        "EOY Trad", "EOY Roth", "EOY Brokerage", "EOY Brokerage Basis",
+        "EOY Brokerage Unrealized Gain", "EOY Cash", "Net Worth",
+
+        # Diagnostics / solver details
+        "Baseline MAGI Before Conversion",
+        "ACA MAGI Limit", "Baseline MAGI (0 Conv)", "ACA Headroom Before Conversion",
+        "MAGI Remaining To ACA Limit",
+        "Target Bracket", "Target Ordinary Taxable Income",
+        "Baseline Ordinary Taxable Income (0 Conv)",
+        "Ordinary Income Headroom Before Conversion",
+        "Ordinary Income Remaining To Target",
+        "Projected Future RMD", "Projected Future Ordinary Income",
+        "Future Rate Projection Year", "BETR Stop Trigger Hit",
+        "Accounting Status", "Accounting Issues",
+    ]
+    return df.loc[:, _ordered_subset(list(df.columns), preferred)]
+
+
+def organize_decision_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    preferred = [
+        "Year", "Decision Mode", "Step Index",
+        "Base Conversion", "Test Conversion", "Step Amount", "Applied Conversion", "Selected Conversion After Test",
+        "Baseline MAGI (0 Conv)", "ACA MAGI Limit", "MAGI Headroom Before Conversion",
+        "Base MAGI", "Test MAGI", "MAGI Remaining To Limit", "Within ACA Limit",
+        "Target Bracket", "Target Ordinary Taxable Income", "Baseline Ordinary Taxable Income (0 Conv)",
+        "Test Ordinary Taxable Income", "Ordinary Income Remaining To Target", "Within Target Bracket",
+        "Current Effective Rate", "Future Expected Effective Rate", "Net Benefit Rate",
+        "Current Marginal Rate", "Estimated Future Marginal Rate", "BETR Pass",
+        "Tax Funding Source", "Tax Funding Penalty", "Effective Current Rate (Adjusted)",
+        "Current Year Federal Tax Delta", "Current Year ACA Delta", "Current Year IRMAA Delta", "Current Marginal Cost",
+        "Future Avoided Federal Tax", "Future Avoided ACA Cost", "Future Avoided IRMAA Cost", "Future Avoided Cost",
+        "Federal Tax", "ACA Cost", "IRMAA Cost",
+        "EOY Trad", "EOY Brokerage", "EOY Cash", "Final Net Worth (Zero Later Conv)",
+        "Selected MAGI", "Selected Ordinary Taxable Income",
+        "ACA Solver Note", "Bracket Solver Note",
+    ]
+    return df.loc[:, _ordered_subset(list(df.columns), preferred)]
+
+
+def enrich_year_row_for_display(year: int, state_before: dict, params: dict, row: dict) -> dict:
+    """
+    Add the same readability/diagnostic columns to both the flat-strategy table
+    and the governor table so the schemas stay aligned.
+    """
+    coverage = get_coverage_status(
+        year,
+        int(params["primary_aca_end_year"]),
+        int(params["spouse_aca_end_year"]),
+    )
+    aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
+    baseline_path = run_projection_from_state(
+        year,
+        dict(state_before),
+        params,
+        first_year_conversion=0.0,
+        later_year_conversion=0.0,
+    )
+    baseline_row = baseline_path["df"].iloc[0].to_dict()
+    target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
+    target_top = get_target_bracket_top(year, target_label)
+    baseline_ord = float(baseline_row.get("Ordinary Taxable Income", 0.0))
+    row["ACA MAGI Limit"] = float(aca_limit) if coverage["aca_lives"] > 0 else float("inf")
+    row["Baseline MAGI (0 Conv)"] = float(baseline_row.get("MAGI", 0.0))
+    row["ACA Headroom Before Conversion"] = float(max(0.0, aca_limit - baseline_row.get("MAGI", 0.0))) if coverage["aca_lives"] > 0 else 0.0
+    row["MAGI Remaining To ACA Limit"] = float(aca_limit - float(row.get("MAGI", 0.0))) if coverage["aca_lives"] > 0 else float("inf")
+    row["Target Bracket"] = "ACA" if coverage["aca_lives"] > 0 else str(target_label)
+    row["Target Ordinary Taxable Income"] = float(target_top) if coverage["aca_lives"] == 0 else 0.0
+    row["Baseline Ordinary Taxable Income (0 Conv)"] = baseline_ord
+    row["Ordinary Income Headroom Before Conversion"] = float(max(0.0, target_top - baseline_ord)) if coverage["aca_lives"] == 0 else 0.0
+    row["Ordinary Income Remaining To Target"] = float(target_top - float(row.get("Ordinary Taxable Income", 0.0))) if coverage["aca_lives"] == 0 else 0.0
+    if "Future Rate Projection Year" in row and pd.notna(row["Future Rate Projection Year"]):
+        try:
+            row["Future Rate Projection Year"] = str(int(float(row["Future Rate Projection Year"])))
+        except Exception:
+            row["Future Rate Projection Year"] = str(row["Future Rate Projection Year"])
+    return row
+
+
+
+# -----------------------------
 # YEAR SIMULATION
 # -----------------------------
 
@@ -1144,10 +1278,16 @@ def run_model_fixed(inputs: dict) -> dict:
 
     rows = []
     for year in range(START_YEAR, END_YEAR + 1):
+        state_before = dict(state)
         state, row = simulate_one_year(year, state, params, annual_conversion)
+        row = enrich_year_row_for_display(year, state_before, params, row)
         rows.append(row)
 
     df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+        df = df.sort_values("Year").reset_index(drop=True)
+        df = organize_yearly_columns(df)
     return summarize_run(df, params)
 
 
@@ -1501,6 +1641,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         chosen_row["Baseline Ordinary Taxable Income (0 Conv)"] = baseline_ord
         chosen_row["Ordinary Income Headroom Before Conversion"] = float(max(0.0, target_top - baseline_ord)) if coverage["aca_lives"] == 0 else 0.0
         chosen_row["Ordinary Income Remaining To Target"] = float(target_top - float(chosen_row.get("Ordinary Taxable Income", 0.0))) if coverage["aca_lives"] == 0 else 0.0
+        chosen_row = enrich_year_row_for_display(year, dict(state), params, chosen_row)
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
@@ -1514,10 +1655,12 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         expected_years = list(range(START_YEAR, START_YEAR + len(chosen_df)))
         chosen_df["Year"] = expected_years
         chosen_df = chosen_df.drop_duplicates(subset=["Year"], keep="last").reset_index(drop=True)
+        chosen_df = organize_yearly_columns(chosen_df)
 
     decision_df = pd.concat(decision_frames, ignore_index=True) if decision_frames else pd.DataFrame()
     if not decision_df.empty:
         decision_df = decision_df.loc[:, ~decision_df.columns.duplicated()].copy()
+        decision_df = organize_decision_columns(decision_df)
 
     result = summarize_run(chosen_df, params)
     result["decision_df"] = decision_df
