@@ -215,6 +215,13 @@ def get_ltcg_brackets(year: int):
     return get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)
 
 
+
+
+def floor_to_step(value: float, step: float) -> float:
+    value = max(0.0, float(value))
+    step = max(1e-9, float(step))
+    return float((value // step) * step)
+
 def get_target_bracket_top(year: int, label: str) -> float:
     tops = get_bracket_tops(year)
     if label not in tops:
