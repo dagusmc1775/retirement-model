@@ -1300,6 +1300,21 @@ def get_year_conversion_cap(state: dict, params: dict, max_conversion: float) ->
     return max(0.0, min(float(max_conversion), trad_after_growth))
 
 
+
+def blended_future_effective_rate(delta_based_rate: float, estimated_future_rate: float, tax_source_penalty: float) -> float:
+    """
+    Use true delta-based future avoided-cost rate when it exists.
+    If the projected path has no modeled future deltas yet (common before real RMD enforcement),
+    fall back to the estimated future marginal rate.
+    """
+    if abs(float(delta_based_rate)) > 1e-12:
+        return float(delta_based_rate)
+    return max(0.0, float(estimated_future_rate))
+
+
+def adjusted_current_effective_rate(delta_based_rate: float, tax_source_penalty: float) -> float:
+    return max(0.0, float(delta_based_rate) + float(tax_source_penalty))
+
 def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
     current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
     next_path = run_projection_from_state(year, state, params, first_year_conversion=next_conversion, later_year_conversion=0.0)
@@ -1517,12 +1532,13 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "MAGI Remaining To Limit": float(aca_limit - float(row["MAGI"])),
                 "Within ACA Limit": bool(within_limit and not roth_tax_used),
                 "Current Effective Incremental Cost Rate": float(current_effective),
-                "Future Expected Avoided Effective Cost Rate": float(future_effective),
+                "Future Expected Avoided Effective Cost Rate": float(future_effective_blended),
                 "Net Benefit Rate": float(net_benefit_rate),
                 "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
                 "Tax Funding Penalty": float(tax_source_penalty),
                 "Current Marginal Tax Rate": float(row.get("Current Marginal Tax Rate", 0.0)),
                 "Estimated Future Marginal Rate": float("nan"),
+                "Effective Current Rate (Adjusted)": float(adjusted_current_effective_rate(current_effective, tax_source_penalty)),
                 "Roth Used For Tax Payment": bool(roth_tax_used),
                 "Current Year Federal Tax Delta": float(current_fed_delta),
                 "Current Year ACA Delta": float(current_aca_delta),
@@ -1613,6 +1629,9 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_effective = (future_avoided_fed + future_avoided_aca + future_avoided_irmaa) / delta_conv
             net_benefit_rate = future_effective - current_effective
 
+        effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
+        future_effective_blended = blended_future_effective_rate(future_effective, future_rate, tax_source_penalty)
+        net_benefit_rate = future_effective_blended - effective_current_adjusted
         within_limit = bool(within_target and (not roth_tax_used) and (current_conversion == 0 or net_benefit_rate > 1e-9))
 
         tested_rows.append({
@@ -1630,13 +1649,13 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
             "Within Target Bracket": within_target,
             "Current Effective Incremental Cost Rate": float(current_effective),
-            "Future Expected Avoided Effective Cost Rate": float(future_effective),
+            "Future Expected Avoided Effective Cost Rate": float(future_effective_blended),
             "Net Benefit Rate": float(net_benefit_rate),
             "Current Marginal Tax Rate": current_rate,
             "Estimated Future Marginal Rate": future_rate,
             "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
             "Tax Funding Penalty": float(tax_source_penalty),
-            "Effective Current Rate (Adjusted)": float(current_effective + tax_source_penalty),
+            "Effective Current Rate (Adjusted)": float(effective_current_adjusted),
             "Roth Used For Tax Payment": bool(roth_tax_used),
             "Current Year Federal Tax Delta": float(current_fed_delta),
             "Current Year ACA Delta": float(current_aca_delta),
@@ -1737,6 +1756,21 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         chosen_row["Ordinary Income Headroom Before Conversion"] = float(max(0.0, target_top - baseline_ord)) if coverage["aca_lives"] == 0 else 0.0
         chosen_row["Ordinary Income Remaining To Target"] = float(target_top - float(chosen_row.get("Ordinary Taxable Income", 0.0))) if coverage["aca_lives"] == 0 else 0.0
         chosen_row = enrich_year_row_for_display(year, dict(state), params, chosen_row)
+        # Pull selected BETR metrics from the matching decision row when available
+        if diag_df is not None and not diag_df.empty:
+            match = diag_df[diag_df["Test Conversion"].round(2) == round(float(optimal_conversion), 2)]
+            if not match.empty:
+                sel = match.iloc[-1].to_dict()
+                for src_key, dst_key in [
+                    ("Current Effective Incremental Cost Rate", "Current Effective Incremental Cost Rate"),
+                    ("Future Expected Avoided Effective Cost Rate", "Future Expected Avoided Effective Cost Rate"),
+                    ("Net Benefit Rate", "Net Benefit Rate"),
+                    ("Tax Funding Source", "Tax Funding Source"),
+                    ("Tax Funding Penalty", "Tax Funding Penalty"),
+                    ("Effective Current Rate (Adjusted)", "Effective Current Rate (Adjusted)"),
+                    ("Estimated Future Marginal Rate", "Estimated Future Marginal Rate"),
+                ]:
+                    chosen_row[dst_key] = sel.get(src_key, chosen_row.get(dst_key))
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
