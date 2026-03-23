@@ -1532,7 +1532,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "MAGI Remaining To Limit": float(aca_limit - float(row["MAGI"])),
                 "Within ACA Limit": bool(within_limit and not roth_tax_used),
                 "Current Effective Incremental Cost Rate": float(current_effective),
-                "Future Expected Avoided Effective Cost Rate": float(future_effective_blended),
+                "Future Expected Avoided Effective Cost Rate": float(future_effective),
                 "Net Benefit Rate": float(net_benefit_rate),
                 "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
                 "Tax Funding Penalty": float(tax_source_penalty),
