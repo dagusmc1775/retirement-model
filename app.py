@@ -1479,7 +1479,7 @@ def estimate_future_marginal_rate(year: int, state: dict, params: dict) -> dict:
     if int(params.get("earned_income_start_year", START_YEAR)) <= future_year <= int(params.get("earned_income_end_year", START_YEAR - 1)):
         earned_income = float(params.get("earned_income_annual", 0.0))
 
-        projected_rmd = estimate_household_rmd_for_year(future_year, projected_trad, params)
+    projected_rmd = estimate_household_rmd_for_year(future_year, projected_trad, params)
 
     tax_info = calculate_federal_tax(
         other_ordinary_income=earned_income + projected_rmd,
