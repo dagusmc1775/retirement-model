@@ -836,6 +836,60 @@ def normalize_balances(trad: float, roth: float, brokerage: float, cash: float, 
 # -----------------------------
 # PARAMS / HELPERS
 # -----------------------------
+
+def rmd_start_age_from_current_age(current_age: int) -> int:
+    """
+    Approximate SECURE 2.0 cohort logic from the modeled start-year age.
+    If the person would have been born in 1950 or earlier -> 72
+    1951-1959 -> 73
+    1960+ -> 75
+    """
+    birth_year = START_YEAR - int(current_age)
+    if birth_year <= 1950:
+        return 72
+    if birth_year <= 1959:
+        return 73
+    return 75
+
+
+def uniform_lifetime_divisor(age: int) -> float:
+    divisor_map = {
+        72: 27.4, 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
+        80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2,
+        87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1,
+        94: 9.5, 95: 8.9, 96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4
+    }
+    if age in divisor_map:
+        return float(divisor_map[age])
+    if age < 72:
+        return 27.4
+    return 6.4
+
+
+def estimate_household_rmd_for_year(year: int, trad_balance: float, params: dict) -> float:
+    """
+    Household simplification: once the first spouse reaches RMD age, apply a Uniform Lifetime
+    divisor based on the older spouse's age to the combined traditional balance.
+    """
+    owner_age = int(params.get("owner_current_age", 0)) + (year - START_YEAR)
+    spouse_age = int(params.get("spouse_current_age", 0)) + (year - START_YEAR)
+    owner_start_age = int(params.get("owner_rmd_start_age", 73))
+    spouse_start_age = int(params.get("spouse_rmd_start_age", 73))
+    owner_rmd_start = int(params.get("owner_rmd_start", START_YEAR + max(0, owner_start_age - int(params.get("owner_current_age", 0)))))
+    spouse_rmd_start = int(params.get("spouse_rmd_start", START_YEAR + max(0, spouse_start_age - int(params.get("spouse_current_age", 0)))))
+
+    if year < min(owner_rmd_start, spouse_rmd_start) and year < max(owner_rmd_start, spouse_rmd_start):
+        # Neither spouse yet at RMD age
+        if year < owner_rmd_start and year < spouse_rmd_start:
+            return 0.0
+
+    if trad_balance <= 0:
+        return 0.0
+
+    oldest_age = max(owner_age, spouse_age)
+    divisor = uniform_lifetime_divisor(oldest_age)
+    return max(0.0, float(trad_balance) / divisor)
+
 def build_common_params(inputs: dict) -> dict:
     owner_ss_start = ss_start_year_from_current_age(START_YEAR, int(inputs["owner_current_age"]), int(inputs["owner_claim_age"]))
     spouse_ss_start = ss_start_year_from_current_age(START_YEAR, int(inputs["spouse_current_age"]), int(inputs["spouse_claim_age"]))
@@ -843,8 +897,10 @@ def build_common_params(inputs: dict) -> dict:
     owner_ss_annual = annual_ss_benefit(float(inputs["owner_ss_base"]), int(inputs["owner_claim_age"]))
     spouse_ss_annual = annual_ss_benefit(float(inputs["spouse_ss_base"]), int(inputs["spouse_claim_age"]))
 
-    owner_rmd_start = START_YEAR + max(0, 73 - int(inputs["owner_current_age"]))
-    spouse_rmd_start = START_YEAR + max(0, 73 - int(inputs["spouse_current_age"]))
+    owner_rmd_start_age = rmd_start_age_from_current_age(int(inputs["owner_current_age"]))
+    spouse_rmd_start_age = rmd_start_age_from_current_age(int(inputs["spouse_current_age"]))
+    owner_rmd_start = START_YEAR + max(0, owner_rmd_start_age - int(inputs["owner_current_age"]))
+    spouse_rmd_start = START_YEAR + max(0, spouse_rmd_start_age - int(inputs["spouse_current_age"]))
     household_rmd_start = min(owner_rmd_start, spouse_rmd_start)
 
     return {
@@ -865,6 +921,10 @@ def build_common_params(inputs: dict) -> dict:
         "rmd_era_target_bracket": str(inputs.get("rmd_era_target_bracket", "22%")),
         "owner_current_age": int(inputs["owner_current_age"]),
         "spouse_current_age": int(inputs["spouse_current_age"]),
+        "owner_rmd_start_age": int(owner_rmd_start_age),
+        "spouse_rmd_start_age": int(spouse_rmd_start_age),
+        "owner_rmd_start": int(owner_rmd_start),
+        "spouse_rmd_start": int(spouse_rmd_start),
     }
 
 
@@ -1060,6 +1120,12 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     brokerage *= (1 + growth)
 
     # Cash-like inflows arrive during the year
+    # Actual RMD enforcement (household simplification on combined Trad balance)
+    rmd_for_year = estimate_household_rmd_for_year(year, trad, params)
+    if rmd_for_year > 0:
+        trad -= rmd_for_year
+        cash += rmd_for_year
+
     owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
     spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
     total_ss = owner_ss + spouse_ss
@@ -1080,10 +1146,11 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = spend_result["cash"]
 
     spending_trad_withdrawal = float(spend_result["taxable_trad_withdrawal"])
+    total_trad_withdrawal_income = spending_trad_withdrawal + float(rmd_for_year)
     spending_realized_ltcg = float(spend_result["realized_ltcg"])
 
     # 2) Baseline income stack before any optional conversion
-    baseline_other_ordinary_income = earned_income + spending_trad_withdrawal
+    baseline_other_ordinary_income = earned_income + total_trad_withdrawal_income
     baseline_tax_info = calculate_federal_tax(
         baseline_other_ordinary_income,
         total_ss,
@@ -1098,7 +1165,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     roth += conversion
 
     # 4) Final income stack for the year
-    other_ordinary_income = earned_income + spending_trad_withdrawal + conversion
+    other_ordinary_income = earned_income + total_trad_withdrawal_income + conversion
     realized_ltcg = spending_realized_ltcg
 
     tax_info = calculate_federal_tax(
@@ -1185,7 +1252,9 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Chosen Conversion": conversion,
         "Earned Income": earned_income,
         "Conversion Income Component": conversion,
-        "Trad Withdrawal Income Component": spending_trad_withdrawal,
+        "RMD Income Component": float(rmd_for_year),
+        "Trad Withdrawal Income Component": total_trad_withdrawal_income,
+        "Spending Trad Withdrawal Component": spending_trad_withdrawal,
         "Other Ordinary Income": other_ordinary_income,
         "Brokerage Realized LTCG": realized_ltcg,
         "Taxable SS": tax_info["taxable_ss"],
@@ -1410,18 +1479,7 @@ def estimate_future_marginal_rate(year: int, state: dict, params: dict) -> dict:
     if int(params.get("earned_income_start_year", START_YEAR)) <= future_year <= int(params.get("earned_income_end_year", START_YEAR - 1)):
         earned_income = float(params.get("earned_income_annual", 0.0))
 
-    # Approximate first RMD using Uniform Lifetime divisors.
-    owner_age_future = int(params.get("owner_current_age", 0)) + (future_year - START_YEAR)
-    spouse_age_future = int(params.get("spouse_current_age", 0)) + (future_year - START_YEAR)
-    oldest_age = max(owner_age_future, spouse_age_future)
-
-    divisor_map = {
-        73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
-        80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2,
-        87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2
-    }
-    divisor = divisor_map.get(oldest_age, 26.5 if oldest_age < 73 else 12.2 if oldest_age > 90 else 26.5)
-    projected_rmd = projected_trad / divisor if future_year >= int(params["household_rmd_start"]) and projected_trad > 0 else 0.0
+        projected_rmd = estimate_household_rmd_for_year(future_year, projected_trad, params)
 
     tax_info = calculate_federal_tax(
         other_ordinary_income=earned_income + projected_rmd,
