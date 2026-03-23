@@ -1384,6 +1384,20 @@ def blended_future_effective_rate(delta_based_rate: float, estimated_future_rate
 def adjusted_current_effective_rate(delta_based_rate: float, tax_source_penalty: float) -> float:
     return max(0.0, float(delta_based_rate) + float(tax_source_penalty))
 
+def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate: float, current_marginal_rate: float) -> float:
+    """
+    Use the delta-based future avoided-cost rate when present, but stabilize cliff-driven spikes.
+    If the raw delta-based rate is zero/unavailable, fall back to the estimated future marginal rate.
+    Then cap the result to a modest premium over the larger of current/future bracket proxies.
+    """
+    base = float(raw_delta_rate)
+    if abs(base) <= 1e-12:
+        base = float(estimated_future_rate)
+    floor = 0.0
+    cap = max(float(current_marginal_rate), float(estimated_future_rate)) + 0.15
+    return max(floor, min(base, cap))
+
+
 def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
     current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
     next_path = run_projection_from_state(year, state, params, first_year_conversion=next_conversion, later_year_conversion=0.0)
@@ -1688,7 +1702,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             net_benefit_rate = future_effective - current_effective
 
         effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
-        future_effective_blended = blended_future_effective_rate(future_effective, future_rate, tax_source_penalty)
+        future_effective_blended = stabilized_future_avoided_rate(future_effective, future_rate, current_rate)
         net_benefit_rate = future_effective_blended - effective_current_adjusted
         within_limit = bool(within_target and (not roth_tax_used) and (current_conversion == 0 or net_benefit_rate > 1e-9))
 
@@ -1734,10 +1748,15 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Within Full Guardrails": within_limit,
         })
 
-        if within_limit and net_benefit_rate >= selected_net_benefit - 1e-12:
-            selected_conversion = float(current_conversion)
-            selected_row = row
-            selected_net_benefit = float(net_benefit_rate)
+        # Winner selection: keep the highest valid conversion. Use net benefit as tie-breaker.
+        if within_limit:
+            if (float(current_conversion) > float(selected_conversion) + 1e-12) or (
+                abs(float(current_conversion) - float(selected_conversion)) <= 1e-12
+                and float(net_benefit_rate) >= float(selected_net_benefit) - 1e-12
+            ):
+                selected_conversion = float(current_conversion)
+                selected_row = row
+                selected_net_benefit = float(net_benefit_rate)
 
         prev = {"conversion": current_conversion, "path": path, "row": row}
         if current_conversion >= max_test - 0.01:
@@ -1748,7 +1767,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search based on true delta costs and avoided future drag"
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search, stabilized future avoided-rate math, and highest-valid-conversion winner selection"
     return round(selected_conversion, 2), selected_row, diag_df
 
 
