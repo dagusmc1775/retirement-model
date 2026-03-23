@@ -1566,8 +1566,6 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         if within_limit:
             selected_conversion = float(current_conversion)
             selected_row = row
-        else:
-            break
 
         if current_conversion >= max_test - 0.01:
             break
@@ -1577,7 +1575,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
-        diag_df["Bracket Solver Note"] = "Non-ACA years use highest tested conversion that stays within target ordinary-income bracket"
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range search and keep the highest tested conversion that stays within target ordinary-income bracket and full guardrails"
     return round(selected_conversion, 2), selected_row, diag_df
 
 
