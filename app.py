@@ -929,8 +929,9 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Taxable Income", "Ordinary Taxable Income", "LTCG Taxable Income",
 
         # Rates / policy outputs
-        "Current Marginal Tax Rate", "Estimated Future Marginal Rate",
-        "Effective Current Rate (Adjusted)",
+        "Current Marginal Tax Rate", "Current Effective Incremental Cost Rate",
+        "Estimated Future Marginal Rate", "Future Expected Avoided Effective Cost Rate",
+        "Net Benefit Rate", "Effective Current Rate (Adjusted)",
         "ACA Lives", "Medicare Lives", "Primary On ACA", "Spouse On ACA",
 
         # Costs
@@ -972,8 +973,8 @@ def organize_decision_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Base MAGI", "Test MAGI", "MAGI Remaining To Limit", "Within ACA Limit",
         "Target Bracket", "Target Ordinary Taxable Income", "Baseline Ordinary Taxable Income (0 Conv)",
         "Test Ordinary Taxable Income", "Ordinary Income Remaining To Target", "Within Target Bracket",
-        "Current Effective Rate", "Future Expected Effective Rate", "Net Benefit Rate",
-        "Current Marginal Rate", "Estimated Future Marginal Rate", "BETR Pass",
+        "Current Effective Incremental Cost Rate", "Future Expected Avoided Effective Cost Rate", "Net Benefit Rate",
+        "Current Marginal Tax Rate", "Estimated Future Marginal Rate", "BETR Stop Trigger Hit",
         "Tax Funding Source", "Tax Funding Penalty", "Effective Current Rate (Adjusted)",
         "Current Year Federal Tax Delta", "Current Year ACA Delta", "Current Year IRMAA Delta", "Current Marginal Cost",
         "Future Avoided Federal Tax", "Future Avoided ACA Cost", "Future Avoided IRMAA Cost", "Future Avoided Cost",
@@ -1439,15 +1440,23 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Base Conversion": 0.0,
             "Test Conversion": 0.0,
             "Step Amount": 0.0,
-            "Current Marginal Cost": 0.0,
-            "Future Avoided Cost": 0.0,
-            "Net Benefit": 0.0,
+            "Current Effective Incremental Cost Rate": 0.0,
+            "Future Expected Avoided Effective Cost Rate": 0.0,
+            "Net Benefit Rate": 0.0,
             "Break-Even Reached": True,
             "Decision Mode": "No Conversion Available",
             "Reason": "No available traditional balance to convert",
         }])
         return 0.0, zero_row, diag
 
+    def _future_drag(path: dict, first_row: dict) -> dict:
+        return {
+            "federal": float(path["total_federal_taxes"]) - float(first_row.get("Federal Tax", 0.0)),
+            "aca": float(path["total_aca_cost"]) - float(first_row.get("ACA Cost", 0.0)),
+            "irmaa": float(path["total_irmaa_cost"]) - float(first_row.get("IRMAA Cost", 0.0)),
+        }
+
+    # ACA years: maximize conversion under ACA limit, but also expose true incremental economics
     if coverage["aca_lives"] > 0:
         aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
         tested_rows = []
@@ -1457,6 +1466,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         selected_conversion = 0.0
         selected_row = baseline_row
 
+        prev = None
         step_index = 0
         while True:
             current_conversion = min(cap, step_index * step_size)
@@ -1466,16 +1476,62 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
             row = path["df"].iloc[0].to_dict()
             within_limit = bool(float(row["MAGI"]) <= aca_limit + 0.01)
+            tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(row)
+            roth_tax_used = "roth" in tax_sources
+
+            current_effective = 0.0
+            future_effective = 0.0
+            net_benefit_rate = 0.0
+            current_fed_delta = 0.0
+            current_aca_delta = 0.0
+            current_irmaa_delta = 0.0
+            future_avoided_fed = 0.0
+            future_avoided_aca = 0.0
+            future_avoided_irmaa = 0.0
+            if prev is not None and current_conversion > prev["conversion"] + 1e-9:
+                delta_conv = float(current_conversion - prev["conversion"])
+                current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
+                current_aca_delta = float(row["ACA Cost"]) - float(prev["row"]["ACA Cost"])
+                current_irmaa_delta = float(row["IRMAA Cost"]) - float(prev["row"]["IRMAA Cost"])
+                current_effective = (current_fed_delta + current_aca_delta + current_irmaa_delta) / delta_conv
+
+                curr_future = _future_drag(path, row)
+                prev_future = _future_drag(prev["path"], prev["row"])
+                future_avoided_fed = prev_future["federal"] - curr_future["federal"]
+                future_avoided_aca = prev_future["aca"] - curr_future["aca"]
+                future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
+                future_effective = (future_avoided_fed + future_avoided_aca + future_avoided_irmaa) / delta_conv
+                net_benefit_rate = future_effective - current_effective
+
             tested_rows.append({
                 "Year": year,
                 "Decision Mode": "ACA Headroom",
+                "Step Index": int(step_index),
+                "Base Conversion": float(prev["conversion"]) if prev is not None else 0.0,
+                "Test Conversion": float(current_conversion),
+                "Step Amount": float(current_conversion - (prev["conversion"] if prev is not None else 0.0)),
                 "Baseline MAGI (0 Conv)": baseline_magi,
                 "ACA MAGI Limit": float(aca_limit),
                 "MAGI Headroom Before Conversion": float(max(0.0, aca_limit - baseline_magi)),
-                "Test Conversion": float(current_conversion),
                 "Test MAGI": float(row["MAGI"]),
                 "MAGI Remaining To Limit": float(aca_limit - float(row["MAGI"])),
-                "Within ACA Limit": within_limit,
+                "Within ACA Limit": bool(within_limit and not roth_tax_used),
+                "Current Effective Incremental Cost Rate": float(current_effective),
+                "Future Expected Avoided Effective Cost Rate": float(future_effective),
+                "Net Benefit Rate": float(net_benefit_rate),
+                "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
+                "Tax Funding Penalty": float(tax_source_penalty),
+                "Current Marginal Tax Rate": float(row.get("Current Marginal Tax Rate", 0.0)),
+                "Estimated Future Marginal Rate": float("nan"),
+                "Roth Used For Tax Payment": bool(roth_tax_used),
+                "Current Year Federal Tax Delta": float(current_fed_delta),
+                "Current Year ACA Delta": float(current_aca_delta),
+                "Current Year IRMAA Delta": float(current_irmaa_delta),
+                "Current Marginal Cost": float(current_fed_delta + current_aca_delta + current_irmaa_delta),
+                "Future Avoided Federal Tax": float(future_avoided_fed),
+                "Future Avoided ACA Cost": float(future_avoided_aca),
+                "Future Avoided IRMAA Cost": float(future_avoided_irmaa),
+                "Future Avoided Cost": float(future_avoided_fed + future_avoided_aca + future_avoided_irmaa),
                 "Federal Tax": float(row["Federal Tax"]),
                 "ACA Cost": float(row["ACA Cost"]),
                 "IRMAA Cost": float(row["IRMAA Cost"]),
@@ -1484,12 +1540,13 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "EOY Cash": float(row["EOY Cash"]),
                 "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
             })
-            if within_limit:
+            if within_limit and not roth_tax_used:
                 selected_conversion = float(current_conversion)
                 selected_row = row
             else:
                 break
 
+            prev = {"conversion": current_conversion, "path": path, "row": row}
             if current_conversion >= cap - 0.01:
                 break
             step_index += 1
@@ -1501,8 +1558,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             diag_df["ACA Solver Note"] = "ACA years use highest tested conversion that stays within ACA MAGI limit"
         return round(selected_conversion, 2), selected_row, diag_df
 
-    # Non-ACA years: fill ordinary taxable income to the selected target bracket,
-    # but stop once current marginal rate reaches or exceeds the estimated future marginal rate.
+    # Non-ACA years: use true incremental BETR math, subject to target bracket and tax-funding guardrails.
     target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
     target_top = get_target_bracket_top(year, target_label)
     baseline_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
@@ -1516,6 +1572,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     tested_rows = []
     selected_conversion = 0.0
     selected_row = baseline_row
+    selected_net_benefit = float("-inf")
+    prev = None
 
     step_index = 0
     while True:
@@ -1529,32 +1587,65 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         current_rate = float(row.get("Current Marginal Tax Rate", 0.0))
         within_target = bool(ordinary_taxable <= float(target_top) + 0.01)
         tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(row)
-        effective_current_rate = current_rate + tax_source_penalty
         roth_tax_used = "roth" in tax_sources
-        betr_ok = bool(effective_current_rate < future_rate - 1e-9) if current_conversion > 0 else True
-        within_limit = within_target and betr_ok and (not roth_tax_used)
+
+        current_effective = 0.0
+        future_effective = 0.0
+        net_benefit_rate = 0.0
+        current_fed_delta = 0.0
+        current_aca_delta = 0.0
+        current_irmaa_delta = 0.0
+        future_avoided_fed = 0.0
+        future_avoided_aca = 0.0
+        future_avoided_irmaa = 0.0
+        if prev is not None and current_conversion > prev["conversion"] + 1e-9:
+            delta_conv = float(current_conversion - prev["conversion"])
+            current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
+            current_aca_delta = float(row["ACA Cost"]) - float(prev["row"]["ACA Cost"])
+            current_irmaa_delta = float(row["IRMAA Cost"]) - float(prev["row"]["IRMAA Cost"])
+            current_effective = (current_fed_delta + current_aca_delta + current_irmaa_delta) / delta_conv
+
+            curr_future = _future_drag(path, row)
+            prev_future = _future_drag(prev["path"], prev["row"])
+            future_avoided_fed = prev_future["federal"] - curr_future["federal"]
+            future_avoided_aca = prev_future["aca"] - curr_future["aca"]
+            future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
+            future_effective = (future_avoided_fed + future_avoided_aca + future_avoided_irmaa) / delta_conv
+            net_benefit_rate = future_effective - current_effective
+
+        within_limit = bool(within_target and (not roth_tax_used) and (current_conversion == 0 or net_benefit_rate > 1e-9))
 
         tested_rows.append({
             "Year": year,
-            "Decision Mode": "Bracket Fill + Future Rate Guardrail",
+            "Decision Mode": "BETR Full-Range Search",
+            "Step Index": int(step_index),
+            "Base Conversion": float(prev["conversion"]) if prev is not None else 0.0,
+            "Test Conversion": float(current_conversion),
+            "Step Amount": float(current_conversion - (prev["conversion"] if prev is not None else 0.0)),
             "Target Bracket": str(target_label),
             "Target Ordinary Taxable Income": float(target_top),
             "Baseline Ordinary Taxable Income (0 Conv)": baseline_ordinary_taxable,
-            "Ordinary Income Headroom Before Conversion": float(max(0.0, target_top - baseline_ordinary_taxable)),
-            "Test Conversion": float(current_conversion),
             "Test Ordinary Taxable Income": ordinary_taxable,
+            "Ordinary Income Headroom Before Conversion": float(max(0.0, target_top - baseline_ordinary_taxable)),
             "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
+            "Within Target Bracket": within_target,
+            "Current Effective Incremental Cost Rate": float(current_effective),
+            "Future Expected Avoided Effective Cost Rate": float(future_effective),
+            "Net Benefit Rate": float(net_benefit_rate),
             "Current Marginal Tax Rate": current_rate,
             "Estimated Future Marginal Rate": future_rate,
             "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
             "Tax Funding Penalty": float(tax_source_penalty),
-            "Effective Current Rate (Adjusted)": float(effective_current_rate),
+            "Effective Current Rate (Adjusted)": float(current_effective + tax_source_penalty),
             "Roth Used For Tax Payment": bool(roth_tax_used),
-            "Projected Future RMD": float(future_rate_info["projected_future_rmd"]),
-            "Projected Future Ordinary Income": float(future_rate_info["projected_future_ordinary_income"]),
-            "BETR Stop Trigger Hit": bool(current_rate >= future_rate and current_conversion > 0),
-            "Within Target Bracket": within_target,
-            "Within Full Guardrails": within_limit,
+            "Current Year Federal Tax Delta": float(current_fed_delta),
+            "Current Year ACA Delta": float(current_aca_delta),
+            "Current Year IRMAA Delta": float(current_irmaa_delta),
+            "Current Marginal Cost": float(current_fed_delta + current_aca_delta + current_irmaa_delta),
+            "Future Avoided Federal Tax": float(future_avoided_fed),
+            "Future Avoided ACA Cost": float(future_avoided_aca),
+            "Future Avoided IRMAA Cost": float(future_avoided_irmaa),
+            "Future Avoided Cost": float(future_avoided_fed + future_avoided_aca + future_avoided_irmaa),
             "Federal Tax": float(row["Federal Tax"]),
             "ACA Cost": float(row["ACA Cost"]),
             "IRMAA Cost": float(row["IRMAA Cost"]),
@@ -1562,11 +1653,16 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "EOY Brokerage": float(row["EOY Brokerage"]),
             "EOY Cash": float(row["EOY Cash"]),
             "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
+            "BETR Stop Trigger Hit": bool(current_conversion > 0 and net_benefit_rate <= 0.0),
+            "Within Full Guardrails": within_limit,
         })
-        if within_limit:
+
+        if within_limit and net_benefit_rate >= selected_net_benefit - 1e-12:
             selected_conversion = float(current_conversion)
             selected_row = row
+            selected_net_benefit = float(net_benefit_rate)
 
+        prev = {"conversion": current_conversion, "path": path, "row": row}
         if current_conversion >= max_test - 0.01:
             break
         step_index += 1
@@ -1575,8 +1671,9 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range search and keep the highest tested conversion that stays within target ordinary-income bracket and full guardrails"
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search based on true delta costs and avoided future drag"
     return round(selected_conversion, 2), selected_row, diag_df
+
 
 
 def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size: float) -> dict:
@@ -1644,6 +1741,21 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
 
         if not diag_df.empty:
             diag_df["Applied Conversion"] = float(optimal_conversion)
+            try:
+                selected_diag = diag_df.loc[(diag_df["Test Conversion"].astype(float) - float(optimal_conversion)).abs() < 0.01].iloc[-1].to_dict()
+                for k in [
+                    "Current Effective Incremental Cost Rate",
+                    "Future Expected Avoided Effective Cost Rate",
+                    "Net Benefit Rate",
+                    "Tax Funding Source",
+                    "Tax Funding Penalty",
+                    "Effective Current Rate (Adjusted)",
+                    "BETR Stop Trigger Hit",
+                ]:
+                    if k in selected_diag:
+                        chosen_row[k] = selected_diag[k]
+            except Exception:
+                pass
             decision_frames.append(diag_df)
 
     chosen_df = pd.DataFrame(chosen_rows)
