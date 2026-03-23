@@ -950,6 +950,19 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
 def calc_total_drag(row: dict) -> float:
     return float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
 
+def sanitize_effective_rate(raw_rate: float, current_marginal_rate: float) -> float:
+    """
+    Clamp pathological effective-rate outputs caused by stale/zero deltas.
+    Effective rate can exceed marginal rate due to SS interaction, but it should not
+    be materially negative and should not sit far below marginal rate when taxes are positive.
+    """
+    r = max(0.0, float(raw_rate))
+    cm = max(0.0, float(current_marginal_rate))
+    if cm > 0 and r > 0 and r < cm * 0.8:
+        r = cm
+    return r
+
+
 
 # -----------------------------
 # DISPLAY COLUMN ORGANIZATION
@@ -1575,12 +1588,16 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_avoided_fed = 0.0
             future_avoided_aca = 0.0
             future_avoided_irmaa = 0.0
+            baseline_total_tax = float(prev["row"]["Federal Tax"] + prev["row"]["ACA Cost"] + prev["row"]["IRMAA Cost"]) if prev is not None else float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+            test_total_tax = float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+            delta_total_tax = 0.0
             if prev is not None and current_conversion > prev["conversion"] + 1e-9:
                 delta_conv = float(current_conversion - prev["conversion"])
                 current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
                 current_aca_delta = float(row["ACA Cost"]) - float(prev["row"]["ACA Cost"])
                 current_irmaa_delta = float(row["IRMAA Cost"]) - float(prev["row"]["IRMAA Cost"])
-                current_effective = (current_fed_delta + current_aca_delta + current_irmaa_delta) / delta_conv
+                delta_total_tax = float(current_fed_delta + current_aca_delta + current_irmaa_delta)
+                current_effective = sanitize_effective_rate(delta_total_tax / delta_conv, float(row.get("Current Marginal Tax Rate", 0.0)))
 
                 curr_future = _future_drag(path, row)
                 prev_future = _future_drag(prev["path"], prev["row"])
@@ -1616,6 +1633,12 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "Current Year ACA Delta": float(current_aca_delta),
                 "Current Year IRMAA Delta": float(current_irmaa_delta),
                 "Current Marginal Cost": float(current_fed_delta + current_aca_delta + current_irmaa_delta),
+            "Baseline Total Tax": float(baseline_total_tax),
+            "Test Total Tax": float(test_total_tax),
+            "Delta Total Tax": float(delta_total_tax),
+                "Baseline Total Tax": float(baseline_total_tax),
+                "Test Total Tax": float(test_total_tax),
+                "Delta Total Tax": float(delta_total_tax),
                 "Future Avoided Federal Tax": float(future_avoided_fed),
                 "Future Avoided ACA Cost": float(future_avoided_aca),
                 "Future Avoided IRMAA Cost": float(future_avoided_irmaa),
@@ -1686,12 +1709,16 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         future_avoided_fed = 0.0
         future_avoided_aca = 0.0
         future_avoided_irmaa = 0.0
+        baseline_total_tax = float(prev["row"]["Federal Tax"] + prev["row"]["ACA Cost"] + prev["row"]["IRMAA Cost"]) if prev is not None else float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+        test_total_tax = float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+        delta_total_tax = 0.0
         if prev is not None and current_conversion > prev["conversion"] + 1e-9:
             delta_conv = float(current_conversion - prev["conversion"])
             current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
             current_aca_delta = float(row["ACA Cost"]) - float(prev["row"]["ACA Cost"])
             current_irmaa_delta = float(row["IRMAA Cost"]) - float(prev["row"]["IRMAA Cost"])
-            current_effective = (current_fed_delta + current_aca_delta + current_irmaa_delta) / delta_conv
+            delta_total_tax = float(current_fed_delta + current_aca_delta + current_irmaa_delta)
+            current_effective = sanitize_effective_rate(delta_total_tax / delta_conv, float(row.get("Current Marginal Tax Rate", 0.0)))
 
             curr_future = _future_drag(path, row)
             prev_future = _future_drag(prev["path"], prev["row"])
@@ -1861,6 +1888,9 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     ("Tax Funding Penalty", "Tax Funding Penalty"),
                     ("Effective Current Rate (Adjusted)", "Effective Current Rate (Adjusted)"),
                     ("Estimated Future Marginal Rate", "Estimated Future Marginal Rate"),
+                    ("Baseline Total Tax", "Baseline Total Tax"),
+                    ("Test Total Tax", "Test Total Tax"),
+                    ("Delta Total Tax", "Delta Total Tax"),
                     ("Post-RMD Hurdle", "Post-RMD Hurdle"),
                     ("Post-RMD Policy Active", "Post-RMD Policy Active"),
                 ]:
