@@ -1702,7 +1702,11 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             net_benefit_rate = future_effective - current_effective
 
         effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
-        future_effective_blended = stabilized_future_avoided_rate(future_effective, future_rate, current_rate)
+
+        # Clean future-rate logic:
+        # Use the projected future marginal rate as the avoided-rate anchor instead of
+        # lifetime-delta percentages, which can be distorted by multi-year threshold effects.
+        future_effective_blended = float(future_rate)
         net_benefit_rate = future_effective_blended - effective_current_adjusted
         # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
         post_rmd_hurdle = 0.05 if year >= int(params["household_rmd_start"]) else 0.0
@@ -1778,7 +1782,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search, stabilized future avoided-rate math, highest-valid-conversion winner selection, and a stricter post-RMD hurdle"
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, and a stricter post-RMD hurdle"
     return round(selected_conversion, 2), selected_row, diag_df
 
 
