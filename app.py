@@ -1704,7 +1704,16 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
         future_effective_blended = stabilized_future_avoided_rate(future_effective, future_rate, current_rate)
         net_benefit_rate = future_effective_blended - effective_current_adjusted
-        within_limit = bool(within_target and (not roth_tax_used) and (current_conversion == 0 or net_benefit_rate > 1e-9))
+        # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
+        post_rmd_hurdle = 0.05 if year >= int(params["household_rmd_start"]) else 0.0
+        within_limit = bool(
+            within_target
+            and (not roth_tax_used)
+            and (
+                current_conversion == 0
+                or net_benefit_rate > post_rmd_hurdle
+            )
+        )
 
         tested_rows.append({
             "Year": year,
@@ -1720,6 +1729,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Ordinary Income Headroom Before Conversion": float(max(0.0, target_top - baseline_ordinary_taxable)),
             "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
             "Within Target Bracket": within_target,
+            "Post-RMD Hurdle": float(post_rmd_hurdle),
             "Current Effective Incremental Cost Rate": float(current_effective),
             "Future Expected Avoided Effective Cost Rate": float(future_effective_blended),
             "Net Benefit Rate": float(net_benefit_rate),
@@ -1746,6 +1756,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
             "BETR Stop Trigger Hit": bool(current_conversion > 0 and net_benefit_rate <= 0.0),
             "Within Full Guardrails": within_limit,
+            "Post-RMD Policy Active": bool(year >= int(params["household_rmd_start"])),
         })
 
         # Winner selection: keep the highest valid conversion. Use net benefit as tie-breaker.
@@ -1767,7 +1778,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search, stabilized future avoided-rate math, and highest-valid-conversion winner selection"
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search, stabilized future avoided-rate math, highest-valid-conversion winner selection, and a stricter post-RMD hurdle"
     return round(selected_conversion, 2), selected_row, diag_df
 
 
@@ -1846,6 +1857,8 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     ("Tax Funding Penalty", "Tax Funding Penalty"),
                     ("Effective Current Rate (Adjusted)", "Effective Current Rate (Adjusted)"),
                     ("Estimated Future Marginal Rate", "Estimated Future Marginal Rate"),
+                    ("Post-RMD Hurdle", "Post-RMD Hurdle"),
+                    ("Post-RMD Policy Active", "Post-RMD Policy Active"),
                 ]:
                     chosen_row[dst_key] = sel.get(src_key, chosen_row.get(dst_key))
         chosen_rows.append(chosen_row)
