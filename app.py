@@ -1895,6 +1895,19 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     ("Post-RMD Policy Active", "Post-RMD Policy Active"),
                 ]:
                     chosen_row[dst_key] = sel.get(src_key, chosen_row.get(dst_key))
+                # legacy-to-current fallback aliases
+                if chosen_row.get("Current Marginal Incremental Cost Rate") in (None, "", 0):
+                    chosen_row["Current Marginal Incremental Cost Rate"] = sel.get("Current Effective Incremental Cost Rate", chosen_row.get("Current Marginal Incremental Cost Rate", 0))
+                if chosen_row.get("Projected Future Avoided Rate") in (None, "", 0):
+                    chosen_row["Projected Future Avoided Rate"] = sel.get("Future Expected Avoided Effective Cost Rate", chosen_row.get("Projected Future Avoided Rate", 0))
+                if chosen_row.get("Baseline Total Tax") in (None, ""):
+                    chosen_row["Baseline Total Tax"] = sel.get("Baseline Total Tax", 0.0)
+                if chosen_row.get("Test Total Tax") in (None, ""):
+                    chosen_row["Test Total Tax"] = sel.get("Test Total Tax", 0.0)
+                if chosen_row.get("Delta Total Tax") in (None, ""):
+                    chosen_row["Delta Total Tax"] = sel.get("Delta Total Tax", 0.0)
+                if chosen_row.get("Whole Conversion Effective Cost Rate") in (None, ""):
+                    chosen_row["Whole Conversion Effective Cost Rate"] = sel.get("Whole Conversion Effective Cost Rate", 0.0)
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
