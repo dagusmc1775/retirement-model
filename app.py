@@ -1018,7 +1018,7 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         # Ending balances
         "EOY Trad", "EOY Roth", "EOY Brokerage", "EOY Brokerage Basis",
-        "EOY Brokerage Unrealized Gain", "EOY Cash", "Net Worth",
+        "EOY Brokerage Unrealized Gain", "Cash Swept To Brokerage", "EOY Cash", "Net Worth",
 
         # Diagnostics / solver details
         "Baseline MAGI Before Conversion",
@@ -1300,6 +1300,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "EOY Brokerage": brokerage,
         "EOY Brokerage Basis": brokerage_basis,
         "EOY Brokerage Unrealized Gain": max(0.0, brokerage - brokerage_basis),
+        "Cash Swept To Brokerage": cash_swept_to_brokerage,
         "EOY Cash": cash,
         "Net Worth": net_worth,
     }
