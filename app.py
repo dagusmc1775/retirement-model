@@ -1126,6 +1126,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     soy_brokerage = brokerage
     soy_brokerage_basis = brokerage_basis
     soy_cash = cash
+    cash_swept_to_brokerage = 0.0
 
     # Grow investable assets
     trad *= (1 + growth)
