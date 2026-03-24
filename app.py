@@ -1908,6 +1908,20 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     chosen_row["Delta Total Tax"] = sel.get("Delta Total Tax", 0.0)
                 if chosen_row.get("Whole Conversion Effective Cost Rate") in (None, ""):
                     chosen_row["Whole Conversion Effective Cost Rate"] = sel.get("Whole Conversion Effective Cost Rate", 0.0)
+        # Compute selected-row receipts directly from a true 0-conversion baseline so they always print.
+        baseline_path = run_projection_from_state(year, dict(state), params, first_year_conversion=0.0, later_year_conversion=0.0)
+        baseline_first_row = baseline_path["df"].iloc[0].to_dict()
+        baseline_total_tax = float(baseline_first_row.get("Federal Tax", 0.0) + baseline_first_row.get("ACA Cost", 0.0) + baseline_first_row.get("IRMAA Cost", 0.0))
+        test_total_tax = float(chosen_row.get("Federal Tax", 0.0) + chosen_row.get("ACA Cost", 0.0) + chosen_row.get("IRMAA Cost", 0.0))
+        delta_total_tax = float(test_total_tax - baseline_total_tax)
+        whole_effective_rate = 0.0
+        if float(optimal_conversion) > 1e-9:
+            whole_effective_rate = max(0.0, delta_total_tax / float(optimal_conversion))
+        chosen_row["Baseline Total Tax"] = baseline_total_tax
+        chosen_row["Test Total Tax"] = test_total_tax
+        chosen_row["Delta Total Tax"] = delta_total_tax
+        chosen_row["Whole Conversion Effective Cost Rate"] = whole_effective_rate
+
         chosen_rows.append(chosen_row)
 
         if not diag_df.empty:
@@ -1915,8 +1929,8 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             try:
                 selected_diag = diag_df.loc[(diag_df["Test Conversion"].astype(float) - float(optimal_conversion)).abs() < 0.01].iloc[-1].to_dict()
                 for k in [
-                    "Current Effective Incremental Cost Rate",
-                    "Future Expected Avoided Effective Cost Rate",
+                    "Current Marginal Incremental Cost Rate",
+                    "Projected Future Avoided Rate",
                     "Net Benefit Rate",
                     "Tax Funding Source",
                     "Tax Funding Penalty",
