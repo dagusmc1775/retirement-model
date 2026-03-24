@@ -1602,9 +1602,14 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_avoided_irmaa = 0.0
             baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
             test_total_tax = float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
-            delta_total_tax = float(test_total_tax - baseline_total_tax)
-            if current_conversion > 1e-9:
+            if current_conversion <= 1e-9:
+                delta_total_tax = 0.0
+                current_effective = 0.0
+                whole_effective_rate = 0.0
+            else:
+                delta_total_tax = float(test_total_tax - baseline_total_tax)
                 current_effective = sanitize_effective_rate(delta_total_tax / float(current_conversion), float(row.get("Current Marginal Tax Rate", 0.0)))
+                whole_effective_rate = max(0.0, delta_total_tax / float(current_conversion))
             if prev is not None and current_conversion > prev["conversion"] + 1e-9:
                 delta_conv = float(current_conversion - prev["conversion"])
                 current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
@@ -1723,9 +1728,14 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         future_avoided_irmaa = 0.0
         baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
         test_total_tax = float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
-        delta_total_tax = float(test_total_tax - baseline_total_tax)
-        if current_conversion > 1e-9:
+        if current_conversion <= 1e-9:
+            delta_total_tax = 0.0
+            current_effective = 0.0
+            whole_effective_rate = 0.0
+        else:
+            delta_total_tax = float(test_total_tax - baseline_total_tax)
             current_effective = sanitize_effective_rate(delta_total_tax / float(current_conversion), float(row.get("Current Marginal Tax Rate", 0.0)))
+            whole_effective_rate = max(0.0, delta_total_tax / float(current_conversion))
         if prev is not None and current_conversion > prev["conversion"] + 1e-9:
             delta_conv = float(current_conversion - prev["conversion"])
             current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
@@ -1925,14 +1935,16 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         baseline_first_row = baseline_path["df"].iloc[0].to_dict()
         baseline_total_tax = float(baseline_first_row.get("Federal Tax", 0.0) + baseline_first_row.get("ACA Cost", 0.0) + baseline_first_row.get("IRMAA Cost", 0.0))
         test_total_tax = float(chosen_row.get("Federal Tax", 0.0) + chosen_row.get("ACA Cost", 0.0) + chosen_row.get("IRMAA Cost", 0.0))
-        delta_total_tax = float(test_total_tax - baseline_total_tax)
-        whole_effective_rate = 0.0
-        if float(optimal_conversion) > 1e-9:
+        if float(optimal_conversion) <= 1e-9:
+            delta_total_tax = 0.0
+            whole_effective_rate = 0.0
+        else:
+            delta_total_tax = float(test_total_tax - baseline_total_tax)
             whole_effective_rate = max(0.0, delta_total_tax / float(optimal_conversion))
         chosen_row["Baseline Total Tax"] = baseline_total_tax
         chosen_row["Test Total Tax"] = test_total_tax
         chosen_row["Delta Total Tax"] = delta_total_tax
-        chosen_row["Whole Conversion Effective Cost Rate"] = whole_effective_rate
+        chosen_row["Whole Conversion Effective Cost Rate"] = 0.0 if abs(whole_effective_rate) > 1.0 else whole_effective_rate
 
         chosen_rows.append(chosen_row)
 
