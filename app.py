@@ -1244,6 +1244,16 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
 
     trad, roth, brokerage, cash, brokerage_basis = normalize_balances(trad, roth, brokerage, cash, brokerage_basis)
 
+    # End-of-year cash sweep: after all yearly flows are complete, sweep excess cash into brokerage.
+    cash_sweep_threshold = float(params.get("cash_sweep_threshold", 50000.0))
+    if cash > cash_sweep_threshold:
+        cash_swept_to_brokerage = float(cash - cash_sweep_threshold)
+        cash = float(cash_sweep_threshold)
+        brokerage += cash_swept_to_brokerage
+        brokerage_basis += cash_swept_to_brokerage
+
+    trad, roth, brokerage, cash, brokerage_basis = normalize_balances(trad, roth, brokerage, cash, brokerage_basis)
+
     year_shortfall = (
         spend_result["shortfall"]
         + tax_result["true_tax_shortfall"]
