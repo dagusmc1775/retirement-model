@@ -948,7 +948,7 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
 
 
 def calc_total_drag(row: dict) -> float:
-    return float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+    return float(row.get("Federal Tax", 0.0) + row.get("State Tax", 0.0) + row.get("ACA Cost", 0.0) + row.get("IRMAA Cost", 0.0))
 
 def sanitize_effective_rate(raw_rate: float, current_marginal_rate: float) -> float:
     """
@@ -1008,7 +1008,7 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
         "ACA Lives", "Medicare Lives", "Primary On ACA", "Spouse On ACA",
 
         # Costs
-        "Federal Tax", "Ordinary Tax", "LTCG Tax", "ACA Cost", "IRMAA Cost", "Year Shortfall",
+        "Federal Tax", "State Tax", "Total Tax", "Ordinary Tax", "LTCG Tax", "ACA Cost", "IRMAA Cost", "Year Shortfall",
 
         # Tax funding mechanics
         "Tax Funding Source", "Tax Funding Penalty",
@@ -1240,6 +1240,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         realized_ltcg=realized_ltcg,
     )
     federal_tax = tax_info["federal_tax"]
+    state_tax = max(0.0, float(tax_info["ordinary_taxable_income"] + tax_info.get("ltcg_taxable_income", 0.0))) * float(params.get("state_tax_rate", 0.0399))
     magi = calculate_magi(tax_info["agi"], year)
 
     trad, roth, brokerage, cash, brokerage_basis = normalize_balances(trad, roth, brokerage, cash, brokerage_basis)
@@ -1295,6 +1296,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "ACA Lives": aca_lives,
         "Medicare Lives": medicare_lives,
         "Federal Tax": federal_tax,
+        "State Tax": state_tax,
+        "Total Tax": federal_tax + state_tax,
         "Ordinary Tax": tax_info["ordinary_tax"],
         "LTCG Tax": tax_info["ltcg_tax"],
         "Tax Paid Preferred Cash": tax_result["preferred_from_cash"],
@@ -1562,8 +1565,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         return 0.0, zero_row, diag
 
     def _future_drag(path: dict, first_row: dict) -> dict:
+        total_state = float(path["df"]["State Tax"].sum()) if "State Tax" in path["df"].columns else 0.0
         return {
             "federal": float(path["total_federal_taxes"]) - float(first_row.get("Federal Tax", 0.0)),
+            "state": total_state - float(first_row.get("State Tax", 0.0)),
             "aca": float(path["total_aca_cost"]) - float(first_row.get("ACA Cost", 0.0)),
             "irmaa": float(path["total_irmaa_cost"]) - float(first_row.get("IRMAA Cost", 0.0)),
         }
@@ -1600,8 +1605,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_avoided_fed = 0.0
             future_avoided_aca = 0.0
             future_avoided_irmaa = 0.0
-            baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
-            test_total_tax = float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+            baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("State Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
+            test_total_tax = float(row["Federal Tax"] + row.get("State Tax", 0.0) + row["ACA Cost"] + row["IRMAA Cost"])
             if current_conversion <= 1e-9:
                 delta_total_tax = 0.0
                 current_effective = 0.0
@@ -1621,7 +1626,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 future_avoided_fed = prev_future["federal"] - curr_future["federal"]
                 future_avoided_aca = prev_future["aca"] - curr_future["aca"]
                 future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
-                future_effective = (future_avoided_fed + future_avoided_aca + future_avoided_irmaa) / delta_conv
+                future_avoided_state = float(max(0.0, baseline_drag.get("state", 0.0) - test_drag.get("state", 0.0)))
+            future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
                 net_benefit_rate = future_effective - current_effective
 
             tested_rows.append({
@@ -1657,9 +1663,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "Test Total Tax": float(test_total_tax),
                 "Delta Total Tax": float(delta_total_tax),
                 "Future Avoided Federal Tax": float(future_avoided_fed),
+                "Future Avoided State Tax": float(future_avoided_state),
                 "Future Avoided ACA Cost": float(future_avoided_aca),
                 "Future Avoided IRMAA Cost": float(future_avoided_irmaa),
-                "Future Avoided Cost": float(future_avoided_fed + future_avoided_aca + future_avoided_irmaa),
+                "Future Avoided Cost": float(future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa),
                 "Federal Tax": float(row["Federal Tax"]),
                 "ACA Cost": float(row["ACA Cost"]),
                 "IRMAA Cost": float(row["IRMAA Cost"]),
@@ -1726,8 +1733,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         future_avoided_fed = 0.0
         future_avoided_aca = 0.0
         future_avoided_irmaa = 0.0
-        baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
-        test_total_tax = float(row["Federal Tax"] + row["ACA Cost"] + row["IRMAA Cost"])
+        baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("State Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
+        test_total_tax = float(row["Federal Tax"] + row.get("State Tax", 0.0) + row["ACA Cost"] + row["IRMAA Cost"])
         if current_conversion <= 1e-9:
             delta_total_tax = 0.0
             current_effective = 0.0
@@ -1747,7 +1754,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_avoided_fed = prev_future["federal"] - curr_future["federal"]
             future_avoided_aca = prev_future["aca"] - curr_future["aca"]
             future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
-            future_effective = (future_avoided_fed + future_avoided_aca + future_avoided_irmaa) / delta_conv
+            future_avoided_state = float(max(0.0, baseline_drag.get("state", 0.0) - test_drag.get("state", 0.0)))
+            future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
             net_benefit_rate = future_effective - current_effective
 
         effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
@@ -1797,9 +1805,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Current Year IRMAA Delta": float(current_irmaa_delta),
             "Current Marginal Cost": float(current_fed_delta + current_aca_delta + current_irmaa_delta),
             "Future Avoided Federal Tax": float(future_avoided_fed),
+            "Future Avoided State Tax": float(future_avoided_state),
             "Future Avoided ACA Cost": float(future_avoided_aca),
             "Future Avoided IRMAA Cost": float(future_avoided_irmaa),
-            "Future Avoided Cost": float(future_avoided_fed + future_avoided_aca + future_avoided_irmaa),
+            "Future Avoided Cost": float(future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa),
             "Federal Tax": float(row["Federal Tax"]),
             "ACA Cost": float(row["ACA Cost"]),
             "IRMAA Cost": float(row["IRMAA Cost"]),
@@ -1933,8 +1942,8 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         # Compute selected-row receipts directly from a true 0-conversion baseline so they always print.
         baseline_path = run_projection_from_state(year, dict(state), params, first_year_conversion=0.0, later_year_conversion=0.0)
         baseline_first_row = baseline_path["df"].iloc[0].to_dict()
-        baseline_total_tax = float(baseline_first_row.get("Federal Tax", 0.0) + baseline_first_row.get("ACA Cost", 0.0) + baseline_first_row.get("IRMAA Cost", 0.0))
-        test_total_tax = float(chosen_row.get("Federal Tax", 0.0) + chosen_row.get("ACA Cost", 0.0) + chosen_row.get("IRMAA Cost", 0.0))
+        baseline_total_tax = float(baseline_first_row.get("Federal Tax", 0.0) + baseline_first_row.get("State Tax", 0.0) + baseline_first_row.get("ACA Cost", 0.0) + baseline_first_row.get("IRMAA Cost", 0.0))
+        test_total_tax = float(chosen_row.get("Federal Tax", 0.0) + chosen_row.get("State Tax", 0.0) + chosen_row.get("ACA Cost", 0.0) + chosen_row.get("IRMAA Cost", 0.0))
         if float(optimal_conversion) <= 1e-9:
             delta_total_tax = 0.0
             whole_effective_rate = 0.0
