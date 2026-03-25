@@ -1,3 +1,4 @@
+# version: target-trad-override-v3-relaxed-cap
 # version: target-trad-override-handoff-fix
 # version: target-trad-balance-override-cap
 # version: target-trad-balance-goal
@@ -1876,7 +1877,6 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Within Full Guardrails": within_limit,
             "Within Planner Override Cap": bool(
                 (not roth_tax_used)
-                and within_target
                 and float(current_conversion) > 0.0
                 and bool(params.get("target_trad_override_enabled", False))
                 and float(effective_current_adjusted) <= float(params.get("target_trad_override_max_rate", 0.22)) + 1e-12
@@ -1888,7 +1888,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         # - highest_guardrail_conversion tracks pure BETR-valid rows
         # - highest_override_conversion tracks rows that stay under the planner override cap,
         #   even if pure BETR already says stop
-        base_override_eligible = bool(within_target and (not roth_tax_used))
+        base_override_eligible = bool((not roth_tax_used))
 
         if within_limit:
             if float(current_conversion) >= float(highest_guardrail_conversion) - 1e-12:
