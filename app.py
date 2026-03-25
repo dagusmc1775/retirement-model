@@ -1,3 +1,4 @@
+# version: target-trad-balance-override-cap
 # version: target-trad-balance-goal
 # version: nc-state-tax-clean-base-v2
 # version: nc-state-tax-clean-base
@@ -932,6 +933,8 @@ def build_common_params(inputs: dict) -> dict:
         "state_tax_rate": float(inputs.get("state_tax_rate", 0.0399)),
         "target_trad_balance_enabled": bool(inputs.get("target_trad_balance_enabled", False)),
         "target_trad_balance": float(inputs.get("target_trad_balance", 300000.0)),
+        "target_trad_override_enabled": bool(inputs.get("target_trad_override_enabled", False)),
+        "target_trad_override_max_rate": float(inputs.get("target_trad_override_max_rate", 0.22)),
     }
 
 
@@ -1748,6 +1751,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     selected_net_benefit = float("-inf")
     highest_guardrail_conversion = 0.0
     highest_guardrail_row = baseline_row
+    highest_override_conversion = 0.0
+    highest_override_row = baseline_row
     prev = None
 
     step_index = 0
@@ -1876,6 +1881,14 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             if float(current_conversion) >= float(highest_guardrail_conversion) - 1e-12:
                 highest_guardrail_conversion = float(current_conversion)
                 highest_guardrail_row = row
+
+            override_cap = float(params.get("target_trad_override_max_rate", 0.22))
+            override_enabled = bool(params.get("target_trad_override_enabled", False))
+            if override_enabled and float(effective_current_adjusted) <= override_cap + 1e-12:
+                if float(current_conversion) >= float(highest_override_conversion) - 1e-12:
+                    highest_override_conversion = float(current_conversion)
+                    highest_override_row = row
+
             if (float(current_conversion) > float(selected_conversion) + 1e-12) or (
                 abs(float(current_conversion) - float(selected_conversion)) <= 1e-12
                 and float(net_benefit_rate) >= float(selected_net_benefit) - 1e-12
@@ -1890,26 +1903,27 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         step_index += 1
 
     # Optional planning overlay: if the Trad target goal implies a higher pre-RMD conversion,
-    # allow a larger conversion up to the highest guardrail-passing row, even if pure BETR already stopped.
+    # allow a larger conversion under either pure BETR guardrails or planner override cap.
     selection_mode = "BETR"
-    if (
-        float(target_pressure_conversion) > float(selected_conversion) + 1e-9
-        and float(highest_guardrail_conversion) >= float(target_pressure_conversion) - 1e-9
-    ):
-        selected_conversion = float(target_pressure_conversion)
-        # Prefer exact matching tested row when available.
-        target_matches = [r for r in tested_rows if abs(float(r.get("Test Conversion", 0.0)) - float(target_pressure_conversion)) < 0.01]
-        if target_matches:
+    if float(target_pressure_conversion) > float(selected_conversion) + 1e-9:
+        chosen_override_conversion = None
+        if float(highest_guardrail_conversion) >= float(target_pressure_conversion) - 1e-9:
+            chosen_override_conversion = float(target_pressure_conversion)
+            selection_mode = "TRAD_TARGET_PRESSURE"
+        elif bool(params.get("target_trad_override_enabled", False)) and float(highest_override_conversion) > float(selected_conversion) + 1e-9:
+            chosen_override_conversion = float(min(target_pressure_conversion, highest_override_conversion))
+            selection_mode = "TRAD_TARGET_OVERRIDE"
+
+        if chosen_override_conversion is not None and float(chosen_override_conversion) > float(selected_conversion) + 1e-9:
+            selected_conversion = float(chosen_override_conversion)
             selected_row = run_projection_from_state(year, state, params, first_year_conversion=selected_conversion, later_year_conversion=0.0)["df"].iloc[0].to_dict()
-        else:
-            selected_row = highest_guardrail_row
-        selection_mode = "TRAD_TARGET_PRESSURE"
 
     diag_df = pd.DataFrame(tested_rows)
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
         diag_df["Target Trad Pressure Conversion"] = float(target_pressure_conversion)
+        diag_df["Target Trad Highest Override Conversion"] = float(highest_override_conversion)
         diag_df["Selection Mode Detail"] = selection_mode
         diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, a stricter post-RMD hurdle, and optional target-Trad pressure."
     return round(selected_conversion, 2), selected_row, diag_df
@@ -2044,6 +2058,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     "Delta Total Tax",
                     "Whole Conversion Effective Cost Rate",
                     "Target Trad Pressure Conversion",
+                    "Target Trad Highest Override Conversion",
                     "Selection Mode Detail",
                 ]:
                     if k in selected_diag:
@@ -2207,6 +2222,24 @@ with tg2:
         help="Planner goal for remaining Traditional IRA balance by household RMD start."
     )
 
+ov1, ov2 = st.columns(2)
+with ov1:
+    target_trad_override_enabled = st.checkbox(
+        "Allow Target Trad Planner Override",
+        value=False,
+        help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap."
+    )
+with ov2:
+    target_trad_override_max_rate = st.number_input(
+        "Target Trad Override Max All-In Rate",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.22,
+        step=0.01,
+        format="%.2f",
+        help="Maximum adjusted current cost rate allowed for target-Trad override."
+    )
+
 br1, br2 = st.columns(2)
 with br1:
     post_aca_target_bracket = st.selectbox(
@@ -2248,6 +2281,8 @@ inputs = {
     "state_tax_rate": state_tax_rate,
     "target_trad_balance_enabled": target_trad_balance_enabled,
     "target_trad_balance": target_trad_balance,
+    "target_trad_override_enabled": target_trad_override_enabled,
+    "target_trad_override_max_rate": target_trad_override_max_rate,
     "post_aca_target_bracket": post_aca_target_bracket,
     "rmd_era_target_bracket": rmd_era_target_bracket,
 }
