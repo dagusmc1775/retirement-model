@@ -1,3 +1,4 @@
+# version: target-trad-override-handoff-fix
 # version: target-trad-balance-override-cap
 # version: target-trad-balance-goal
 # version: nc-state-tax-clean-base-v2
@@ -1873,21 +1874,26 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
             "BETR Stop Trigger Hit": bool(current_conversion > 0 and net_benefit_rate <= 0.0),
             "Within Full Guardrails": within_limit,
+            "Within Planner Override Cap": bool(
+                (not roth_tax_used)
+                and within_target
+                and float(current_conversion) > 0.0
+                and bool(params.get("target_trad_override_enabled", False))
+                and float(effective_current_adjusted) <= float(params.get("target_trad_override_max_rate", 0.22)) + 1e-12
+            ),
             "Post-RMD Policy Active": bool(year >= int(params["household_rmd_start"])),
         })
 
-        # Winner selection: keep the highest valid conversion. Use net benefit as tie-breaker.
+        # Winner selection:
+        # - highest_guardrail_conversion tracks pure BETR-valid rows
+        # - highest_override_conversion tracks rows that stay under the planner override cap,
+        #   even if pure BETR already says stop
+        base_override_eligible = bool(within_target and (not roth_tax_used))
+
         if within_limit:
             if float(current_conversion) >= float(highest_guardrail_conversion) - 1e-12:
                 highest_guardrail_conversion = float(current_conversion)
                 highest_guardrail_row = row
-
-            override_cap = float(params.get("target_trad_override_max_rate", 0.22))
-            override_enabled = bool(params.get("target_trad_override_enabled", False))
-            if override_enabled and float(effective_current_adjusted) <= override_cap + 1e-12:
-                if float(current_conversion) >= float(highest_override_conversion) - 1e-12:
-                    highest_override_conversion = float(current_conversion)
-                    highest_override_row = row
 
             if (float(current_conversion) > float(selected_conversion) + 1e-12) or (
                 abs(float(current_conversion) - float(selected_conversion)) <= 1e-12
@@ -1896,6 +1902,18 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 selected_conversion = float(current_conversion)
                 selected_row = row
                 selected_net_benefit = float(net_benefit_rate)
+
+        override_cap = float(params.get("target_trad_override_max_rate", 0.22))
+        override_enabled = bool(params.get("target_trad_override_enabled", False))
+        if (
+            override_enabled
+            and base_override_eligible
+            and float(current_conversion) > 0.0
+            and float(effective_current_adjusted) <= override_cap + 1e-12
+        ):
+            if float(current_conversion) >= float(highest_override_conversion) - 1e-12:
+                highest_override_conversion = float(current_conversion)
+                highest_override_row = row
 
         prev = {"conversion": current_conversion, "path": path, "row": row}
         if current_conversion >= max_test - 0.01:
@@ -2059,6 +2077,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     "Whole Conversion Effective Cost Rate",
                     "Target Trad Pressure Conversion",
                     "Target Trad Highest Override Conversion",
+                    "Within Planner Override Cap",
                     "Selection Mode Detail",
                 ]:
                     if k in selected_diag:
