@@ -1,3 +1,4 @@
+# version: override-valuation-columns
 # version: target-trad-override-v3-relaxed-cap
 # version: target-trad-override-handoff-fix
 # version: target-trad-balance-override-cap
@@ -2085,6 +2086,22 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             except Exception:
                 pass
             decision_frames.append(diag_df)
+
+        chosen_row["Override Active"] = bool(chosen_row.get("Selection Mode Detail", "") == "TRAD_TARGET_OVERRIDE")
+        chosen_row["Override Cost"] = float(chosen_row.get("Delta Total Tax", 0.0)) if chosen_row["Override Active"] else 0.0
+        chosen_row["Future Benefit"] = (
+            max(
+                0.0,
+                float(chosen_row.get("Chosen Conversion", 0.0))
+                * max(
+                    0.0,
+                    float(chosen_row.get("Projected Future Avoided Rate", 0.0))
+                    - float(chosen_row.get("Effective Current Rate (Adjusted)", 0.0))
+                )
+            )
+            if chosen_row["Override Active"] else 0.0
+        )
+        chosen_row["Net Lifetime Value"] = float(chosen_row["Future Benefit"] - chosen_row["Override Cost"]) if chosen_row["Override Active"] else 0.0
 
         chosen_rows.append(chosen_row)
 
