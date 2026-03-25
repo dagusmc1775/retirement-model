@@ -942,12 +942,21 @@ def build_common_params(inputs: dict) -> dict:
 
 
 def summarize_run(df: pd.DataFrame, params: dict) -> dict:
+    total_state_taxes = float(df["State Tax"].sum()) if "State Tax" in df.columns else 0.0
+    total_government_drag = float(
+        df["Federal Tax"].sum()
+        + total_state_taxes
+        + df["ACA Cost"].sum()
+        + df["IRMAA Cost"].sum()
+    )
     return {
         "df": df,
         "final_net_worth": float(df.iloc[-1]["Net Worth"]),
         "total_federal_taxes": float(df["Federal Tax"].sum()),
+        "total_state_taxes": total_state_taxes,
         "total_aca_cost": float(df["ACA Cost"].sum()),
         "total_irmaa_cost": float(df["IRMAA Cost"].sum()),
+        "total_government_drag": total_government_drag,
         "total_shortfall": float(df["Year Shortfall"].sum()),
         "max_magi": float(df["MAGI"].max()),
         "aca_hit_years": int((df["ACA Cost"] > 0).sum()),
@@ -956,7 +965,10 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
         "owner_ss_start": int(params["owner_ss_start"]),
         "spouse_ss_start": int(params["spouse_ss_start"]),
         "household_rmd_start": int(params["household_rmd_start"]),
+        "owner_claim_age": int(params["owner_ss_start"] - START_YEAR + int(params["owner_current_age"])),
+        "spouse_claim_age": int(params["spouse_ss_start"] - START_YEAR + int(params["spouse_current_age"])),
         "total_conversions": float(df["Chosen Conversion"].sum()),
+        "ending_trad_balance": float(df.iloc[-1]["EOY Trad"]),
     }
 
 
@@ -2124,6 +2136,113 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
     return result
 
 
+def run_ss_optimizer(inputs: dict, max_conversion: float, step_size: float, trad_balance_penalty_lambda: float = 0.25) -> dict:
+    results = []
+    progress_bar = st.progress(0.0, text="Running Social Security optimizer...")
+    total_runs = 9 * 9
+    run_idx = 0
+
+    for owner_age in range(62, 71):
+        for spouse_age in range(62, 71):
+            scenario_inputs = dict(inputs)
+            scenario_inputs["owner_claim_age"] = int(owner_age)
+            scenario_inputs["spouse_claim_age"] = int(spouse_age)
+
+            try:
+                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
+                ) from exc
+
+            results.append({
+                "Owner SS Age": int(owner_age),
+                "Spouse SS Age": int(spouse_age),
+                "Final Net Worth": float(run_result["final_net_worth"]),
+                "Total Federal Tax": float(run_result["total_federal_taxes"]),
+                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                "Total ACA Cost": float(run_result["total_aca_cost"]),
+                "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
+                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                "Total Conversions": float(run_result["total_conversions"]),
+                "Ending Trad Balance": float(run_result["ending_trad_balance"]),
+                "First IRMAA Year": run_result["first_irmaa_year"],
+                "Max MAGI": float(run_result["max_magi"]),
+                "ACA Hit Years": int(run_result["aca_hit_years"]),
+                "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
+                "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
+            })
+
+            run_idx += 1
+            progress_bar.progress(run_idx / total_runs, text=f"Running Social Security optimizer... {run_idx}/{total_runs}")
+
+    results_df = pd.DataFrame(results).sort_values(
+        by=["Score", "Final Net Worth"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+    results_df.insert(0, "Rank", range(1, len(results_df) + 1))
+
+    top_10_df = results_df.head(10).copy()
+    top_3 = results_df.head(3).copy()
+
+    compare_metrics = [
+        ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
+        ("Final Net Worth", lambda r: float(r["Final Net Worth"])),
+        ("Ending Trad Balance", lambda r: float(r["Ending Trad Balance"])),
+        ("Total Government Drag", lambda r: float(r["Total Government Drag"])),
+        ("Total Conversions", lambda r: float(r["Total Conversions"])),
+        ("Total Federal Tax", lambda r: float(r["Total Federal Tax"])),
+        ("Total State Tax", lambda r: float(r["Total State Tax"])),
+        ("Total ACA Cost", lambda r: float(r["Total ACA Cost"])),
+        ("Total IRMAA Cost", lambda r: float(r["Total IRMAA Cost"])),
+        ("Max MAGI", lambda r: float(r["Max MAGI"])),
+        ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
+        ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
+        ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
+        ("Score", lambda r: float(r["Score"])),
+    ]
+
+    compare_rows = []
+    for metric_name, getter in compare_metrics:
+        row = {"Metric": metric_name}
+        for idx in range(3):
+            col_name = f"#{idx + 1}"
+            if idx < len(top_3):
+                row[col_name] = getter(top_3.iloc[idx])
+            else:
+                row[col_name] = ""
+        compare_rows.append(row)
+
+    comparison_df = pd.DataFrame(compare_rows)
+    return {
+        "all_results_df": results_df,
+        "top_10_df": top_10_df,
+        "comparison_df": comparison_df,
+        "best_result": results_df.iloc[0].to_dict() if not results_df.empty else None,
+        "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+    }
+
+
+def render_ss_optimizer_results(result: dict):
+    st.subheader("Social Security Optimizer Summary")
+    st.write(f"Scoring lambda (Trad balance penalty): {result['trad_balance_penalty_lambda']:.2f}")
+    if result["best_result"] is not None:
+        best = result["best_result"]
+        st.write(f"Best SS Ages: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
+        st.write(f"Best Score: ${float(best['Score']):,.0f}")
+        st.write(f"Best Final Net Worth: ${float(best['Final Net Worth']):,.0f}")
+        st.write(f"Best Ending Trad Balance: ${float(best['Ending Trad Balance']):,.0f}")
+
+    st.subheader("Top 10 SS Strategies")
+    st.dataframe(result["top_10_df"], use_container_width=True)
+
+    st.subheader("Top 3 Side-by-Side Comparison")
+    st.dataframe(result["comparison_df"], use_container_width=True)
+
+    with st.expander("All 81 SS combinations"):
+        st.dataframe(result["all_results_df"], use_container_width=True)
+
+
 # -----------------------------
 # DISPLAY
 # -----------------------------
@@ -2133,12 +2252,12 @@ def render_summary(title: str, result: dict):
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
     st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
     st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
-    total_state_taxes = float(result["df"]["State Tax"].sum()) if "State Tax" in result["df"].columns else 0.0
+    st.write(f"Ending Trad Balance: ${result['ending_trad_balance']:,.0f}")
     st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
-    st.write(f"Total State Taxes: ${total_state_taxes:,.0f}")
+    st.write(f"Total State Taxes: ${result.get('total_state_taxes', 0.0):,.0f}")
     st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
     st.write(f"Total IRMAA Cost: ${result['total_irmaa_cost']:,.0f}")
-    st.write(f"Total Government Drag: ${result['total_federal_taxes'] + total_state_taxes + result['total_aca_cost'] + result['total_irmaa_cost']:,.0f}")
+    st.write(f"Total Government Drag: ${result.get('total_government_drag', 0.0):,.0f}")
     st.write(f"Total Shortfall: ${result['total_shortfall']:,.0f}")
     st.write(f"Max MAGI: ${result['max_magi']:,.0f}")
     st.write(f"Total Conversions: ${result['total_conversions']:,.0f}")
@@ -2292,6 +2411,23 @@ with br2:
         help="Used once the household reaches the first RMD year.",
     )
 
+ss_opt1, ss_opt2 = st.columns(2)
+with ss_opt1:
+    run_ss_optimizer_toggle = st.checkbox(
+        "Run SS Optimizer",
+        value=False,
+        help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and ranks them.",
+    )
+with ss_opt2:
+    trad_balance_penalty_lambda = st.number_input(
+        "SS Optimizer Trad Penalty Lambda",
+        min_value=0.0,
+        value=0.25,
+        step=0.05,
+        format="%.2f",
+        help="Score = Final Net Worth - lambda × Ending Trad Balance",
+    )
+
 inputs = {
     "trad": trad,
     "roth": roth,
@@ -2323,20 +2459,30 @@ inputs = {
     "rmd_era_target_bracket": rmd_era_target_bracket,
 }
 
-btn1, btn2 = st.columns(2)
+if run_ss_optimizer_toggle:
+    if st.button("Run All SS Strategies"):
+        optimizer_result = run_ss_optimizer(
+            inputs=inputs,
+            max_conversion=max_conversion,
+            step_size=step_size,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        )
+        render_ss_optimizer_results(optimizer_result)
+else:
+    btn1, btn2 = st.columns(2)
 
-with btn1:
-    if st.button("Run Flat Strategy Test"):
-        result = run_model_fixed(inputs)
-        render_summary("Flat Strategy Summary", result)
-        st.subheader("Flat Strategy Yearly Results")
-        st.dataframe(result["df"], use_container_width=True)
+    with btn1:
+        if st.button("Run Flat Strategy Test"):
+            result = run_model_fixed(inputs)
+            render_summary("Flat Strategy Summary", result)
+            st.subheader("Flat Strategy Yearly Results")
+            st.dataframe(result["df"], use_container_width=True)
 
-with btn2:
-    if st.button("Run Break-Even Governor"):
-        result = run_model_break_even_governor(inputs, max_conversion, step_size)
-        render_summary("Break-Even Governor Summary", result)
-        st.subheader("Chosen Year-by-Year Path")
-        st.dataframe(result["df"], use_container_width=True)
-        st.subheader("Per-Step Break-Even Testing")
-        st.dataframe(result["decision_df"], use_container_width=True)
+    with btn2:
+        if st.button("Run Break-Even Governor"):
+            result = run_model_break_even_governor(inputs, max_conversion, step_size)
+            render_summary("Break-Even Governor Summary", result)
+            st.subheader("Chosen Year-by-Year Path")
+            st.dataframe(result["df"], use_container_width=True)
+            st.subheader("Per-Step Break-Even Testing")
+            st.dataframe(result["decision_df"], use_container_width=True)
