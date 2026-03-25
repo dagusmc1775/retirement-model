@@ -1,3 +1,4 @@
+# version: target-trad-balance-goal
 # version: nc-state-tax-clean-base-v2
 # version: nc-state-tax-clean-base
 import streamlit as st
@@ -929,6 +930,8 @@ def build_common_params(inputs: dict) -> dict:
         "spouse_rmd_start": int(spouse_rmd_start),
         "cash_sweep_threshold": float(inputs.get("cash_sweep_threshold", 50000.0)),
         "state_tax_rate": float(inputs.get("state_tax_rate", 0.0399)),
+        "target_trad_balance_enabled": bool(inputs.get("target_trad_balance_enabled", False)),
+        "target_trad_balance": float(inputs.get("target_trad_balance", 300000.0)),
     }
 
 
@@ -1408,6 +1411,26 @@ def get_year_conversion_cap(state: dict, params: dict, max_conversion: float) ->
     trad_after_growth = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
     return max(0.0, min(float(max_conversion), trad_after_growth))
 
+def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dict, step_size: float, cap: float) -> float:
+    """
+    Soft planning overlay: estimate the annual pre-RMD conversion needed to work toward a target
+    Traditional IRA balance by household RMD start. This is intentionally simple and conservative:
+    it spreads the current excess Trad balance over the remaining pre-RMD years.
+    """
+    if not bool(params.get("target_trad_balance_enabled", False)):
+        return 0.0
+    rmd_start = int(params.get("household_rmd_start", year))
+    if year >= rmd_start:
+        return 0.0
+    years_left = max(1, rmd_start - year)
+    current_trad = max(0.0, float(state.get("trad", 0.0)))
+    target_trad = max(0.0, float(params.get("target_trad_balance", 300000.0)))
+    excess = max(0.0, current_trad - target_trad)
+    annual_needed = excess / years_left
+    # Round to model step size and cap.
+    rounded = floor_to_step(annual_needed, step_size)
+    return max(0.0, min(float(cap), float(rounded)))
+
 
 
 def blended_future_effective_rate(delta_based_rate: float, estimated_future_rate: float, tax_source_penalty: float) -> float:
@@ -1718,10 +1741,13 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     future_rate = float(future_rate_info["estimated_future_marginal_rate"])
 
     max_test = min(cap, floor_to_step(target_headroom, step_size))
+    target_pressure_conversion = estimate_target_trad_pressure_conversion(year, state, params, step_size, max_test)
     tested_rows = []
     selected_conversion = 0.0
     selected_row = baseline_row
     selected_net_benefit = float("-inf")
+    highest_guardrail_conversion = 0.0
+    highest_guardrail_row = baseline_row
     prev = None
 
     step_index = 0
@@ -1847,6 +1873,9 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
 
         # Winner selection: keep the highest valid conversion. Use net benefit as tie-breaker.
         if within_limit:
+            if float(current_conversion) >= float(highest_guardrail_conversion) - 1e-12:
+                highest_guardrail_conversion = float(current_conversion)
+                highest_guardrail_row = row
             if (float(current_conversion) > float(selected_conversion) + 1e-12) or (
                 abs(float(current_conversion) - float(selected_conversion)) <= 1e-12
                 and float(net_benefit_rate) >= float(selected_net_benefit) - 1e-12
@@ -1860,11 +1889,29 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             break
         step_index += 1
 
+    # Optional planning overlay: if the Trad target goal implies a higher pre-RMD conversion,
+    # allow a larger conversion up to the highest guardrail-passing row, even if pure BETR already stopped.
+    selection_mode = "BETR"
+    if (
+        float(target_pressure_conversion) > float(selected_conversion) + 1e-9
+        and float(highest_guardrail_conversion) >= float(target_pressure_conversion) - 1e-9
+    ):
+        selected_conversion = float(target_pressure_conversion)
+        # Prefer exact matching tested row when available.
+        target_matches = [r for r in tested_rows if abs(float(r.get("Test Conversion", 0.0)) - float(target_pressure_conversion)) < 0.01]
+        if target_matches:
+            selected_row = run_projection_from_state(year, state, params, first_year_conversion=selected_conversion, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+        else:
+            selected_row = highest_guardrail_row
+        selection_mode = "TRAD_TARGET_PRESSURE"
+
     diag_df = pd.DataFrame(tested_rows)
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, and a stricter post-RMD hurdle"
+        diag_df["Target Trad Pressure Conversion"] = float(target_pressure_conversion)
+        diag_df["Selection Mode Detail"] = selection_mode
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, a stricter post-RMD hurdle, and optional target-Trad pressure."
     return round(selected_conversion, 2), selected_row, diag_df
 
 
@@ -1996,6 +2043,8 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     "Test Total Tax",
                     "Delta Total Tax",
                     "Whole Conversion Effective Cost Rate",
+                    "Target Trad Pressure Conversion",
+                    "Selection Mode Detail",
                 ]:
                     if k in selected_diag:
                         chosen_row[k] = selected_diag[k]
@@ -2142,6 +2191,22 @@ with pol2:
         format="%.4f"
     )
 
+tg1, tg2 = st.columns(2)
+with tg1:
+    target_trad_balance_enabled = st.checkbox(
+        "Use Target Trad Balance Goal",
+        value=False,
+        help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start."
+    )
+with tg2:
+    target_trad_balance = st.number_input(
+        "Target Trad Balance By RMD Start",
+        min_value=0.0,
+        value=300000.0,
+        step=25000.0,
+        help="Planner goal for remaining Traditional IRA balance by household RMD start."
+    )
+
 br1, br2 = st.columns(2)
 with br1:
     post_aca_target_bracket = st.selectbox(
@@ -2181,6 +2246,8 @@ inputs = {
     "spouse_aca_end_year": spouse_aca_end_year,
     "cash_sweep_threshold": cash_sweep_threshold,
     "state_tax_rate": state_tax_rate,
+    "target_trad_balance_enabled": target_trad_balance_enabled,
+    "target_trad_balance": target_trad_balance,
     "post_aca_target_bracket": post_aca_target_bracket,
     "rmd_era_target_bracket": rmd_era_target_bracket,
 }
