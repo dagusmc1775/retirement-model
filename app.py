@@ -1732,6 +1732,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         current_aca_delta = 0.0
         current_irmaa_delta = 0.0
         future_avoided_fed = 0.0
+        future_avoided_state = 0.0
         future_avoided_aca = 0.0
         future_avoided_irmaa = 0.0
         baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("State Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
