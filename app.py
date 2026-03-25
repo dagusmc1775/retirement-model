@@ -1,4 +1,3 @@
-\
 import streamlit as st
 import pandas as pd
 from bisect import bisect_left
@@ -1604,6 +1603,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             current_aca_delta = 0.0
             current_irmaa_delta = 0.0
             future_avoided_fed = 0.0
+            future_avoided_state = 0.0
             future_avoided_aca = 0.0
             future_avoided_irmaa = 0.0
             baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("State Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
@@ -1627,8 +1627,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 future_avoided_fed = prev_future["federal"] - curr_future["federal"]
                 future_avoided_aca = prev_future["aca"] - curr_future["aca"]
                 future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
-                future_avoided_state = float(max(0.0, baseline_drag.get("state", 0.0) - test_drag.get("state", 0.0)))
-            future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
+                future_avoided_state = prev_future.get("state", 0.0) - curr_future.get("state", 0.0)
+                future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
                 net_benefit_rate = future_effective - current_effective
 
             tested_rows.append({
@@ -1755,7 +1755,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_avoided_fed = prev_future["federal"] - curr_future["federal"]
             future_avoided_aca = prev_future["aca"] - curr_future["aca"]
             future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
-            future_avoided_state = float(max(0.0, baseline_drag.get("state", 0.0) - test_drag.get("state", 0.0)))
+            future_avoided_state = prev_future.get("state", 0.0) - curr_future.get("state", 0.0)
             future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
             net_benefit_rate = future_effective - current_effective
 
