@@ -1,3 +1,4 @@
+# version: chosen-row-receipts-fix
 import streamlit as st
 import pandas as pd
 from bisect import bisect_left
@@ -1914,8 +1915,8 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             if not match.empty:
                 sel = match.iloc[-1].to_dict()
                 for src_key, dst_key in [
-                    ("Current Effective Incremental Cost Rate", "Current Effective Incremental Cost Rate"),
-                    ("Future Expected Avoided Effective Cost Rate", "Future Expected Avoided Effective Cost Rate"),
+                    ("Current Marginal Incremental Cost Rate", "Current Marginal Incremental Cost Rate"),
+                    ("Projected Future Avoided Rate", "Projected Future Avoided Rate"),
                     ("Net Benefit Rate", "Net Benefit Rate"),
                     ("Tax Funding Source", "Tax Funding Source"),
                     ("Tax Funding Penalty", "Tax Funding Penalty"),
@@ -1924,6 +1925,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     ("Baseline Total Tax", "Baseline Total Tax"),
                     ("Test Total Tax", "Test Total Tax"),
                     ("Delta Total Tax", "Delta Total Tax"),
+                    ("Whole Conversion Effective Cost Rate", "Whole Conversion Effective Cost Rate"),
                     ("Post-RMD Hurdle", "Post-RMD Hurdle"),
                     ("Post-RMD Policy Active", "Post-RMD Policy Active"),
                 ]:
@@ -1944,17 +1946,39 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         # Compute selected-row receipts directly from a true 0-conversion baseline so they always print.
         baseline_path = run_projection_from_state(year, dict(state), params, first_year_conversion=0.0, later_year_conversion=0.0)
         baseline_first_row = baseline_path["df"].iloc[0].to_dict()
-        baseline_total_tax = float(baseline_first_row.get("Federal Tax", 0.0) + baseline_first_row.get("State Tax", 0.0) + baseline_first_row.get("ACA Cost", 0.0) + baseline_first_row.get("IRMAA Cost", 0.0))
-        test_total_tax = float(chosen_row.get("Federal Tax", 0.0) + chosen_row.get("State Tax", 0.0) + chosen_row.get("ACA Cost", 0.0) + chosen_row.get("IRMAA Cost", 0.0))
+        baseline_total_tax = float(
+            baseline_first_row.get("Federal Tax", 0.0)
+            + baseline_first_row.get("State Tax", 0.0)
+            + baseline_first_row.get("ACA Cost", 0.0)
+            + baseline_first_row.get("IRMAA Cost", 0.0)
+        )
+        test_total_tax = float(
+            chosen_row.get("Federal Tax", 0.0)
+            + chosen_row.get("State Tax", 0.0)
+            + chosen_row.get("ACA Cost", 0.0)
+            + chosen_row.get("IRMAA Cost", 0.0)
+        )
         if float(optimal_conversion) <= 1e-9:
             delta_total_tax = 0.0
             whole_effective_rate = 0.0
         else:
             delta_total_tax = float(test_total_tax - baseline_total_tax)
             whole_effective_rate = max(0.0, delta_total_tax / float(optimal_conversion))
+
+        # Prefer the selected decision-row receipts when available, because they match the winning step exactly.
+        if diag_df is not None and not diag_df.empty:
+            try:
+                selected_step = diag_df.loc[(diag_df["Test Conversion"].astype(float) - float(optimal_conversion)).abs() < 0.01].iloc[-1].to_dict()
+                baseline_total_tax = float(selected_step.get("Baseline Total Tax", baseline_total_tax) or baseline_total_tax)
+                test_total_tax = float(selected_step.get("Test Total Tax", test_total_tax) or test_total_tax)
+                delta_total_tax = float(selected_step.get("Delta Total Tax", delta_total_tax) or delta_total_tax)
+                whole_effective_rate = float(selected_step.get("Whole Conversion Effective Cost Rate", whole_effective_rate) or whole_effective_rate)
+            except Exception:
+                pass
+
         chosen_row["Baseline Total Tax"] = baseline_total_tax
         chosen_row["Test Total Tax"] = test_total_tax
-        chosen_row["Delta Total Tax"] = delta_total_tax
+        chosen_row["Delta Total Tax"] = 0.0 if float(optimal_conversion) <= 1e-9 else delta_total_tax
         chosen_row["Whole Conversion Effective Cost Rate"] = 0.0 if abs(whole_effective_rate) > 1.0 else whole_effective_rate
 
         chosen_rows.append(chosen_row)
@@ -1971,6 +1995,10 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     "Tax Funding Penalty",
                     "Effective Current Rate (Adjusted)",
                     "BETR Stop Trigger Hit",
+                    "Baseline Total Tax",
+                    "Test Total Tax",
+                    "Delta Total Tax",
+                    "Whole Conversion Effective Cost Rate",
                 ]:
                     if k in selected_diag:
                         chosen_row[k] = selected_diag[k]
