@@ -3194,6 +3194,7 @@ def evaluate_annual_tax_scenario(
     total_tax = federal_tax + state_tax
     total_government_drag = total_tax + aca_cost + irmaa_cost
     effective_tax_rate = total_tax / agi if agi > 0 else 0.0
+    all_in_effective_rate = total_government_drag / agi if agi > 0 else 0.0
     marginal_rate = get_annual_marginal_rate(ordinary_taxable_income, year, filing_status)
 
     return {
@@ -3228,6 +3229,7 @@ def evaluate_annual_tax_scenario(
         "IRMAA Cost": irmaa_cost,
         "Total Government Drag": total_government_drag,
         "Effective Tax Rate": effective_tax_rate,
+        "All-In Effective Rate": all_in_effective_rate,
         "Marginal Federal Rate": marginal_rate,
         "ACA Limit": aca_limit,
         "First IRMAA Cliff": irmaa_first_cliff,
@@ -3279,6 +3281,7 @@ def find_max_additional_conversion_for_rule(
     return float(best_conversion), best_candidate
 
 
+
 def run_standalone_annual_tax_engine(
     year: int,
     filing_status: str,
@@ -3320,17 +3323,22 @@ def run_standalone_annual_tax_engine(
         aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
         lambda c: float(c["Ordinary Taxable Income"]) <= bracket_limit,
     )
+    bracket_current_value = float(baseline["Ordinary Taxable Income"])
     threshold_rows.append({
         "Rule": f"Top of {target_bracket} bracket",
         "Enabled": bool(use_bracket_guardrail),
         "Threshold": target_bracket_top,
         "Buffered Threshold": bracket_limit,
+        "Current Value": bracket_current_value,
+        "Remaining Room": max(0.0, bracket_limit - bracket_current_value),
         "Max Additional Conversion": bracket_max,
         "MAGI At Max": float(bracket_candidate["MAGI"]),
         "Taxable Income At Max": float(bracket_candidate["Taxable Income"]),
         "Federal Tax At Max": float(bracket_candidate["Federal Tax"]),
         "NC Tax At Max": float(bracket_candidate["NC State Tax"]),
         "Total Drag At Max": float(bracket_candidate["Total Government Drag"]),
+        "Effective Tax Rate At Max": float(bracket_candidate["Effective Tax Rate"]),
+        "All-In Effective Rate At Max": float(bracket_candidate["All-In Effective Rate"]),
         "Binding Metric": "Ordinary Taxable Income",
     })
     if use_bracket_guardrail:
@@ -3345,17 +3353,22 @@ def run_standalone_annual_tax_engine(
             aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
             lambda c: float(c["MAGI"]) <= aca_limit_buffered,
         )
+        aca_current_value = float(baseline["MAGI"])
         threshold_rows.append({
             "Rule": "ACA MAGI limit",
             "Enabled": bool(use_aca_guardrail),
             "Threshold": float(aca_limit),
             "Buffered Threshold": float(aca_limit_buffered),
+            "Current Value": aca_current_value,
+            "Remaining Room": max(0.0, aca_limit_buffered - aca_current_value),
             "Max Additional Conversion": aca_max,
             "MAGI At Max": float(aca_candidate["MAGI"]),
             "Taxable Income At Max": float(aca_candidate["Taxable Income"]),
             "Federal Tax At Max": float(aca_candidate["Federal Tax"]),
             "NC Tax At Max": float(aca_candidate["NC State Tax"]),
             "Total Drag At Max": float(aca_candidate["Total Government Drag"]),
+            "Effective Tax Rate At Max": float(aca_candidate["Effective Tax Rate"]),
+            "All-In Effective Rate At Max": float(aca_candidate["All-In Effective Rate"]),
             "Binding Metric": "MAGI",
         })
         if use_aca_guardrail:
@@ -3371,17 +3384,22 @@ def run_standalone_annual_tax_engine(
             aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
             lambda c: float(c["MAGI"]) <= irmaa_limit_buffered,
         )
+        irmaa_current_value = float(baseline["MAGI"])
         threshold_rows.append({
             "Rule": "First IRMAA cliff",
             "Enabled": bool(use_irmaa_guardrail),
             "Threshold": float(irmaa_first_cliff),
             "Buffered Threshold": float(irmaa_limit_buffered),
+            "Current Value": irmaa_current_value,
+            "Remaining Room": max(0.0, irmaa_limit_buffered - irmaa_current_value),
             "Max Additional Conversion": irmaa_max,
             "MAGI At Max": float(irmaa_candidate["MAGI"]),
             "Taxable Income At Max": float(irmaa_candidate["Taxable Income"]),
             "Federal Tax At Max": float(irmaa_candidate["Federal Tax"]),
             "NC Tax At Max": float(irmaa_candidate["NC State Tax"]),
             "Total Drag At Max": float(irmaa_candidate["Total Government Drag"]),
+            "Effective Tax Rate At Max": float(irmaa_candidate["Effective Tax Rate"]),
+            "All-In Effective Rate At Max": float(irmaa_candidate["All-In Effective Rate"]),
             "Binding Metric": "MAGI",
         })
         if use_irmaa_guardrail:
@@ -3436,6 +3454,7 @@ def run_standalone_annual_tax_engine(
             "IRMAA Cost": float(candidate["IRMAA Cost"]),
             "Total Government Drag": float(candidate["Total Government Drag"]),
             "Effective Tax Rate": float(candidate["Effective Tax Rate"]),
+            "All-In Effective Rate": float(candidate["All-In Effective Rate"]),
         })
 
     summary = {
@@ -3486,17 +3505,64 @@ def render_standalone_annual_tax_results(result: dict) -> None:
         ("Projected Federal Tax", current["Federal Tax"]),
         ("Projected NC State Tax", current["NC State Tax"]),
         ("Total Projected Tax", current["Total Tax"]),
-        ("Effective Tax Rate", current["Effective Tax Rate"]),
+        ("Tax-Only Effective Rate", current["Effective Tax Rate"]),
+        ("All-In Effective Rate", current["All-In Effective Rate"]),
         ("Marginal Federal Rate", current["Marginal Federal Rate"]),
     ]
     snapshot_df = pd.DataFrame(snapshot_rows, columns=["Metric", "Current"])
-    st.dataframe(snapshot_df, use_container_width=True)
+    currency_metrics = {
+        "Provisional Income", "Taxable Social Security", "AGI", "MAGI", "Taxable Income",
+        "Federal Ordinary Tax", "Federal LTCG/QD Tax", "Projected Federal Tax",
+        "Projected NC State Tax", "Total Projected Tax"
+    }
+    percent_metrics = {"Tax-Only Effective Rate", "All-In Effective Rate", "Marginal Federal Rate"}
+    snapshot_df["Display"] = snapshot_df.apply(
+        lambda row: f"${float(row['Current']):,.0f}" if row["Metric"] in currency_metrics else (
+            f"{float(row['Current']):.2%}" if row["Metric"] in percent_metrics else str(row["Current"])
+        ),
+        axis=1,
+    )
+    st.dataframe(snapshot_df[["Metric", "Display"]], use_container_width=True)
 
     st.subheader("Additional Conversion Guardrails")
-    st.dataframe(result["threshold_df"], use_container_width=True)
+    st.dataframe(
+        result["threshold_df"].style.format({
+            "Threshold": "${:,.0f}",
+            "Buffered Threshold": "${:,.0f}",
+            "Current Value": "${:,.0f}",
+            "Remaining Room": "${:,.0f}",
+            "Max Additional Conversion": "${:,.0f}",
+            "MAGI At Max": "${:,.0f}",
+            "Taxable Income At Max": "${:,.0f}",
+            "Federal Tax At Max": "${:,.0f}",
+            "NC Tax At Max": "${:,.0f}",
+            "Total Drag At Max": "${:,.0f}",
+            "Effective Tax Rate At Max": "{:.2%}",
+            "All-In Effective Rate At Max": "{:.2%}",
+        }),
+        use_container_width=True,
+    )
 
     st.subheader("Current vs Recommended Additional Conversion")
-    st.dataframe(result["compare_df"], use_container_width=True)
+    st.dataframe(
+        result["compare_df"].style.format({
+            "Additional Conversion": "${:,.0f}",
+            "Total Conversion For Year": "${:,.0f}",
+            "Taxable SS": "${:,.0f}",
+            "AGI": "${:,.0f}",
+            "MAGI": "${:,.0f}",
+            "Taxable Income": "${:,.0f}",
+            "Federal Tax": "${:,.0f}",
+            "NC State Tax": "${:,.0f}",
+            "Federal LTCG/QD Tax": "${:,.0f}",
+            "ACA Cost": "${:,.0f}",
+            "IRMAA Cost": "${:,.0f}",
+            "Total Government Drag": "${:,.0f}",
+            "Effective Tax Rate": "{:.2%}",
+            "All-In Effective Rate": "{:.2%}",
+        }),
+        use_container_width=True,
+    )
 
 def go_to_page(page_name: str) -> None:
     st.session_state["app_page"] = page_name
@@ -3937,7 +4003,17 @@ def render_annual_page() -> None:
         max_medicare_lives = 2 if filing_status == "MFJ" else 1
         annual_calc_aca_lives = st.number_input("ACA-Covered Lives", min_value=0, max_value=max_aca_lives, value=int(min(st.session_state.get("annual_calc_aca_lives", max_aca_lives), max_aca_lives)), step=1, key="annual_calc_aca_lives")
         annual_calc_medicare_lives = st.number_input("Medicare-Covered Lives", min_value=0, max_value=max_medicare_lives, value=int(min(st.session_state.get("annual_calc_medicare_lives", 0), max_medicare_lives)), step=1, key="annual_calc_medicare_lives")
-        annual_calc_state_tax_rate = st.number_input("NC State Tax Rate", min_value=0.0, max_value=0.20, value=float(st.session_state.get("annual_calc_state_tax_rate", st.session_state.get("state_tax_rate", 0.0399))), step=0.0001, format="%.4f", key="annual_calc_state_tax_rate")
+        annual_calc_state_tax_rate_pct = st.number_input(
+            "NC State Tax Rate (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=float(st.session_state.get("annual_calc_state_tax_rate", st.session_state.get("state_tax_rate", 0.0399))) * 100.0,
+            step=0.1,
+            format="%.2f",
+            key="annual_calc_state_tax_rate_pct_display",
+        )
+        annual_calc_state_tax_rate = annual_calc_state_tax_rate_pct / 100.0
+        st.session_state["annual_calc_state_tax_rate"] = annual_calc_state_tax_rate
     with row2[2]:
         annual_calc_use_bracket_guardrail = st.checkbox("Use Bracket Guardrail", value=bool(st.session_state.get("annual_calc_use_bracket_guardrail", True)), key="annual_calc_use_bracket_guardrail")
         annual_calc_use_aca_guardrail = st.checkbox("Use ACA Guardrail", value=bool(st.session_state.get("annual_calc_use_aca_guardrail", True)), key="annual_calc_use_aca_guardrail")
