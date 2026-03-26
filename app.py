@@ -14,6 +14,7 @@ import streamlit as st
 import pandas as pd
 from bisect import bisect_left
 
+
 # -----------------------------
 # CONSTANTS
 # -----------------------------
@@ -24,6 +25,142 @@ UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 IRMAA_FIRST_CLIFF_MFJ = 218000.0
+
+DEFAULT_APP_STATE = {
+    "app_page": "home",
+    "annual_calc_aca_lives": 0,
+    "annual_calc_conversions_done": 0.0,
+    "annual_calc_earned_income": 0.0,
+    "annual_calc_filing_status": "MFJ",
+    "annual_calc_income_buffer": 0.0,
+    "annual_calc_ira_withdrawals": 0.0,
+    "annual_calc_ltcg": 0.0,
+    "annual_calc_max_additional_conversion": 0.0,
+    "annual_calc_medicare_lives": 0,
+    "annual_calc_other_income": 0.0,
+    "annual_calc_qualified_dividends": 0.0,
+    "annual_calc_standard_deduction": 0.0,
+    "annual_calc_state_tax_rate": 0.0,
+    "annual_calc_step_size": 1000.0,
+    "annual_calc_target_bracket": "22%",
+    "annual_calc_total_ss": 0.0,
+    "annual_calc_use_aca_guardrail": True,
+    "annual_calc_use_bracket_guardrail": True,
+    "annual_calc_use_irmaa_guardrail": True,
+    "annual_calc_year": START_YEAR,
+    "annual_conversion": 0.0,
+    "annual_spending": 0.0,
+    "brokerage": 0.0,
+    "brokerage_basis": 0.0,
+    "cash": 0.0,
+    "cash_sweep_threshold": 0.0,
+    "conversion_tax_funding_policy": "Cash then Brokerage",
+    "earned_income_annual": 0.0,
+    "earned_income_end_year": START_YEAR,
+    "earned_income_start_year": START_YEAR,
+    "go_go_end_age": 70,
+    "go_go_multiplier": 1.0,
+    "growth_pct": 0.0,
+    "max_conversion": 0.0,
+    "no_go_multiplier": 1.2,
+    "optimizer_rerun_best_validation": True,
+    "owner_claim_age": 62,
+    "owner_current_age": 0,
+    "owner_ss_base": 0.0,
+    "post_aca_target_bracket": "22%",
+    "primary_aca_end_year": START_YEAR,
+    "retirement_smile_enabled": False,
+    "rmd_era_target_bracket": "22%",
+    "roth": 0.0,
+    "run_ss_optimizer_toggle": False,
+    "slow_go_end_age": 80,
+    "slow_go_multiplier": 0.85,
+    "spending_inflation_rate_pct": 0.0,
+    "spouse_aca_end_year": START_YEAR,
+    "spouse_claim_age": 62,
+    "spouse_current_age": 0,
+    "spouse_ss_base": 0.0,
+    "state_tax_rate": 0.0,
+    "step_size": 1000.0,
+    "strict_repeatability_check": True,
+    "target_trad_balance": 0.0,
+    "target_trad_balance_enabled": False,
+    "target_trad_override_enabled": False,
+    "target_trad_override_max_rate": 0.0,
+    "trad": 0.0,
+    "trad_balance_penalty_lambda": 0.25,
+    "validation_tolerance": 0.01,
+}
+
+SCENARIO_STATE_KEYS = [k for k in DEFAULT_APP_STATE.keys() if k != "app_page"]
+
+
+def ensure_default_state() -> None:
+    for key, value in DEFAULT_APP_STATE.items():
+        if key not in st.session_state:
+            st.session_state[key] = copy.deepcopy(value)
+
+
+def collect_scenario_state() -> dict:
+    ensure_default_state()
+    return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in SCENARIO_STATE_KEYS}
+
+
+def apply_scenario_state(state: dict) -> None:
+    ensure_default_state()
+    for key in SCENARIO_STATE_KEYS:
+        st.session_state[key] = copy.deepcopy(state.get(key, DEFAULT_APP_STATE[key]))
+
+
+def reset_scenario_state() -> None:
+    current_page = st.session_state.get("app_page", "home")
+    apply_scenario_state({})
+    st.session_state["app_page"] = current_page
+
+
+def build_scenario_export_payload() -> str:
+    payload = {
+        "meta": {
+            "app": "retirement_model",
+            "version": "two_page_tools_annual_rebuilt_save_load",
+        },
+        "state": collect_scenario_state(),
+    }
+    return json.dumps(payload, indent=2)
+
+
+def render_scenario_manager(current_page: str) -> None:
+    with st.expander("Scenario Save / Load / Reset", expanded=False):
+        st.caption("Download a JSON snapshot of your current inputs, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
+        st.download_button(
+            "Download Current Inputs",
+            data=build_scenario_export_payload(),
+            file_name="retirement_model_inputs.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        upload_key = f"scenario_upload_{current_page}"
+        uploaded_file = st.file_uploader("Upload Saved Scenario", type=["json"], key=upload_key)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Load Uploaded Scenario", use_container_width=True, disabled=uploaded_file is None, key=f"load_scenario_{current_page}"):
+                try:
+                    payload = json.load(uploaded_file)
+                    state = payload.get("state", payload)
+                    if not isinstance(state, dict):
+                        raise ValueError("Uploaded JSON does not contain a valid scenario state.")
+                    apply_scenario_state(state)
+                    st.session_state["app_page"] = current_page
+                    st.success("Scenario loaded.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not load scenario: {exc}")
+        with c2:
+            if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
+                reset_scenario_state()
+                st.success("Inputs reset to defaults.")
+                st.rerun()
+
 
 # -----------------------------
 # YEARLY TABLES
@@ -3372,6 +3509,7 @@ def get_app_page() -> str:
 
 
 def render_top_nav(current_page: str) -> None:
+    ensure_default_state()
     nav1, nav2, nav3 = st.columns([1, 1, 1])
     with nav1:
         st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
@@ -3392,10 +3530,11 @@ def render_top_nav(current_page: str) -> None:
             use_container_width=True,
         )
     st.divider()
-
+    render_scenario_manager(current_page)
 
 
 def render_home_page() -> None:
+    ensure_default_state()
     st.title("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
@@ -3410,55 +3549,55 @@ def render_home_page() -> None:
 def render_shared_household_inputs() -> dict:
     st.header("Household Inputs")
 
-    owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, 67, key="owner_claim_age")
-    spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, 67, key="spouse_claim_age")
+    owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
+    spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
 
-    owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60, step=1, key="owner_current_age")
-    spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=57, step=1, key="spouse_current_age")
+    owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
+    spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        trad = st.number_input("Traditional Balance", min_value=0.0, value=1100000.0, step=1000.0, key="trad")
-        roth = st.number_input("Roth Balance", min_value=0.0, value=1700000.0, step=1000.0, key="roth")
-        brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=300000.0, step=1000.0, key="brokerage")
+        trad = st.number_input("Traditional Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
+        roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
+        brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
         brokerage_basis = st.number_input(
             "Brokerage Cost Basis",
             min_value=0.0,
-            value=300000.0,
+            value=float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
             step=1000.0,
             help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
             key="brokerage_basis",
         )
-        cash = st.number_input("Cash", min_value=0.0, value=10000.0, step=1000.0, key="cash")
+        cash = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])), step=1000.0, key="cash")
 
     with col2:
-        growth = st.number_input("Growth Rate (%)", min_value=0.0, value=8.0, step=0.1, key="growth_pct") / 100
-        annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0, key="annual_spending")
+        growth = st.number_input("Growth Rate (%)", min_value=0.0, value=float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])), step=0.1, key="growth_pct") / 100
+        annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])), step=1000.0, key="annual_spending")
         spending_inflation_rate = st.number_input(
             "Spending Inflation Rate (%)",
             min_value=0.0,
-            value=2.5,
+            value=float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])),
             step=0.1,
             help="Applied to spending each year before any retirement-smile multiplier.",
             key="spending_inflation_rate_pct",
         ) / 100
-        owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=43000.0, step=1000.0, key="owner_ss_base")
-        spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=15000.0, step=1000.0, key="spouse_ss_base")
+        owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
+        spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
 
     st.header("Retirement Smile Spending")
     sm1, sm2 = st.columns(2)
     with sm1:
         retirement_smile_enabled = st.checkbox(
             "Enable Retirement Smile Spending",
-            value=True,
+            value=bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
             help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
             key="retirement_smile_enabled",
         )
         go_go_end_age = st.number_input(
             "Go-Go Ends At Age",
             min_value=0,
-            value=70,
+            value=int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
             step=1,
             help="Applies to the older household member's age for the modeled year.",
             key="go_go_end_age",
@@ -3466,33 +3605,33 @@ def render_shared_household_inputs() -> dict:
         slow_go_end_age = st.number_input(
             "Slow-Go Ends At Age",
             min_value=0,
-            value=80,
+            value=int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
             step=1,
             help="No-go spending starts at this age and later.",
             key="slow_go_end_age",
         )
     with sm2:
-        go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=1.00, step=0.05, format="%.2f", key="go_go_multiplier")
-        slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=0.85, step=0.05, format="%.2f", key="slow_go_multiplier")
-        no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=1.20, step=0.05, format="%.2f", key="no_go_multiplier")
+        go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])), step=0.05, format="%.2f", key="go_go_multiplier")
+        slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])), step=0.05, format="%.2f", key="slow_go_multiplier")
+        no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])), step=0.05, format="%.2f", key="no_go_multiplier")
 
-    st.caption("Modeled spending = base spending × annual spending inflation × phase multiplier.")
+    st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
 
     st.header("Coverage Timing")
     cov1, cov2 = st.columns(2)
     with cov1:
-        primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=2031, step=1, key="primary_aca_end_year")
+        primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
     with cov2:
-        spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=2034, step=1, key="spouse_aca_end_year")
+        spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
 
     st.header("Earned Income")
     earn1, earn2, earn3 = st.columns(3)
     with earn1:
-        earned_income_annual = st.number_input("Annual Wage Income", min_value=0.0, value=15000.0, step=1000.0, key="earned_income_annual")
+        earned_income_annual = st.number_input("Annual Wage Income", min_value=0.0, value=float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])), step=1000.0, key="earned_income_annual")
     with earn2:
-        earned_income_start_year = st.number_input("Wage Income Start Year", min_value=START_YEAR, value=2026, step=1, key="earned_income_start_year")
+        earned_income_start_year = st.number_input("Wage Income Start Year", min_value=START_YEAR, value=int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])), step=1, key="earned_income_start_year")
     with earn3:
-        earned_income_end_year = st.number_input("Wage Income End Year", min_value=START_YEAR, value=2031, step=1, key="earned_income_end_year")
+        earned_income_end_year = st.number_input("Wage Income End Year", min_value=START_YEAR, value=int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])), step=1, key="earned_income_end_year")
 
     st.header("Tax Funding Policy")
     conversion_tax_funding_policy = st.selectbox(
@@ -3509,7 +3648,7 @@ def render_shared_household_inputs() -> dict:
     st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
 
     st.header("Planning Inputs")
-    annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0, key="annual_conversion")
+    annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])), step=5000.0, key="annual_conversion")
 
     inputs = {
         "trad": trad,
@@ -3544,6 +3683,7 @@ def render_shared_household_inputs() -> dict:
 
 
 def render_conversion_page() -> None:
+    ensure_default_state()
     st.title("Conversion Optimizer")
     render_top_nav("conversion")
     st.caption("Full lifetime break-even Roth conversion governor, with optional SS optimizer.")
@@ -3551,11 +3691,11 @@ def render_conversion_page() -> None:
     inputs = render_shared_household_inputs()
 
     st.header("Break-Even Governor Inputs")
-    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=300000.0, step=5000.0, key="max_conversion")
+    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"])), step=5000.0, key="max_conversion")
     step_size = st.number_input(
         "Break-Even Step Size",
         min_value=1000.0,
-        value=5000.0,
+        value=float(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"])),
         step=1000.0,
         help="Smaller steps improve accuracy but run slower.",
         key="step_size",
@@ -3566,7 +3706,7 @@ def render_conversion_page() -> None:
         cash_sweep_threshold = st.number_input(
             "Cash Sweep Threshold",
             min_value=0.0,
-            value=50000.0,
+            value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
             step=5000.0,
             help="End-of-year cash above this amount is swept into brokerage.",
             key="cash_sweep_threshold",
@@ -3576,7 +3716,7 @@ def render_conversion_page() -> None:
             "State Tax Rate",
             min_value=0.0,
             max_value=0.20,
-            value=0.0399,
+            value=float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])),
             step=0.0001,
             format="%.4f",
             key="state_tax_rate",
@@ -3586,7 +3726,7 @@ def render_conversion_page() -> None:
     with tg1:
         target_trad_balance_enabled = st.checkbox(
             "Use Target Trad Balance Goal",
-            value=False,
+            value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
             help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
             key="target_trad_balance_enabled",
         )
@@ -3594,7 +3734,7 @@ def render_conversion_page() -> None:
         target_trad_balance = st.number_input(
             "Target Trad Balance By RMD Start",
             min_value=0.0,
-            value=300000.0,
+            value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
             step=25000.0,
             help="Planner goal for remaining Traditional IRA balance by household RMD start.",
             key="target_trad_balance",
@@ -3604,7 +3744,7 @@ def render_conversion_page() -> None:
     with ov1:
         target_trad_override_enabled = st.checkbox(
             "Allow Target Trad Planner Override",
-            value=False,
+            value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
             help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
             key="target_trad_override_enabled",
         )
@@ -3613,7 +3753,7 @@ def render_conversion_page() -> None:
             "Target Trad Override Max All-In Rate",
             min_value=0.0,
             max_value=1.0,
-            value=0.22,
+            value=float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])),
             step=0.01,
             format="%.2f",
             help="Maximum adjusted current cost rate allowed for target-Trad override.",
@@ -3625,7 +3765,7 @@ def render_conversion_page() -> None:
         post_aca_target_bracket = st.selectbox(
             "Post-ACA Target Bracket",
             ["12%", "22%", "24%"],
-            index=1,
+            index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
             help="Used in non-ACA years before household RMDs begin.",
             key="post_aca_target_bracket",
         )
@@ -3633,7 +3773,7 @@ def render_conversion_page() -> None:
         rmd_era_target_bracket = st.selectbox(
             "RMD-Era Target Bracket",
             ["12%", "22%", "24%"],
-            index=1,
+            index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
             help="Used once the household reaches the first RMD year.",
             key="rmd_era_target_bracket",
         )
@@ -3643,14 +3783,14 @@ def render_conversion_page() -> None:
     with rv1:
         strict_repeatability_check = st.checkbox(
             "Run Repeatability Check On Break-Even Governor",
-            value=True,
+            value=bool(st.session_state.get("strict_repeatability_check", DEFAULT_APP_STATE["strict_repeatability_check"])),
             help="Runs the exact same break-even scenario twice back-to-back and compares the key outputs.",
             key="strict_repeatability_check",
         )
     with rv2:
         optimizer_rerun_best_validation = st.checkbox(
             "Rerun Optimizer Winner To Validate",
-            value=True,
+            value=bool(st.session_state.get("optimizer_rerun_best_validation", DEFAULT_APP_STATE["optimizer_rerun_best_validation"])),
             help="After all 81 SS combinations finish, reruns the winner once more and compares the key outputs.",
             key="optimizer_rerun_best_validation",
         )
@@ -3658,7 +3798,7 @@ def render_conversion_page() -> None:
     validation_tolerance = st.number_input(
         "Validation Tolerance ($)",
         min_value=0.0,
-        value=0.01,
+        value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
         step=0.01,
         format="%.2f",
         help="Absolute tolerance used when comparing repeated runs.",
@@ -3669,7 +3809,7 @@ def render_conversion_page() -> None:
     with ss_opt1:
         run_ss_optimizer_toggle = st.checkbox(
             "Run SS Optimizer",
-            value=False,
+            value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
             help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and ranks them.",
             key="run_ss_optimizer_toggle",
         )
@@ -3677,10 +3817,10 @@ def render_conversion_page() -> None:
         trad_balance_penalty_lambda = st.number_input(
             "SS Optimizer Trad Penalty Lambda",
             min_value=0.0,
-            value=0.25,
+            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
             step=0.05,
             format="%.2f",
-            help="Score = Final Net Worth - lambda × Ending Trad Balance",
+            help="Score = Final Net Worth - lambda x Ending Trad Balance",
             key="trad_balance_penalty_lambda",
         )
 
@@ -3742,6 +3882,7 @@ def render_conversion_page() -> None:
 
 
 def render_annual_page() -> None:
+    ensure_default_state()
     st.title("Annual Conversion Calculator")
     render_top_nav("annual")
     st.caption("Standalone annual tax cockpit for this-year conversion decisions. No long-term planning inputs live here.")
@@ -3852,6 +3993,7 @@ def render_annual_page() -> None:
 
 
 def main() -> None:
+    ensure_default_state()
     current_page = get_app_page()
     if current_page == "home":
         render_home_page()
