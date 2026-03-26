@@ -5,6 +5,11 @@
 # version: target-trad-balance-goal
 # version: nc-state-tax-clean-base-v2
 # version: nc-state-tax-clean-base
+import copy
+import hashlib
+import json
+import math
+
 import streamlit as st
 import pandas as pd
 from bisect import bisect_left
@@ -196,6 +201,83 @@ ACA_COST_TABLES = {
 
 
 # -----------------------------
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float):
+        return round(float(value), 10)
+    if isinstance(value, (int, str, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def build_scenario_fingerprint(inputs: dict, max_conversion: float | None = None, step_size: float | None = None) -> str:
+    payload = {"inputs": _json_safe(copy.deepcopy(inputs))}
+    if max_conversion is not None:
+        payload["max_conversion"] = round(float(max_conversion), 10)
+    if step_size is not None:
+        payload["step_size"] = round(float(step_size), 10)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+CONSISTENCY_KEYS = [
+    "final_net_worth",
+    "ending_trad_balance",
+    "total_conversions",
+    "total_federal_taxes",
+    "total_state_taxes",
+    "total_aca_cost",
+    "total_irmaa_cost",
+    "total_government_drag",
+    "total_shortfall",
+    "max_magi",
+]
+
+
+def compare_summary_metrics(first: dict, second: dict, tol: float = 0.01) -> list[dict]:
+    mismatches = []
+    for key in CONSISTENCY_KEYS:
+        a = float(first.get(key, 0.0))
+        b = float(second.get(key, 0.0))
+        if not math.isclose(a, b, rel_tol=0.0, abs_tol=float(tol)):
+            mismatches.append({
+                "Metric": key,
+                "Run 1": a,
+                "Run 2": b,
+                "Delta": b - a,
+            })
+    return mismatches
+
+
+def make_consistency_payload(first: dict, second: dict, tol: float = 0.01) -> dict:
+    mismatches = compare_summary_metrics(first, second, tol=tol)
+    return {
+        "passed": len(mismatches) == 0,
+        "tolerance": float(tol),
+        "mismatch_count": len(mismatches),
+        "mismatch_df": pd.DataFrame(mismatches) if mismatches else pd.DataFrame(columns=["Metric", "Run 1", "Run 2", "Delta"]),
+    }
+
+
+def run_governor_with_validation(inputs: dict, max_conversion: float, step_size: float, strict_repeatability_check: bool = False, tol: float = 0.01) -> dict:
+    result = run_model_break_even_governor(inputs, max_conversion, step_size)
+    result["scenario_fingerprint"] = build_scenario_fingerprint(inputs, max_conversion=max_conversion, step_size=step_size)
+
+    if strict_repeatability_check:
+        rerun = run_model_break_even_governor(copy.deepcopy(inputs), max_conversion, step_size)
+        rerun["scenario_fingerprint"] = build_scenario_fingerprint(inputs, max_conversion=max_conversion, step_size=step_size)
+        validation = make_consistency_payload(result, rerun, tol=tol)
+        result["validation"] = validation
+        result["validation_rerun_summary"] = {k: rerun.get(k) for k in CONSISTENCY_KEYS}
+    else:
+        result["validation"] = None
+        result["validation_rerun_summary"] = None
+    return result
+
 # TABLE LOOKUP HELPERS
 # -----------------------------
 def get_latest_year_value(table_by_year: dict, year: int):
@@ -2180,10 +2262,17 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
     return result
 
 
-def run_ss_optimizer(inputs: dict, max_conversion: float, step_size: float, trad_balance_penalty_lambda: float = 0.25) -> dict:
+def run_ss_optimizer(
+    inputs: dict,
+    max_conversion: float,
+    step_size: float,
+    trad_balance_penalty_lambda: float = 0.25,
+    rerun_best_validation: bool = True,
+    validation_tolerance: float = 0.01,
+) -> dict:
     results = []
     progress_bar = st.progress(0.0, text="Running Social Security optimizer...")
-    total_runs = 9 * 9
+    total_runs = 9 * 9 + (1 if rerun_best_validation else 0)
     run_idx = 0
 
     for owner_age in range(62, 71):
@@ -2198,6 +2287,12 @@ def run_ss_optimizer(inputs: dict, max_conversion: float, step_size: float, trad
                 raise RuntimeError(
                     f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
                 ) from exc
+
+            scenario_fingerprint = build_scenario_fingerprint(
+                scenario_inputs,
+                max_conversion=max_conversion,
+                step_size=step_size,
+            )
 
             results.append({
                 "Owner SS Age": int(owner_age),
@@ -2214,6 +2309,7 @@ def run_ss_optimizer(inputs: dict, max_conversion: float, step_size: float, trad
                 "Max MAGI": float(run_result["max_magi"]),
                 "ACA Hit Years": int(run_result["aca_hit_years"]),
                 "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
+                "Scenario Fingerprint": scenario_fingerprint,
                 "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
             })
 
@@ -2258,11 +2354,45 @@ def run_ss_optimizer(inputs: dict, max_conversion: float, step_size: float, trad
         compare_rows.append(row)
 
     comparison_df = pd.DataFrame(compare_rows)
+
+    best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
+    best_validation = None
+    best_rerun_summary = None
+
+    if rerun_best_validation and best_result is not None:
+        best_inputs = dict(inputs)
+        best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
+        best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
+        best_rerun = run_model_break_even_governor(best_inputs, max_conversion, step_size)
+        best_validation = make_consistency_payload(
+            {
+                "final_net_worth": float(best_result["Final Net Worth"]),
+                "ending_trad_balance": float(best_result["Ending Trad Balance"]),
+                "total_conversions": float(best_result["Total Conversions"]),
+                "total_federal_taxes": float(best_result["Total Federal Tax"]),
+                "total_state_taxes": float(best_result["Total State Tax"]),
+                "total_aca_cost": float(best_result["Total ACA Cost"]),
+                "total_irmaa_cost": float(best_result["Total IRMAA Cost"]),
+                "total_government_drag": float(best_result["Total Government Drag"]),
+                "total_shortfall": 0.0,
+                "max_magi": float(best_result["Max MAGI"]),
+            },
+            best_rerun,
+            tol=validation_tolerance,
+        )
+        best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
+        run_idx += 1
+        progress_bar.progress(run_idx / total_runs, text=f"Running Social Security optimizer... {run_idx}/{total_runs}")
+
+    progress_bar.empty()
+
     return {
         "all_results_df": results_df,
         "top_10_df": top_10_df,
         "comparison_df": comparison_df,
-        "best_result": results_df.iloc[0].to_dict() if not results_df.empty else None,
+        "best_result": best_result,
+        "best_validation": best_validation,
+        "best_rerun_summary": best_rerun_summary,
         "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
     }
 
@@ -2276,6 +2406,15 @@ def render_ss_optimizer_results(result: dict):
         st.write(f"Best Score: ${float(best['Score']):,.0f}")
         st.write(f"Best Final Net Worth: ${float(best['Final Net Worth']):,.0f}")
         st.write(f"Best Ending Trad Balance: ${float(best['Ending Trad Balance']):,.0f}")
+        st.write(f"Best Scenario Fingerprint: `{best['Scenario Fingerprint']}`")
+
+    if result.get("best_validation") is not None:
+        validation = result["best_validation"]
+        if validation["passed"]:
+            st.success("Best-strategy rerun validation passed. Optimizer winner matched a fresh rerun within tolerance.")
+        else:
+            st.error("Best-strategy rerun validation failed. The optimizer winner did not match a fresh rerun.")
+            st.dataframe(validation["mismatch_df"], use_container_width=True)
 
     st.subheader("Top 10 SS Strategies")
     st.dataframe(result["top_10_df"], use_container_width=True)
@@ -2292,6 +2431,8 @@ def render_ss_optimizer_results(result: dict):
 # -----------------------------
 def render_summary(title: str, result: dict):
     st.subheader(title)
+    if result.get("scenario_fingerprint"):
+        st.write(f"Scenario Fingerprint: `{result['scenario_fingerprint']}`")
     st.write(f"Owner SS Start Year: {result['owner_ss_start']}")
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
     st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
@@ -2308,6 +2449,13 @@ def render_summary(title: str, result: dict):
     st.write(f"ACA Hit Years: {result['aca_hit_years']}")
     st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
     st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
+    validation = result.get("validation")
+    if validation is not None:
+        if validation["passed"]:
+            st.success("Repeatability check passed. Back-to-back rerun matched within tolerance.")
+        else:
+            st.error("Repeatability check failed. Back-to-back rerun did not match.")
+            st.dataframe(validation["mismatch_df"], use_container_width=True)
 
 
 # -----------------------------
@@ -2491,6 +2639,31 @@ with br2:
         help="Used once the household reaches the first RMD year.",
     )
 
+
+st.header("Reliability / Validation")
+rv1, rv2 = st.columns(2)
+with rv1:
+    strict_repeatability_check = st.checkbox(
+        "Run Repeatability Check On Break-Even Governor",
+        value=True,
+        help="Runs the exact same break-even scenario twice back-to-back and compares the key outputs.",
+    )
+with rv2:
+    optimizer_rerun_best_validation = st.checkbox(
+        "Rerun Optimizer Winner To Validate",
+        value=True,
+        help="After all 81 SS combinations finish, reruns the winner once more and compares the key outputs.",
+    )
+
+validation_tolerance = st.number_input(
+    "Validation Tolerance ($)",
+    min_value=0.0,
+    value=0.01,
+    step=0.01,
+    format="%.2f",
+    help="Absolute tolerance used when comparing repeated runs.",
+)
+
 ss_opt1, ss_opt2 = st.columns(2)
 with ss_opt1:
     run_ss_optimizer_toggle = st.checkbox(
@@ -2553,6 +2726,8 @@ if run_ss_optimizer_toggle:
             max_conversion=max_conversion,
             step_size=step_size,
             trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            rerun_best_validation=optimizer_rerun_best_validation,
+            validation_tolerance=validation_tolerance,
         )
         render_ss_optimizer_results(optimizer_result)
 else:
@@ -2561,13 +2736,20 @@ else:
     with btn1:
         if st.button("Run Flat Strategy Test"):
             result = run_model_fixed(inputs)
+            result["scenario_fingerprint"] = build_scenario_fingerprint(inputs)
             render_summary("Flat Strategy Summary", result)
             st.subheader("Flat Strategy Yearly Results")
             st.dataframe(result["df"], use_container_width=True)
 
     with btn2:
         if st.button("Run Break-Even Governor"):
-            result = run_model_break_even_governor(inputs, max_conversion, step_size)
+            result = run_governor_with_validation(
+                inputs=inputs,
+                max_conversion=max_conversion,
+                step_size=step_size,
+                strict_repeatability_check=strict_repeatability_check,
+                tol=validation_tolerance,
+            )
             render_summary("Break-Even Governor Summary", result)
             st.subheader("Chosen Year-by-Year Path")
             st.dataframe(result["df"], use_container_width=True)
