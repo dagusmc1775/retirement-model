@@ -2851,391 +2851,517 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Retirement Model — Break-Even Roth Conversion Engine")
 
-st.header("Household Inputs")
 
-owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, 67)
-spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, 67)
+def go_to_page(page_name: str) -> None:
+    st.session_state["app_page"] = page_name
 
-owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60, step=1)
-spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=57, step=1)
 
-col1, col2 = st.columns(2)
+def get_app_page() -> str:
+    if "app_page" not in st.session_state:
+        st.session_state["app_page"] = "home"
+    return st.session_state["app_page"]
 
-with col1:
-    trad = st.number_input("Traditional Balance", min_value=0.0, value=1100000.0, step=1000.0)
-    roth = st.number_input("Roth Balance", min_value=0.0, value=1700000.0, step=1000.0)
-    brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=300000.0, step=1000.0)
-    brokerage_basis = st.number_input(
-        "Brokerage Cost Basis",
-        min_value=0.0,
-        value=300000.0,
+
+def render_top_nav(current_page: str) -> None:
+    nav1, nav2, nav3 = st.columns([1, 1, 1])
+    with nav1:
+        st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
+    with nav2:
+        st.button(
+            "Annual Calculator",
+            on_click=go_to_page,
+            args=("annual",),
+            disabled=current_page == "annual",
+            use_container_width=True,
+        )
+    with nav3:
+        st.button(
+            "Conversion Optimizer",
+            on_click=go_to_page,
+            args=("conversion",),
+            disabled=current_page == "conversion",
+            use_container_width=True,
+        )
+    st.divider()
+
+
+def render_home_page() -> None:
+    st.title("Retirement Model")
+    st.subheader("Choose a tool")
+    st.write(
+        "Use the Annual Conversion Calculator for this year's threshold management, or open the Conversion Optimizer for the full lifetime break-even governor and SS optimizer."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.button("Open Annual Calculator", on_click=go_to_page, args=("annual",), use_container_width=True)
+    with c2:
+        st.button("Open Conversion Optimizer", on_click=go_to_page, args=("conversion",), use_container_width=True)
+
+    st.info(
+        "State is kept across pages. Current-year annual calculator inputs stay in session and remain available when you switch tools."
+    )
+
+
+def render_shared_household_inputs() -> dict:
+    st.header("Household Inputs")
+
+    owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, 67, key="owner_claim_age")
+    spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, 67, key="spouse_claim_age")
+
+    owner_current_age = st.number_input("Owner Current Age", min_value=0, value=60, step=1, key="owner_current_age")
+    spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=57, step=1, key="spouse_current_age")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        trad = st.number_input("Traditional Balance", min_value=0.0, value=1100000.0, step=1000.0, key="trad")
+        roth = st.number_input("Roth Balance", min_value=0.0, value=1700000.0, step=1000.0, key="roth")
+        brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=300000.0, step=1000.0, key="brokerage")
+        brokerage_basis = st.number_input(
+            "Brokerage Cost Basis",
+            min_value=0.0,
+            value=300000.0,
+            step=1000.0,
+            help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
+            key="brokerage_basis",
+        )
+        cash = st.number_input("Cash", min_value=0.0, value=10000.0, step=1000.0, key="cash")
+
+    with col2:
+        growth = st.number_input("Growth Rate (%)", min_value=0.0, value=8.0, step=0.1, key="growth_pct") / 100
+        annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0, key="annual_spending")
+        spending_inflation_rate = st.number_input(
+            "Spending Inflation Rate (%)",
+            min_value=0.0,
+            value=2.5,
+            step=0.1,
+            help="Applied to spending each year before any retirement-smile multiplier.",
+            key="spending_inflation_rate_pct",
+        ) / 100
+        owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=43000.0, step=1000.0, key="owner_ss_base")
+        spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=15000.0, step=1000.0, key="spouse_ss_base")
+
+    st.header("Retirement Smile Spending")
+    sm1, sm2 = st.columns(2)
+    with sm1:
+        retirement_smile_enabled = st.checkbox(
+            "Enable Retirement Smile Spending",
+            value=True,
+            help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
+            key="retirement_smile_enabled",
+        )
+        go_go_end_age = st.number_input(
+            "Go-Go Ends At Age",
+            min_value=0,
+            value=70,
+            step=1,
+            help="Applies to the older household member's age for the modeled year.",
+            key="go_go_end_age",
+        )
+        slow_go_end_age = st.number_input(
+            "Slow-Go Ends At Age",
+            min_value=0,
+            value=80,
+            step=1,
+            help="No-go spending starts at this age and later.",
+            key="slow_go_end_age",
+        )
+    with sm2:
+        go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=1.00, step=0.05, format="%.2f", key="go_go_multiplier")
+        slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=0.85, step=0.05, format="%.2f", key="slow_go_multiplier")
+        no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=1.20, step=0.05, format="%.2f", key="no_go_multiplier")
+
+    st.caption("Modeled spending = base spending × annual spending inflation × phase multiplier.")
+
+    st.header("Coverage Timing")
+    cov1, cov2 = st.columns(2)
+    with cov1:
+        primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=2031, step=1, key="primary_aca_end_year")
+    with cov2:
+        spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=2034, step=1, key="spouse_aca_end_year")
+
+    st.header("Earned Income")
+    earn1, earn2, earn3 = st.columns(3)
+    with earn1:
+        earned_income_annual = st.number_input("Annual Wage Income", min_value=0.0, value=15000.0, step=1000.0, key="earned_income_annual")
+    with earn2:
+        earned_income_start_year = st.number_input("Wage Income Start Year", min_value=START_YEAR, value=2026, step=1, key="earned_income_start_year")
+    with earn3:
+        earned_income_end_year = st.number_input("Wage Income End Year", min_value=START_YEAR, value=2031, step=1, key="earned_income_end_year")
+
+    st.header("Tax Funding Policy")
+    conversion_tax_funding_policy = st.selectbox(
+        "Preferred tax funding source",
+        [
+            "Cash then Brokerage",
+            "Brokerage only",
+            "Cash only",
+            "Cash then Brokerage then Trad then Roth",
+        ],
+        index=0,
+        key="conversion_tax_funding_policy",
+    )
+    st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
+
+    st.header("Planning Inputs")
+    annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0, key="annual_conversion")
+
+    inputs = {
+        "trad": trad,
+        "roth": roth,
+        "brokerage": brokerage,
+        "brokerage_basis": min(brokerage_basis, brokerage),
+        "cash": cash,
+        "growth": growth,
+        "annual_spending": annual_spending,
+        "spending_inflation_rate": spending_inflation_rate,
+        "retirement_smile_enabled": retirement_smile_enabled,
+        "go_go_end_age": go_go_end_age,
+        "slow_go_end_age": slow_go_end_age,
+        "go_go_multiplier": go_go_multiplier,
+        "slow_go_multiplier": slow_go_multiplier,
+        "no_go_multiplier": no_go_multiplier,
+        "annual_conversion": annual_conversion,
+        "conversion_tax_funding_policy": conversion_tax_funding_policy,
+        "owner_current_age": owner_current_age,
+        "spouse_current_age": spouse_current_age,
+        "owner_claim_age": owner_claim_age,
+        "spouse_claim_age": spouse_claim_age,
+        "owner_ss_base": owner_ss_base,
+        "spouse_ss_base": spouse_ss_base,
+        "earned_income_annual": earned_income_annual,
+        "earned_income_start_year": earned_income_start_year,
+        "earned_income_end_year": earned_income_end_year,
+        "primary_aca_end_year": primary_aca_end_year,
+        "spouse_aca_end_year": spouse_aca_end_year,
+    }
+    return inputs
+
+
+def render_conversion_page() -> None:
+    st.title("Conversion Optimizer")
+    st.caption("Full lifetime break-even Roth conversion governor, with optional SS optimizer.")
+
+    inputs = render_shared_household_inputs()
+
+    st.header("Break-Even Governor Inputs")
+    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=300000.0, step=5000.0, key="max_conversion")
+    step_size = st.number_input(
+        "Break-Even Step Size",
+        min_value=1000.0,
+        value=5000.0,
         step=1000.0,
-        help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
+        help="Smaller steps improve accuracy but run slower.",
+        key="step_size",
     )
-    cash = st.number_input("Cash", min_value=0.0, value=10000.0, step=1000.0)
 
-with col2:
-    growth = st.number_input("Growth Rate (%)", min_value=0.0, value=8.0, step=0.1) / 100
-    annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0)
-    spending_inflation_rate = st.number_input(
-        "Spending Inflation Rate (%)",
+    pol1, pol2 = st.columns(2)
+    with pol1:
+        cash_sweep_threshold = st.number_input(
+            "Cash Sweep Threshold",
+            min_value=0.0,
+            value=50000.0,
+            step=5000.0,
+            help="End-of-year cash above this amount is swept into brokerage.",
+            key="cash_sweep_threshold",
+        )
+    with pol2:
+        state_tax_rate = st.number_input(
+            "State Tax Rate",
+            min_value=0.0,
+            max_value=0.20,
+            value=0.0399,
+            step=0.0001,
+            format="%.4f",
+            key="state_tax_rate",
+        )
+
+    tg1, tg2 = st.columns(2)
+    with tg1:
+        target_trad_balance_enabled = st.checkbox(
+            "Use Target Trad Balance Goal",
+            value=False,
+            help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
+            key="target_trad_balance_enabled",
+        )
+    with tg2:
+        target_trad_balance = st.number_input(
+            "Target Trad Balance By RMD Start",
+            min_value=0.0,
+            value=300000.0,
+            step=25000.0,
+            help="Planner goal for remaining Traditional IRA balance by household RMD start.",
+            key="target_trad_balance",
+        )
+
+    ov1, ov2 = st.columns(2)
+    with ov1:
+        target_trad_override_enabled = st.checkbox(
+            "Allow Target Trad Planner Override",
+            value=False,
+            help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
+            key="target_trad_override_enabled",
+        )
+    with ov2:
+        target_trad_override_max_rate = st.number_input(
+            "Target Trad Override Max All-In Rate",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.22,
+            step=0.01,
+            format="%.2f",
+            help="Maximum adjusted current cost rate allowed for target-Trad override.",
+            key="target_trad_override_max_rate",
+        )
+
+    br1, br2 = st.columns(2)
+    with br1:
+        post_aca_target_bracket = st.selectbox(
+            "Post-ACA Target Bracket",
+            ["12%", "22%", "24%"],
+            index=1,
+            help="Used in non-ACA years before household RMDs begin.",
+            key="post_aca_target_bracket",
+        )
+    with br2:
+        rmd_era_target_bracket = st.selectbox(
+            "RMD-Era Target Bracket",
+            ["12%", "22%", "24%"],
+            index=1,
+            help="Used once the household reaches the first RMD year.",
+            key="rmd_era_target_bracket",
+        )
+
+    st.header("Reliability / Validation")
+    rv1, rv2 = st.columns(2)
+    with rv1:
+        strict_repeatability_check = st.checkbox(
+            "Run Repeatability Check On Break-Even Governor",
+            value=True,
+            help="Runs the exact same break-even scenario twice back-to-back and compares the key outputs.",
+            key="strict_repeatability_check",
+        )
+    with rv2:
+        optimizer_rerun_best_validation = st.checkbox(
+            "Rerun Optimizer Winner To Validate",
+            value=True,
+            help="After all 81 SS combinations finish, reruns the winner once more and compares the key outputs.",
+            key="optimizer_rerun_best_validation",
+        )
+
+    validation_tolerance = st.number_input(
+        "Validation Tolerance ($)",
         min_value=0.0,
-        value=2.5,
-        step=0.1,
-        help="Applied to spending each year before any retirement-smile multiplier.",
-    ) / 100
-    owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=43000.0, step=1000.0)
-    spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=15000.0, step=1000.0)
-
-st.header("Retirement Smile Spending")
-sm1, sm2 = st.columns(2)
-with sm1:
-    retirement_smile_enabled = st.checkbox(
-        "Enable Retirement Smile Spending",
-        value=True,
-        help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
-    )
-    go_go_end_age = st.number_input(
-        "Go-Go Ends At Age",
-        min_value=0,
-        value=70,
-        step=1,
-        help="Applies to the older household member's age for the modeled year.",
-    )
-    slow_go_end_age = st.number_input(
-        "Slow-Go Ends At Age",
-        min_value=0,
-        value=80,
-        step=1,
-        help="No-go spending starts at this age and later.",
-    )
-with sm2:
-    go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=1.00, step=0.05, format="%.2f")
-    slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=0.85, step=0.05, format="%.2f")
-    no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=1.20, step=0.05, format="%.2f")
-
-st.caption("Modeled spending = base spending × annual spending inflation × phase multiplier.")
-
-st.header("Coverage Timing")
-cov1, cov2 = st.columns(2)
-with cov1:
-    primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=2031, step=1)
-with cov2:
-    spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=2034, step=1)
-
-st.header("Earned Income")
-earn1, earn2, earn3 = st.columns(3)
-with earn1:
-    earned_income_annual = st.number_input("Annual Wage Income", min_value=0.0, value=15000.0, step=1000.0)
-with earn2:
-    earned_income_start_year = st.number_input("Wage Income Start Year", min_value=START_YEAR, value=2026, step=1)
-with earn3:
-    earned_income_end_year = st.number_input("Wage Income End Year", min_value=START_YEAR, value=2031, step=1)
-
-st.header("Tax Funding Policy")
-conversion_tax_funding_policy = st.selectbox(
-    "Preferred tax funding source",
-    [
-        "Cash then Brokerage",
-        "Brokerage only",
-        "Cash only",
-        "Cash then Brokerage then Trad then Roth",
-    ],
-    index=0,
-)
-st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
-
-st.header("Flat Strategy Test")
-annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=0.0, step=5000.0)
-
-st.header("Break-Even Governor Inputs")
-max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=300000.0, step=5000.0)
-step_size = st.number_input(
-    "Break-Even Step Size",
-    min_value=1000.0,
-    value=5000.0,
-    step=1000.0,
-    help="Smaller steps improve accuracy but run slower.",
-)
-
-pol1, pol2 = st.columns(2)
-with pol1:
-    cash_sweep_threshold = st.number_input(
-        "Cash Sweep Threshold",
-        min_value=0.0,
-        value=50000.0,
-        step=5000.0,
-        help="End-of-year cash above this amount is swept into brokerage."
-    )
-with pol2:
-    state_tax_rate = st.number_input(
-        "State Tax Rate",
-        min_value=0.0,
-        max_value=0.20,
-        value=0.0399,
-        step=0.0001,
-        format="%.4f"
-    )
-
-tg1, tg2 = st.columns(2)
-with tg1:
-    target_trad_balance_enabled = st.checkbox(
-        "Use Target Trad Balance Goal",
-        value=False,
-        help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start."
-    )
-with tg2:
-    target_trad_balance = st.number_input(
-        "Target Trad Balance By RMD Start",
-        min_value=0.0,
-        value=300000.0,
-        step=25000.0,
-        help="Planner goal for remaining Traditional IRA balance by household RMD start."
-    )
-
-ov1, ov2 = st.columns(2)
-with ov1:
-    target_trad_override_enabled = st.checkbox(
-        "Allow Target Trad Planner Override",
-        value=False,
-        help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap."
-    )
-with ov2:
-    target_trad_override_max_rate = st.number_input(
-        "Target Trad Override Max All-In Rate",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.22,
+        value=0.01,
         step=0.01,
         format="%.2f",
-        help="Maximum adjusted current cost rate allowed for target-Trad override."
+        help="Absolute tolerance used when comparing repeated runs.",
+        key="validation_tolerance",
     )
 
-br1, br2 = st.columns(2)
-with br1:
-    post_aca_target_bracket = st.selectbox(
-        "Post-ACA Target Bracket",
-        ["12%", "22%", "24%"],
-        index=1,
-        help="Used in non-ACA years before household RMDs begin.",
-    )
-with br2:
-    rmd_era_target_bracket = st.selectbox(
-        "RMD-Era Target Bracket",
-        ["12%", "22%", "24%"],
-        index=1,
-        help="Used once the household reaches the first RMD year.",
-    )
-
-
-st.header("Reliability / Validation")
-rv1, rv2 = st.columns(2)
-with rv1:
-    strict_repeatability_check = st.checkbox(
-        "Run Repeatability Check On Break-Even Governor",
-        value=True,
-        help="Runs the exact same break-even scenario twice back-to-back and compares the key outputs.",
-    )
-with rv2:
-    optimizer_rerun_best_validation = st.checkbox(
-        "Rerun Optimizer Winner To Validate",
-        value=True,
-        help="After all 81 SS combinations finish, reruns the winner once more and compares the key outputs.",
-    )
-
-validation_tolerance = st.number_input(
-    "Validation Tolerance ($)",
-    min_value=0.0,
-    value=0.01,
-    step=0.01,
-    format="%.2f",
-    help="Absolute tolerance used when comparing repeated runs.",
-)
-
-ss_opt1, ss_opt2 = st.columns(2)
-with ss_opt1:
-    run_ss_optimizer_toggle = st.checkbox(
-        "Run SS Optimizer",
-        value=False,
-        help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and ranks them.",
-    )
-with ss_opt2:
-    trad_balance_penalty_lambda = st.number_input(
-        "SS Optimizer Trad Penalty Lambda",
-        min_value=0.0,
-        value=0.25,
-        step=0.05,
-        format="%.2f",
-        help="Score = Final Net Worth - lambda × Ending Trad Balance",
-    )
-
-inputs = {
-    "trad": trad,
-    "roth": roth,
-    "brokerage": brokerage,
-    "brokerage_basis": min(brokerage_basis, brokerage),
-    "cash": cash,
-    "growth": growth,
-    "annual_spending": annual_spending,
-    "spending_inflation_rate": spending_inflation_rate,
-    "retirement_smile_enabled": retirement_smile_enabled,
-    "go_go_end_age": go_go_end_age,
-    "slow_go_end_age": slow_go_end_age,
-    "go_go_multiplier": go_go_multiplier,
-    "slow_go_multiplier": slow_go_multiplier,
-    "no_go_multiplier": no_go_multiplier,
-    "annual_conversion": annual_conversion,
-    "conversion_tax_funding_policy": conversion_tax_funding_policy,
-    "owner_current_age": owner_current_age,
-    "spouse_current_age": spouse_current_age,
-    "owner_claim_age": owner_claim_age,
-    "spouse_claim_age": spouse_claim_age,
-    "owner_ss_base": owner_ss_base,
-    "spouse_ss_base": spouse_ss_base,
-    "earned_income_annual": earned_income_annual,
-    "earned_income_start_year": earned_income_start_year,
-    "earned_income_end_year": earned_income_end_year,
-    "primary_aca_end_year": primary_aca_end_year,
-    "spouse_aca_end_year": spouse_aca_end_year,
-    "cash_sweep_threshold": cash_sweep_threshold,
-    "state_tax_rate": state_tax_rate,
-    "target_trad_balance_enabled": target_trad_balance_enabled,
-    "target_trad_balance": target_trad_balance,
-    "target_trad_override_enabled": target_trad_override_enabled,
-    "target_trad_override_max_rate": target_trad_override_max_rate,
-    "post_aca_target_bracket": post_aca_target_bracket,
-    "rmd_era_target_bracket": rmd_era_target_bracket,
-}
-
-
-st.header("Annual Conversion Calculator")
-calc_default_year = START_YEAR
-calc_params_preview = build_common_params(inputs)
-calc_owner_ss_default = float(calc_params_preview['owner_ss_annual']) if calc_default_year >= int(calc_params_preview['owner_ss_start']) else 0.0
-calc_spouse_ss_default = float(calc_params_preview['spouse_ss_annual']) if calc_default_year >= int(calc_params_preview['spouse_ss_start']) else 0.0
-calc_total_ss_default = calc_owner_ss_default + calc_spouse_ss_default
-
-acc1, acc2, acc3 = st.columns(3)
-with acc1:
-    annual_calc_year = st.number_input(
-        "Conversion Calculator Year",
-        min_value=START_YEAR,
-        max_value=END_YEAR,
-        value=calc_default_year,
-        step=1,
-        help="Standalone current/future-year conversion check. This does not run the full lifetime simulation.",
-    )
-    annual_calc_other_income = st.number_input(
-        "Other Ordinary Income For Year",
-        min_value=0.0,
-        value=float(earned_income_annual) if annual_calc_year >= earned_income_start_year and annual_calc_year <= earned_income_end_year else 0.0,
-        step=1000.0,
-        help="Use wages, pensions, IRA withdrawals already planned, etc. Exclude Roth conversions here.",
-    )
-with acc2:
-    annual_calc_ltcg = st.number_input(
-        "Realized LTCG For Year",
-        min_value=0.0,
-        value=0.0,
-        step=1000.0,
-        help="Enter realized long-term capital gains already expected for the year.",
-    )
-    annual_calc_total_ss = st.number_input(
-        "Social Security For Year",
-        min_value=0.0,
-        value=float(calc_total_ss_default),
-        step=1000.0,
-        help="Editable. Defaults to the annual SS implied by the current claim-age settings if benefits have started by the selected year.",
-    )
-with acc3:
-    annual_calc_income_buffer = st.number_input(
-        "Income Safety Buffer ($)",
-        min_value=0.0,
-        value=1000.0,
-        step=500.0,
-        help="Reduces each guardrail threshold by this amount before recommending a conversion.",
-    )
-    annual_calc_target_bracket = st.selectbox(
-        "Annual Calculator Target Bracket",
-        ["12%", "22%", "24%"],
-        index=1,
-        help="Primary federal ordinary-income guardrail for the annual conversion calculator.",
-    )
-
-acg1, acg2, acg3 = st.columns(3)
-with acg1:
-    annual_calc_use_bracket_guardrail = st.checkbox(
-        "Use Bracket Guardrail",
-        value=True,
-        help="Keeps ordinary taxable income at or below the selected federal bracket target.",
-    )
-with acg2:
-    annual_calc_use_aca_guardrail = st.checkbox(
-        "Use ACA Guardrail",
-        value=True,
-        help="When ACA lives exist in the selected year, keeps MAGI under the ACA cliff/headroom line.",
-    )
-with acg3:
-    annual_calc_use_irmaa_guardrail = st.checkbox(
-        "Use IRMAA Guardrail",
-        value=True,
-        help="When Medicare lives exist in the selected year, keeps MAGI under the first IRMAA tier threshold.",
-    )
-
-if run_ss_optimizer_toggle:
-    if st.button("Run All SS Strategies"):
-        optimizer_result = run_ss_optimizer(
-            inputs=inputs,
-            max_conversion=max_conversion,
-            step_size=step_size,
-            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            rerun_best_validation=optimizer_rerun_best_validation,
-            validation_tolerance=validation_tolerance,
+    ss_opt1, ss_opt2 = st.columns(2)
+    with ss_opt1:
+        run_ss_optimizer_toggle = st.checkbox(
+            "Run SS Optimizer",
+            value=False,
+            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and ranks them.",
+            key="run_ss_optimizer_toggle",
         )
-        render_ss_optimizer_results(optimizer_result)
-else:
-    btn1, btn2 = st.columns(2)
+    with ss_opt2:
+        trad_balance_penalty_lambda = st.number_input(
+            "SS Optimizer Trad Penalty Lambda",
+            min_value=0.0,
+            value=0.25,
+            step=0.05,
+            format="%.2f",
+            help="Score = Final Net Worth - lambda × Ending Trad Balance",
+            key="trad_balance_penalty_lambda",
+        )
 
-    with btn1:
-        if st.button("Run Flat Strategy Test"):
-            result = run_model_fixed(inputs)
-            result["scenario_fingerprint"] = build_scenario_fingerprint(inputs)
-            render_summary("Flat Strategy Summary", result)
-            st.subheader("Flat Strategy Yearly Results")
-            st.dataframe(result["df"], use_container_width=True)
+    inputs.update(
+        {
+            "cash_sweep_threshold": cash_sweep_threshold,
+            "state_tax_rate": state_tax_rate,
+            "target_trad_balance_enabled": target_trad_balance_enabled,
+            "target_trad_balance": target_trad_balance,
+            "target_trad_override_enabled": target_trad_override_enabled,
+            "target_trad_override_max_rate": target_trad_override_max_rate,
+            "post_aca_target_bracket": post_aca_target_bracket,
+            "rmd_era_target_bracket": rmd_era_target_bracket,
+        }
+    )
 
-    with btn2:
-        if st.button("Run Break-Even Governor"):
-            result = run_governor_with_validation(
+    if "annual_calc_year" in st.session_state:
+        st.info(
+            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+        )
+
+    if run_ss_optimizer_toggle:
+        if st.button("Run All SS Strategies"):
+            optimizer_result = run_ss_optimizer(
                 inputs=inputs,
                 max_conversion=max_conversion,
                 step_size=step_size,
-                strict_repeatability_check=strict_repeatability_check,
-                tol=validation_tolerance,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                rerun_best_validation=optimizer_rerun_best_validation,
+                validation_tolerance=validation_tolerance,
             )
-            render_summary("Break-Even Governor Summary", result)
-            st.subheader("Chosen Year-by-Year Path")
-            st.dataframe(result["df"], use_container_width=True)
-            st.subheader("Per-Step Break-Even Testing")
-            st.dataframe(result["decision_df"], use_container_width=True)
+            render_ss_optimizer_results(optimizer_result)
+    else:
+        btn1, btn2 = st.columns(2)
+
+        with btn1:
+            if st.button("Run Flat Strategy Test"):
+                result = run_model_fixed(inputs)
+                result["scenario_fingerprint"] = build_scenario_fingerprint(inputs)
+                render_summary("Flat Strategy Summary", result)
+                st.subheader("Flat Strategy Yearly Results")
+                st.dataframe(result["df"], use_container_width=True)
+
+        with btn2:
+            if st.button("Run Break-Even Governor"):
+                result = run_governor_with_validation(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    strict_repeatability_check=strict_repeatability_check,
+                    tol=validation_tolerance,
+                )
+                render_summary("Break-Even Governor Summary", result)
+                st.subheader("Chosen Year-by-Year Path")
+                st.dataframe(result["df"], use_container_width=True)
+                st.subheader("Per-Step Break-Even Testing")
+                st.dataframe(result["decision_df"], use_container_width=True)
 
 
-st.divider()
-if st.button("Run Annual Conversion Calculator"):
-    annual_conversion_result = run_annual_conversion_calculator(
-        inputs=inputs,
-        calc_year=int(annual_calc_year),
-        external_other_ordinary_income=annual_calc_other_income,
-        realized_ltcg_so_far=annual_calc_ltcg,
-        total_ss_for_year=annual_calc_total_ss,
-        target_bracket=annual_calc_target_bracket,
-        income_safety_buffer=annual_calc_income_buffer,
-        max_conversion=max_conversion,
-        step_size=step_size,
-        apply_bracket_guardrail=annual_calc_use_bracket_guardrail,
-        apply_aca_guardrail=annual_calc_use_aca_guardrail,
-        apply_irmaa_guardrail=annual_calc_use_irmaa_guardrail,
+def render_annual_page() -> None:
+    st.title("Annual Conversion Calculator")
+    st.caption("Deterministic current-year threshold manager for bracket, ACA, and IRMAA guardrails.")
+
+    inputs = render_shared_household_inputs()
+    inputs.update(
+        {
+            "cash_sweep_threshold": st.session_state.get("cash_sweep_threshold", 50000.0),
+            "state_tax_rate": st.session_state.get("state_tax_rate", 0.0399),
+            "target_trad_balance_enabled": st.session_state.get("target_trad_balance_enabled", False),
+            "target_trad_balance": st.session_state.get("target_trad_balance", 300000.0),
+            "target_trad_override_enabled": st.session_state.get("target_trad_override_enabled", False),
+            "target_trad_override_max_rate": st.session_state.get("target_trad_override_max_rate", 0.22),
+            "post_aca_target_bracket": st.session_state.get("post_aca_target_bracket", "22%"),
+            "rmd_era_target_bracket": st.session_state.get("rmd_era_target_bracket", "22%"),
+        }
     )
-    render_annual_conversion_calculator_results(annual_conversion_result)
+
+    calc_default_year = START_YEAR
+    calc_params_preview = build_common_params(inputs)
+    calc_owner_ss_default = float(calc_params_preview['owner_ss_annual']) if calc_default_year >= int(calc_params_preview['owner_ss_start']) else 0.0
+    calc_spouse_ss_default = float(calc_params_preview['spouse_ss_annual']) if calc_default_year >= int(calc_params_preview['spouse_ss_start']) else 0.0
+    calc_total_ss_default = calc_owner_ss_default + calc_spouse_ss_default
+
+    st.header("Current-Year Inputs")
+    acc1, acc2, acc3 = st.columns(3)
+    with acc1:
+        annual_calc_year = st.number_input(
+            "Conversion Calculator Year",
+            min_value=START_YEAR,
+            max_value=END_YEAR,
+            value=calc_default_year,
+            step=1,
+            help="Standalone current/future-year conversion check. This does not run the full lifetime simulation.",
+            key="annual_calc_year",
+        )
+        derived_other_income_default = float(inputs["earned_income_annual"]) if annual_calc_year >= inputs["earned_income_start_year"] and annual_calc_year <= inputs["earned_income_end_year"] else 0.0
+        annual_calc_other_income = st.number_input(
+            "Other Ordinary Income For Year",
+            min_value=0.0,
+            value=derived_other_income_default,
+            step=1000.0,
+            help="Use wages, pensions, IRA withdrawals already planned, etc. Exclude Roth conversions here.",
+            key="annual_calc_other_income",
+        )
+    with acc2:
+        annual_calc_ltcg = st.number_input(
+            "Realized LTCG For Year",
+            min_value=0.0,
+            value=0.0,
+            step=1000.0,
+            help="Enter realized long-term capital gains already expected for the year.",
+            key="annual_calc_ltcg",
+        )
+        annual_calc_total_ss = st.number_input(
+            "Social Security For Year",
+            min_value=0.0,
+            value=float(calc_total_ss_default),
+            step=1000.0,
+            help="Editable. Defaults to the annual SS implied by the current claim-age settings if benefits have started by the selected year.",
+            key="annual_calc_total_ss",
+        )
+    with acc3:
+        annual_calc_income_buffer = st.number_input(
+            "Income Safety Buffer ($)",
+            min_value=0.0,
+            value=1000.0,
+            step=500.0,
+            help="Reduces each guardrail threshold by this amount before recommending a conversion.",
+            key="annual_calc_income_buffer",
+        )
+        annual_calc_target_bracket = st.selectbox(
+            "Annual Calculator Target Bracket",
+            ["12%", "22%", "24%"],
+            index=1,
+            help="Primary federal ordinary-income guardrail for the annual conversion calculator.",
+            key="annual_calc_target_bracket",
+        )
+
+    acg1, acg2, acg3 = st.columns(3)
+    with acg1:
+        annual_calc_use_bracket_guardrail = st.checkbox(
+            "Use Bracket Guardrail",
+            value=True,
+            help="Keeps ordinary taxable income at or below the selected federal bracket target.",
+            key="annual_calc_use_bracket_guardrail",
+        )
+    with acg2:
+        annual_calc_use_aca_guardrail = st.checkbox(
+            "Use ACA Guardrail",
+            value=True,
+            help="When ACA lives exist in the selected year, keeps MAGI under the ACA cliff/headroom line.",
+            key="annual_calc_use_aca_guardrail",
+        )
+    with acg3:
+        annual_calc_use_irmaa_guardrail = st.checkbox(
+            "Use IRMAA Guardrail",
+            value=True,
+            help="When Medicare lives exist in the selected year, keeps MAGI under the first IRMAA tier threshold.",
+            key="annual_calc_use_irmaa_guardrail",
+        )
+
+    st.caption("These annual inputs are kept in session and remain available when you switch back to the Conversion Optimizer.")
+
+    if st.button("Run Annual Conversion Calculator"):
+        annual_conversion_result = run_annual_conversion_calculator(
+            inputs=inputs,
+            calc_year=int(annual_calc_year),
+            external_other_ordinary_income=annual_calc_other_income,
+            realized_ltcg_so_far=annual_calc_ltcg,
+            total_ss_for_year=annual_calc_total_ss,
+            target_bracket=annual_calc_target_bracket,
+            income_safety_buffer=annual_calc_income_buffer,
+            max_conversion=st.session_state.get("max_conversion", 300000.0),
+            step_size=st.session_state.get("step_size", 5000.0),
+            apply_bracket_guardrail=annual_calc_use_bracket_guardrail,
+            apply_aca_guardrail=annual_calc_use_aca_guardrail,
+            apply_irmaa_guardrail=annual_calc_use_irmaa_guardrail,
+        )
+        render_annual_conversion_calculator_results(annual_conversion_result)
+
+
+render_top_nav(get_app_page())
+current_page = get_app_page()
+if current_page == "home":
+    render_home_page()
+elif current_page == "annual":
+    render_annual_page()
+else:
+    render_conversion_page()
