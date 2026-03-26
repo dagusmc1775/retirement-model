@@ -384,6 +384,41 @@ def get_earned_income_for_year(year: int, params: dict) -> float:
     return 0.0
 
 
+def get_household_reference_age(year: int, params: dict) -> int:
+    owner_age = int(params.get("owner_current_age", 0)) + (year - START_YEAR)
+    spouse_age = int(params.get("spouse_current_age", 0)) + (year - START_YEAR)
+    return max(owner_age, spouse_age)
+
+
+def get_annual_spending_for_year(year: int, params: dict) -> float:
+    base_spending = float(params.get("annual_spending", 0.0))
+    if base_spending <= 0.0:
+        return 0.0
+
+    years_from_start = max(0, year - START_YEAR)
+    spending_inflation_rate = float(params.get("spending_inflation_rate", 0.0))
+    inflated_spending = base_spending * ((1 + spending_inflation_rate) ** years_from_start)
+
+    if not bool(params.get("retirement_smile_enabled", False)):
+        return max(0.0, inflated_spending)
+
+    reference_age = get_household_reference_age(year, params)
+    go_go_end_age = int(params.get("go_go_end_age", 70))
+    slow_go_end_age = int(params.get("slow_go_end_age", 80))
+    go_go_multiplier = float(params.get("go_go_multiplier", 1.00))
+    slow_go_multiplier = float(params.get("slow_go_multiplier", 0.85))
+    no_go_multiplier = float(params.get("no_go_multiplier", 1.20))
+
+    if reference_age < go_go_end_age:
+        multiplier = go_go_multiplier
+    elif reference_age < slow_go_end_age:
+        multiplier = slow_go_multiplier
+    else:
+        multiplier = no_go_multiplier
+
+    return max(0.0, inflated_spending * multiplier)
+
+
 # -----------------------------
 # ACCOUNTING CONTRACT / VALIDATION
 # -----------------------------
@@ -913,6 +948,13 @@ def build_common_params(inputs: dict) -> dict:
     return {
         "growth": float(inputs["growth"]),
         "annual_spending": float(inputs["annual_spending"]),
+        "spending_inflation_rate": float(inputs.get("spending_inflation_rate", 0.0)),
+        "retirement_smile_enabled": bool(inputs.get("retirement_smile_enabled", False)),
+        "go_go_end_age": int(inputs.get("go_go_end_age", 70)),
+        "slow_go_end_age": int(inputs.get("slow_go_end_age", 80)),
+        "go_go_multiplier": float(inputs.get("go_go_multiplier", 1.00)),
+        "slow_go_multiplier": float(inputs.get("slow_go_multiplier", 0.85)),
+        "no_go_multiplier": float(inputs.get("no_go_multiplier", 1.20)),
         "conversion_tax_funding_policy": inputs["conversion_tax_funding_policy"],
         "owner_ss_start": owner_ss_start,
         "spouse_ss_start": spouse_ss_start,
@@ -1020,7 +1062,7 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         # Cash inflows / income sources
         "Earned Income", "Owner SS", "Spouse SS", "Total SS",
-        "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
+        "Annual Spending Need", "Household Reference Age", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
 
         # Aggregated income
         "Other Ordinary Income", "Taxable SS", "AGI", "MAGI",
@@ -1136,7 +1178,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     cash = float(state["cash"])
 
     growth = float(params["growth"])
-    annual_spending = float(params["annual_spending"])
+    annual_spending = get_annual_spending_for_year(year, params)
     conversion_tax_funding_policy = params["conversion_tax_funding_policy"]
 
     owner_ss_start = int(params["owner_ss_start"])
@@ -1313,6 +1355,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "RMD Income Component": float(rmd_for_year),
         "Trad Withdrawal Income Component": total_trad_withdrawal_income,
         "Spending Trad Withdrawal Component": spending_trad_withdrawal,
+        "Annual Spending Need": annual_spending,
+        "Household Reference Age": get_household_reference_age(year, params),
         "Other Ordinary Income": other_ordinary_income,
         "Brokerage Realized LTCG": realized_ltcg,
         "Taxable SS": tax_info["taxable_ss"],
@@ -2296,9 +2340,45 @@ with col1:
 
 with col2:
     growth = st.number_input("Growth Rate (%)", min_value=0.0, value=8.0, step=0.1) / 100
-    annual_spending = st.number_input("Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0)
+    annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=80000.0, step=1000.0)
+    spending_inflation_rate = st.number_input(
+        "Spending Inflation Rate (%)",
+        min_value=0.0,
+        value=2.5,
+        step=0.1,
+        help="Applied to spending each year before any retirement-smile multiplier.",
+    ) / 100
     owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=43000.0, step=1000.0)
     spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=15000.0, step=1000.0)
+
+st.header("Retirement Smile Spending")
+sm1, sm2 = st.columns(2)
+with sm1:
+    retirement_smile_enabled = st.checkbox(
+        "Enable Retirement Smile Spending",
+        value=True,
+        help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
+    )
+    go_go_end_age = st.number_input(
+        "Go-Go Ends At Age",
+        min_value=0,
+        value=70,
+        step=1,
+        help="Applies to the older household member's age for the modeled year.",
+    )
+    slow_go_end_age = st.number_input(
+        "Slow-Go Ends At Age",
+        min_value=0,
+        value=80,
+        step=1,
+        help="No-go spending starts at this age and later.",
+    )
+with sm2:
+    go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=1.00, step=0.05, format="%.2f")
+    slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=0.85, step=0.05, format="%.2f")
+    no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=1.20, step=0.05, format="%.2f")
+
+st.caption("Modeled spending = base spending × annual spending inflation × phase multiplier.")
 
 st.header("Coverage Timing")
 cov1, cov2 = st.columns(2)
@@ -2436,6 +2516,13 @@ inputs = {
     "cash": cash,
     "growth": growth,
     "annual_spending": annual_spending,
+    "spending_inflation_rate": spending_inflation_rate,
+    "retirement_smile_enabled": retirement_smile_enabled,
+    "go_go_end_age": go_go_end_age,
+    "slow_go_end_age": slow_go_end_age,
+    "go_go_multiplier": go_go_multiplier,
+    "slow_go_multiplier": slow_go_multiplier,
+    "no_go_multiplier": no_go_multiplier,
     "annual_conversion": annual_conversion,
     "conversion_tax_funding_policy": conversion_tax_funding_policy,
     "owner_current_age": owner_current_age,
