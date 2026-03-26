@@ -93,6 +93,46 @@ DEFAULT_APP_STATE = {
 }
 
 SCENARIO_STATE_KEYS = [k for k in DEFAULT_APP_STATE.keys() if k != "app_page"]
+PAGE_STATE_KEY_PREFIXES = {
+    "annual": ["annual_calc_"],
+    "conversion": [
+        "annual_", "brokerage", "cash", "conversion_tax_funding_policy", "earned_income_annual",
+        "earned_income_end_year", "earned_income_start_year", "go_go_", "growth_pct", "max_conversion",
+        "no_go_", "optimizer_", "owner_", "post_aca_", "primary_aca_end_year", "retirement_smile_",
+        "rmd_era_", "roth", "run_ss_optimizer_toggle", "slow_go_", "spending_inflation_rate_pct",
+        "spouse_", "state_tax_rate", "step_size", "strict_repeatability_check", "target_trad_",
+        "trad", "validation_tolerance"
+    ],
+}
+
+
+def format_dollars(value: float) -> str:
+    try:
+        return f"${float(value):,.0f}"
+    except Exception:
+        return str(value)
+
+
+def format_percent(value: float) -> str:
+    try:
+        return f"{float(value):.2%}"
+    except Exception:
+        return str(value)
+
+
+def get_page_specific_state_keys(page: str) -> list[str]:
+    prefixes = PAGE_STATE_KEY_PREFIXES.get(page, [])
+    keys = []
+    for key in SCENARIO_STATE_KEYS:
+        if any(key.startswith(prefix) for prefix in prefixes):
+            keys.append(key)
+    return keys
+
+
+def collect_page_state(page: str) -> dict:
+    ensure_default_state()
+    keys = get_page_specific_state_keys(page)
+    return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in keys}
 
 
 def ensure_default_state() -> None:
@@ -118,27 +158,40 @@ def reset_scenario_state() -> None:
     st.session_state["app_page"] = current_page
 
 
-def build_scenario_export_payload() -> str:
+def build_scenario_export_payload(scope: str = "full") -> str:
+    state = collect_scenario_state() if scope == "full" else collect_page_state(scope)
     payload = {
         "meta": {
             "app": "retirement_model",
-            "version": "two_page_tools_annual_rebuilt_save_load",
+            "version": "two_page_tools_save_load_guardrails_rates_v2",
+            "scope": scope,
         },
-        "state": collect_scenario_state(),
+        "state": state,
     }
     return json.dumps(payload, indent=2)
 
 
 def render_scenario_manager(current_page: str) -> None:
     with st.expander("Scenario Save / Load / Reset", expanded=False):
-        st.caption("Download a JSON snapshot of your current inputs, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
-        st.download_button(
-            "Download Current Inputs",
-            data=build_scenario_export_payload(),
-            file_name="retirement_model_inputs.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+        st.caption("Download a full scenario or a page-specific snapshot, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button(
+                "Download Full Scenario",
+                data=build_scenario_export_payload("full"),
+                file_name=f"retirement_model_full_{current_page}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        with d2:
+            st.download_button(
+                f"Download {current_page.title()} Page Inputs",
+                data=build_scenario_export_payload(current_page),
+                file_name=f"retirement_model_{current_page}_inputs.json",
+                mime="application/json",
+                use_container_width=True,
+                disabled=current_page == "home",
+            )
         upload_key = f"scenario_upload_{current_page}"
         uploaded_file = st.file_uploader("Upload Saved Scenario", type=["json"], key=upload_key)
         c1, c2 = st.columns(2)
@@ -149,9 +202,17 @@ def render_scenario_manager(current_page: str) -> None:
                     state = payload.get("state", payload)
                     if not isinstance(state, dict):
                         raise ValueError("Uploaded JSON does not contain a valid scenario state.")
-                    apply_scenario_state(state)
+                    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+                    scope = str(meta.get("scope", "full"))
+                    if scope == "full":
+                        apply_scenario_state(state)
+                    else:
+                        ensure_default_state()
+                        for key in get_page_specific_state_keys(scope):
+                            if key in state:
+                                st.session_state[key] = copy.deepcopy(state[key])
                     st.session_state["app_page"] = current_page
-                    st.success("Scenario loaded.")
+                    st.success(f"Scenario loaded ({scope}).")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not load scenario: {exc}")
@@ -160,6 +221,7 @@ def render_scenario_manager(current_page: str) -> None:
                 reset_scenario_state()
                 st.success("Inputs reset to defaults.")
                 st.rerun()
+
 
 
 # -----------------------------
@@ -2408,141 +2470,167 @@ def run_ss_optimizer(
     validation_tolerance: float = 0.01,
 ) -> dict:
     results = []
+    st.session_state["ss_optimizer_running"] = True
+    st.session_state["ss_optimizer_interrupted"] = False
     progress_bar = st.progress(0.0, text="Running Social Security optimizer...")
     total_runs = 9 * 9 + (1 if rerun_best_validation else 0)
     run_idx = 0
 
-    for owner_age in range(62, 71):
-        for spouse_age in range(62, 71):
-            scenario_inputs = dict(inputs)
-            scenario_inputs["owner_claim_age"] = int(owner_age)
-            scenario_inputs["spouse_claim_age"] = int(spouse_age)
+    try:
+        for owner_age in range(62, 71):
+            for spouse_age in range(62, 71):
+                scenario_inputs = dict(inputs)
+                scenario_inputs["owner_claim_age"] = int(owner_age)
+                scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
-            try:
-                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
-                ) from exc
+                try:
+                    run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
+                    ) from exc
 
-            scenario_fingerprint = build_scenario_fingerprint(
-                scenario_inputs,
-                max_conversion=max_conversion,
-                step_size=step_size,
+                scenario_fingerprint = build_scenario_fingerprint(
+                    scenario_inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                )
+
+                row = {
+                    "Owner SS Age": int(owner_age),
+                    "Spouse SS Age": int(spouse_age),
+                    "Final Net Worth": float(run_result["final_net_worth"]),
+                    "Total Federal Tax": float(run_result["total_federal_taxes"]),
+                    "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                    "Total ACA Cost": float(run_result["total_aca_cost"]),
+                    "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
+                    "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                    "Total Conversions": float(run_result["total_conversions"]),
+                    "Ending Trad Balance": float(run_result["ending_trad_balance"]),
+                    "First IRMAA Year": run_result["first_irmaa_year"],
+                    "Max MAGI": float(run_result["max_magi"]),
+                    "ACA Hit Years": int(run_result["aca_hit_years"]),
+                    "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
+                    "Scenario Fingerprint": scenario_fingerprint,
+                    "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
+                }
+                results.append(row)
+                st.session_state["ss_optimizer_partial_results"] = copy.deepcopy(results)
+                st.session_state["ss_optimizer_last_completed"] = f"{owner_age}/{spouse_age}"
+
+                run_idx += 1
+                progress_bar.progress(run_idx / total_runs, text=f"Running Social Security optimizer... {run_idx}/{total_runs}")
+
+        results_df = pd.DataFrame(results).sort_values(
+            by=["Score", "Final Net Worth"],
+            ascending=[False, False],
+        ).reset_index(drop=True)
+        results_df.insert(0, "Rank", range(1, len(results_df) + 1))
+
+        top_10_df = results_df.head(10).copy()
+        top_3 = results_df.head(3).copy()
+
+        compare_metrics = [
+            ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
+            ("Final Net Worth", lambda r: format_dollars(r["Final Net Worth"])),
+            ("Ending Traditional IRA Balance", lambda r: format_dollars(r["Ending Trad Balance"])),
+            ("Total Government Drag", lambda r: format_dollars(r["Total Government Drag"])),
+            ("Total Conversions", lambda r: format_dollars(r["Total Conversions"])),
+            ("Total Federal Tax", lambda r: format_dollars(r["Total Federal Tax"])),
+            ("Total State Tax", lambda r: format_dollars(r["Total State Tax"])),
+            ("Total ACA Cost", lambda r: format_dollars(r["Total ACA Cost"])),
+            ("Total IRMAA Cost", lambda r: format_dollars(r["Total IRMAA Cost"])),
+            ("Max MAGI", lambda r: format_dollars(r["Max MAGI"])),
+            ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
+            ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
+            ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
+            ("Score", lambda r: format_dollars(r["Score"])),
+        ]
+
+        compare_rows = []
+        for metric_name, getter in compare_metrics:
+            row = {"Metric": metric_name}
+            for idx in range(3):
+                col_name = f"#{idx + 1}"
+                if idx < len(top_3):
+                    row[col_name] = getter(top_3.iloc[idx])
+                else:
+                    row[col_name] = ""
+            compare_rows.append(row)
+
+        comparison_df = pd.DataFrame(compare_rows)
+
+        best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
+        best_validation = None
+        best_rerun_summary = None
+
+        if rerun_best_validation and best_result is not None:
+            best_inputs = dict(inputs)
+            best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
+            best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
+            best_rerun = run_model_break_even_governor(best_inputs, max_conversion, step_size)
+            best_validation = make_consistency_payload(
+                {
+                    "final_net_worth": float(best_result["Final Net Worth"]),
+                    "ending_trad_balance": float(best_result["Ending Trad Balance"]),
+                    "total_conversions": float(best_result["Total Conversions"]),
+                    "total_federal_taxes": float(best_result["Total Federal Tax"]),
+                    "total_state_taxes": float(best_result["Total State Tax"]),
+                    "total_aca_cost": float(best_result["Total ACA Cost"]),
+                    "total_irmaa_cost": float(best_result["Total IRMAA Cost"]),
+                    "total_government_drag": float(best_result["Total Government Drag"]),
+                    "total_shortfall": 0.0,
+                    "max_magi": float(best_result["Max MAGI"]),
+                },
+                best_rerun,
+                tol=validation_tolerance,
             )
-
-            results.append({
-                "Owner SS Age": int(owner_age),
-                "Spouse SS Age": int(spouse_age),
-                "Final Net Worth": float(run_result["final_net_worth"]),
-                "Total Federal Tax": float(run_result["total_federal_taxes"]),
-                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
-                "Total ACA Cost": float(run_result["total_aca_cost"]),
-                "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
-                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
-                "Total Conversions": float(run_result["total_conversions"]),
-                "Ending Trad Balance": float(run_result["ending_trad_balance"]),
-                "First IRMAA Year": run_result["first_irmaa_year"],
-                "Max MAGI": float(run_result["max_magi"]),
-                "ACA Hit Years": int(run_result["aca_hit_years"]),
-                "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
-                "Scenario Fingerprint": scenario_fingerprint,
-                "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
-            })
-
+            best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
             run_idx += 1
             progress_bar.progress(run_idx / total_runs, text=f"Running Social Security optimizer... {run_idx}/{total_runs}")
 
-    results_df = pd.DataFrame(results).sort_values(
-        by=["Score", "Final Net Worth"],
-        ascending=[False, False],
-    ).reset_index(drop=True)
-    results_df.insert(0, "Rank", range(1, len(results_df) + 1))
+        progress_bar.empty()
+        st.session_state["ss_optimizer_partial_results"] = []
+        st.session_state["ss_optimizer_last_completed"] = None
+        st.session_state["ss_optimizer_last_result"] = {
+            "all_results_df": results_df,
+            "top_10_df": top_10_df,
+            "comparison_df": comparison_df,
+            "best_result": best_result,
+            "best_validation": best_validation,
+            "best_rerun_summary": best_rerun_summary,
+            "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+        }
+        return {
+            "all_results_df": results_df,
+            "all_results_export_df": results_df.copy(),
+            "top_10_df": top_10_df,
+            "top_10_export_df": top_10_df.copy(),
+            "comparison_df": comparison_df,
+            "comparison_display_df": comparison_df,
+            "best_result": best_result,
+            "best_validation": best_validation,
+            "best_rerun_summary": best_rerun_summary,
+            "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "interrupted_partial_df": None,
+        }
+    except Exception:
+        st.session_state["ss_optimizer_interrupted"] = True
+        raise
+    finally:
+        st.session_state["ss_optimizer_running"] = False
 
-    top_10_df = results_df.head(10).copy()
-    top_3 = results_df.head(3).copy()
-
-    compare_metrics = [
-        ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
-        ("Final Net Worth", lambda r: float(r["Final Net Worth"])),
-        ("Ending Trad Balance", lambda r: float(r["Ending Trad Balance"])),
-        ("Total Government Drag", lambda r: float(r["Total Government Drag"])),
-        ("Total Conversions", lambda r: float(r["Total Conversions"])),
-        ("Total Federal Tax", lambda r: float(r["Total Federal Tax"])),
-        ("Total State Tax", lambda r: float(r["Total State Tax"])),
-        ("Total ACA Cost", lambda r: float(r["Total ACA Cost"])),
-        ("Total IRMAA Cost", lambda r: float(r["Total IRMAA Cost"])),
-        ("Max MAGI", lambda r: float(r["Max MAGI"])),
-        ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
-        ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
-        ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
-        ("Score", lambda r: float(r["Score"])),
-    ]
-
-    compare_rows = []
-    for metric_name, getter in compare_metrics:
-        row = {"Metric": metric_name}
-        for idx in range(3):
-            col_name = f"#{idx + 1}"
-            if idx < len(top_3):
-                row[col_name] = getter(top_3.iloc[idx])
-            else:
-                row[col_name] = ""
-        compare_rows.append(row)
-
-    comparison_df = pd.DataFrame(compare_rows)
-
-    best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
-    best_validation = None
-    best_rerun_summary = None
-
-    if rerun_best_validation and best_result is not None:
-        best_inputs = dict(inputs)
-        best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
-        best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
-        best_rerun = run_model_break_even_governor(best_inputs, max_conversion, step_size)
-        best_validation = make_consistency_payload(
-            {
-                "final_net_worth": float(best_result["Final Net Worth"]),
-                "ending_trad_balance": float(best_result["Ending Trad Balance"]),
-                "total_conversions": float(best_result["Total Conversions"]),
-                "total_federal_taxes": float(best_result["Total Federal Tax"]),
-                "total_state_taxes": float(best_result["Total State Tax"]),
-                "total_aca_cost": float(best_result["Total ACA Cost"]),
-                "total_irmaa_cost": float(best_result["Total IRMAA Cost"]),
-                "total_government_drag": float(best_result["Total Government Drag"]),
-                "total_shortfall": 0.0,
-                "max_magi": float(best_result["Max MAGI"]),
-            },
-            best_rerun,
-            tol=validation_tolerance,
-        )
-        best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
-        run_idx += 1
-        progress_bar.progress(run_idx / total_runs, text=f"Running Social Security optimizer... {run_idx}/{total_runs}")
-
-    progress_bar.empty()
-
-    return {
-        "all_results_df": results_df,
-        "top_10_df": top_10_df,
-        "comparison_df": comparison_df,
-        "best_result": best_result,
-        "best_validation": best_validation,
-        "best_rerun_summary": best_rerun_summary,
-        "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
-    }
 
 
 def render_ss_optimizer_results(result: dict):
     st.subheader("Social Security Optimizer Summary")
-    st.write(f"Scoring lambda (Trad balance penalty): {result['trad_balance_penalty_lambda']:.2f}")
+    st.write(f"Scoring lambda (Trad IRA penalty): {result['trad_balance_penalty_lambda']:.2f}")
     if result["best_result"] is not None:
         best = result["best_result"]
         st.write(f"Best SS Ages: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
-        st.write(f"Best Score: ${float(best['Score']):,.0f}")
-        st.write(f"Best Final Net Worth: ${float(best['Final Net Worth']):,.0f}")
-        st.write(f"Best Ending Trad Balance: ${float(best['Ending Trad Balance']):,.0f}")
+        st.write(f"Best Score: {format_dollars(best['Score'])}")
+        st.write(f"Best Final Net Worth: {format_dollars(best['Final Net Worth'])}")
+        st.write(f"Best Ending Traditional IRA Balance: {format_dollars(best['Ending Trad Balance'])}")
         st.write(f"Best Scenario Fingerprint: `{best['Scenario Fingerprint']}`")
 
     if result.get("best_validation") is not None:
@@ -2553,14 +2641,82 @@ def render_ss_optimizer_results(result: dict):
             st.error("Best-strategy rerun validation failed. The optimizer winner did not match a fresh rerun.")
             st.dataframe(validation["mismatch_df"], use_container_width=True)
 
+    if result.get("interrupted_partial_df") is not None:
+        st.warning("Showing the last partial optimizer results saved in session. These came from an interrupted or incomplete run.")
+        st.dataframe(
+            result["interrupted_partial_df"].style.format({
+                "Final Net Worth": "${:,.0f}",
+                "Total Federal Tax": "${:,.0f}",
+                "Total State Tax": "${:,.0f}",
+                "Total ACA Cost": "${:,.0f}",
+                "Total IRMAA Cost": "${:,.0f}",
+                "Total Government Drag": "${:,.0f}",
+                "Total Conversions": "${:,.0f}",
+                "Ending Trad Balance": "${:,.0f}",
+                "Max MAGI": "${:,.0f}",
+                "Score": "${:,.0f}",
+            }),
+            use_container_width=True,
+        )
+
     st.subheader("Top 10 SS Strategies")
-    st.dataframe(result["top_10_df"], use_container_width=True)
+    st.dataframe(
+        result["top_10_df"].style.format({
+            "Final Net Worth": "${:,.0f}",
+            "Total Federal Tax": "${:,.0f}",
+            "Total State Tax": "${:,.0f}",
+            "Total ACA Cost": "${:,.0f}",
+            "Total IRMAA Cost": "${:,.0f}",
+            "Total Government Drag": "${:,.0f}",
+            "Total Conversions": "${:,.0f}",
+            "Ending Trad Balance": "${:,.0f}",
+            "Max MAGI": "${:,.0f}",
+            "Score": "${:,.0f}",
+        }),
+        use_container_width=True,
+    )
+    st.download_button(
+        "Download Top 10 SS Strategies (CSV)",
+        data=result["top_10_export_df"].to_csv(index=False),
+        file_name="top_10_ss_strategies.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
     st.subheader("Top 3 Side-by-Side Comparison")
-    st.dataframe(result["comparison_df"], use_container_width=True)
+    st.dataframe(result["comparison_display_df"], use_container_width=True)
+    st.download_button(
+        "Download Top 3 Comparison (CSV)",
+        data=result["comparison_display_df"].to_csv(index=False),
+        file_name="top_3_ss_comparison.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
     with st.expander("All 81 SS combinations"):
-        st.dataframe(result["all_results_df"], use_container_width=True)
+        st.dataframe(
+            result["all_results_df"].style.format({
+                "Final Net Worth": "${:,.0f}",
+                "Total Federal Tax": "${:,.0f}",
+                "Total State Tax": "${:,.0f}",
+                "Total ACA Cost": "${:,.0f}",
+                "Total IRMAA Cost": "${:,.0f}",
+                "Total Government Drag": "${:,.0f}",
+                "Total Conversions": "${:,.0f}",
+                "Ending Trad Balance": "${:,.0f}",
+                "Max MAGI": "${:,.0f}",
+                "Score": "${:,.0f}",
+            }),
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download All SS Results (CSV)",
+            data=result["all_results_export_df"].to_csv(index=False),
+            file_name="all_ss_results.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
 
 
 def get_first_irmaa_cliff_threshold(year: int) -> float | None:
@@ -3624,7 +3780,7 @@ def render_shared_household_inputs() -> dict:
     col1, col2 = st.columns(2)
 
     with col1:
-        trad = st.number_input("Traditional Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
+        trad = st.number_input("Traditional IRA Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
         roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
         brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
         brokerage_basis = st.number_input(
@@ -3752,8 +3908,7 @@ def render_conversion_page() -> None:
     ensure_default_state()
     st.title("Conversion Optimizer")
     render_top_nav("conversion")
-    st.caption("Full lifetime break-even Roth conversion governor, with optional SS optimizer.")
-
+    
     inputs = render_shared_household_inputs()
 
     st.header("Break-Even Governor Inputs")
@@ -3778,15 +3933,17 @@ def render_conversion_page() -> None:
             key="cash_sweep_threshold",
         )
     with pol2:
-        state_tax_rate = st.number_input(
-            "State Tax Rate",
+        state_tax_rate_pct = st.number_input(
+            "State Tax Rate (%)",
             min_value=0.0,
-            max_value=0.20,
-            value=float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])),
-            step=0.0001,
-            format="%.4f",
-            key="state_tax_rate",
+            max_value=20.0,
+            value=float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0,
+            step=0.1,
+            format="%.2f",
+            key="state_tax_rate_pct_display",
         )
+        state_tax_rate = state_tax_rate_pct / 100.0
+        st.session_state["state_tax_rate"] = state_tax_rate
 
     tg1, tg2 = st.columns(2)
     with tg1:
@@ -3798,7 +3955,7 @@ def render_conversion_page() -> None:
         )
     with tg2:
         target_trad_balance = st.number_input(
-            "Target Trad Balance By RMD Start",
+            "Target Traditional IRA Balance By RMD Start",
             min_value=0.0,
             value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
             step=25000.0,
@@ -3815,16 +3972,18 @@ def render_conversion_page() -> None:
             key="target_trad_override_enabled",
         )
     with ov2:
-        target_trad_override_max_rate = st.number_input(
-            "Target Trad Override Max All-In Rate",
+        target_trad_override_max_rate_pct = st.number_input(
+            "Target Traditional IRA Override Max All-In Rate (%)",
             min_value=0.0,
-            max_value=1.0,
-            value=float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])),
-            step=0.01,
-            format="%.2f",
-            help="Maximum adjusted current cost rate allowed for target-Trad override.",
-            key="target_trad_override_max_rate",
+            max_value=100.0,
+            value=float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0,
+            step=1.0,
+            format="%.1f",
+            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override.",
+            key="target_trad_override_max_rate_pct_display",
         )
+        target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
+        st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
 
     br1, br2 = st.columns(2)
     with br1:
@@ -3881,12 +4040,12 @@ def render_conversion_page() -> None:
         )
     with ss_opt2:
         trad_balance_penalty_lambda = st.number_input(
-            "SS Optimizer Trad Penalty Lambda",
+            "SS Optimizer Traditional IRA Penalty Lambda",
             min_value=0.0,
             value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
             step=0.05,
             format="%.2f",
-            help="Score = Final Net Worth - lambda x Ending Trad Balance",
+            help="Score = Final Net Worth - lambda x Ending Traditional IRA Balance",
             key="trad_balance_penalty_lambda",
         )
 
@@ -3909,7 +4068,9 @@ def render_conversion_page() -> None:
         )
 
     if run_ss_optimizer_toggle:
-        if st.button("Run All SS Strategies"):
+        if st.session_state.get("ss_optimizer_running"):
+            st.info("SS optimizer is running. Inputs are effectively locked until the run finishes.")
+        if st.button("Run All SS Strategies", disabled=bool(st.session_state.get("ss_optimizer_running", False))):
             optimizer_result = run_ss_optimizer(
                 inputs=inputs,
                 max_conversion=max_conversion,
@@ -3919,6 +4080,24 @@ def render_conversion_page() -> None:
                 validation_tolerance=validation_tolerance,
             )
             render_ss_optimizer_results(optimizer_result)
+        elif st.session_state.get("ss_optimizer_partial_results"):
+            partial_df = pd.DataFrame(st.session_state.get("ss_optimizer_partial_results", []))
+            if not partial_df.empty:
+                partial_df = partial_df.sort_values(by=["Score", "Final Net Worth"], ascending=[False, False]).reset_index(drop=True)
+                partial_df.insert(0, "Rank", range(1, len(partial_df) + 1))
+                render_ss_optimizer_results({
+                    "all_results_df": partial_df,
+                    "all_results_export_df": partial_df.copy(),
+                    "top_10_df": partial_df.head(10).copy(),
+                    "top_10_export_df": partial_df.head(10).copy(),
+                    "comparison_df": pd.DataFrame(),
+                    "comparison_display_df": pd.DataFrame(),
+                    "best_result": partial_df.iloc[0].to_dict() if not partial_df.empty else None,
+                    "best_validation": None,
+                    "best_rerun_summary": None,
+                    "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+                    "interrupted_partial_df": partial_df,
+                })
     else:
         btn1, btn2 = st.columns(2)
 
