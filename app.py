@@ -2853,6 +2853,514 @@ def render_summary(title: str, result: dict):
 # -----------------------------
 
 
+
+ANNUAL_FILING_STATUS_OPTIONS = ["MFJ", "Single"]
+ANNUAL_TARGET_BRACKET_OPTIONS = ["12%", "22%", "24%"]
+
+
+def annual_status_factor(filing_status: str) -> float:
+    return 1.0 if filing_status == "MFJ" else 0.5
+
+
+def get_annual_standard_deduction_default(year: int, filing_status: str) -> float:
+    return float(get_standard_deduction(year)) * annual_status_factor(filing_status)
+
+
+def get_annual_federal_brackets(year: int, filing_status: str) -> list[tuple[float, float]]:
+    factor = annual_status_factor(filing_status)
+    return [(float(start) * factor, float(rate)) for start, rate in get_federal_brackets(year)]
+
+
+def get_annual_ltcg_brackets(year: int, filing_status: str) -> list[tuple[float, float]]:
+    factor = annual_status_factor(filing_status)
+    return [(float(start) * factor, float(rate)) for start, rate in get_ltcg_brackets(year)]
+
+
+def get_annual_bracket_tops(year: int, filing_status: str) -> dict:
+    factor = annual_status_factor(filing_status)
+    base = get_bracket_tops(year)
+    return {k: float(v) * factor for k, v in base.items()}
+
+
+def calculate_taxable_ss_annual(total_ss: float, non_ss_income: float, filing_status: str) -> tuple[float, float]:
+    total_ss = max(0.0, float(total_ss))
+    non_ss_income = max(0.0, float(non_ss_income))
+    if filing_status == "MFJ":
+        base1, base2, base_taxable = 32000.0, 44000.0, 6000.0
+    else:
+        base1, base2, base_taxable = 25000.0, 34000.0, 4500.0
+
+    provisional_income = non_ss_income + 0.5 * total_ss
+    if provisional_income <= base1:
+        taxable_ss = 0.0
+    elif provisional_income <= base2:
+        taxable_ss = 0.5 * (provisional_income - base1)
+    else:
+        taxable_ss = base_taxable + 0.85 * (provisional_income - base2)
+
+    taxable_ss = max(0.0, min(taxable_ss, 0.85 * total_ss))
+    return float(taxable_ss), float(provisional_income)
+
+
+def calculate_progressive_tax_from_brackets(taxable_income: float, brackets: list[tuple[float, float]]) -> float:
+    taxable_income = max(0.0, float(taxable_income))
+    if taxable_income <= 0:
+        return 0.0
+
+    tax = 0.0
+    for i, (start, rate) in enumerate(brackets):
+        end = brackets[i + 1][0] if i + 1 < len(brackets) else None
+        if taxable_income <= start:
+            break
+        upper = taxable_income if end is None else min(taxable_income, end)
+        amount = max(0.0, upper - start)
+        tax += amount * rate
+        if end is not None and taxable_income <= end:
+            break
+    return float(tax)
+
+
+def calculate_ltcg_tax_from_brackets(ordinary_taxable_income: float, preferential_taxable_income: float, brackets: list[tuple[float, float]]) -> float:
+    ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
+    preferential_taxable_income = max(0.0, float(preferential_taxable_income))
+    if preferential_taxable_income <= 0:
+        return 0.0
+
+    tax = 0.0
+    remaining = preferential_taxable_income
+    current = ordinary_taxable_income
+
+    for i, (start, rate) in enumerate(brackets):
+        end = brackets[i + 1][0] if i + 1 < len(brackets) else None
+        band_start = max(current, start)
+        if end is None:
+            tax += remaining * rate
+            remaining = 0.0
+            break
+        band_room = max(0.0, end - band_start)
+        if band_room <= 0:
+            continue
+        amount = min(remaining, band_room)
+        tax += amount * rate
+        remaining -= amount
+        current += amount
+        if remaining <= 1e-9:
+            break
+    return float(tax)
+
+
+def get_annual_marginal_rate(ordinary_taxable_income: float, year: int, filing_status: str) -> float:
+    ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
+    brackets = get_annual_federal_brackets(year, filing_status)
+    rate = brackets[0][1]
+    for start, bracket_rate in brackets:
+        if ordinary_taxable_income >= start:
+            rate = bracket_rate
+        else:
+            break
+    return float(rate)
+
+
+def get_annual_aca_limit(calc_year: int, filing_status: str, aca_covered_lives: int) -> float | None:
+    if aca_covered_lives <= 0:
+        return None
+    household_key = "2_person" if filing_status == "MFJ" and aca_covered_lives >= 2 else "1_person"
+    return float(get_aca_magi_limit(calc_year, 2 if household_key == "2_person" else 1))
+
+
+def get_annual_irmaa_first_cliff(calc_year: int, filing_status: str) -> float | None:
+    if filing_status == "MFJ":
+        return float(get_first_irmaa_cliff_threshold(calc_year))
+    return float(get_first_irmaa_cliff_threshold(calc_year)) * 0.5
+
+
+def evaluate_annual_tax_scenario(
+    year: int,
+    filing_status: str,
+    earned_income: float,
+    other_ordinary_income: float,
+    ira_withdrawals: float,
+    conversions_done: float,
+    additional_conversion: float,
+    social_security_received: float,
+    realized_ltcg: float,
+    qualified_dividends: float,
+    standard_deduction: float,
+    state_tax_rate: float,
+    aca_covered_lives: int,
+    medicare_covered_lives: int,
+) -> dict:
+    earned_income = max(0.0, float(earned_income))
+    other_ordinary_income = max(0.0, float(other_ordinary_income))
+    ira_withdrawals = max(0.0, float(ira_withdrawals))
+    conversions_done = max(0.0, float(conversions_done))
+    additional_conversion = max(0.0, float(additional_conversion))
+    social_security_received = max(0.0, float(social_security_received))
+    realized_ltcg = max(0.0, float(realized_ltcg))
+    qualified_dividends = max(0.0, float(qualified_dividends))
+    standard_deduction = max(0.0, float(standard_deduction))
+    preferential_income = realized_ltcg + qualified_dividends
+
+    ordinary_income_pre_ss = (
+        earned_income
+        + other_ordinary_income
+        + ira_withdrawals
+        + conversions_done
+        + additional_conversion
+    )
+    taxable_ss, provisional_income = calculate_taxable_ss_annual(
+        social_security_received,
+        ordinary_income_pre_ss + preferential_income,
+        filing_status,
+    )
+    ordinary_income_total = ordinary_income_pre_ss + taxable_ss
+    agi = ordinary_income_total + preferential_income
+    magi = agi
+
+    ordinary_taxable_income = max(0.0, ordinary_income_total - standard_deduction)
+    deduction_remaining_for_preferential = max(0.0, standard_deduction - ordinary_income_total)
+    preferential_taxable_income = max(0.0, preferential_income - deduction_remaining_for_preferential)
+    taxable_income = ordinary_taxable_income + preferential_taxable_income
+
+    federal_brackets = get_annual_federal_brackets(year, filing_status)
+    ltcg_brackets = get_annual_ltcg_brackets(year, filing_status)
+    ordinary_tax = calculate_progressive_tax_from_brackets(ordinary_taxable_income, federal_brackets)
+    ltcg_qd_tax = calculate_ltcg_tax_from_brackets(ordinary_taxable_income, preferential_taxable_income, ltcg_brackets)
+    federal_tax = ordinary_tax + ltcg_qd_tax
+
+    nc_taxable_income = taxable_income
+    state_tax = max(0.0, nc_taxable_income) * float(state_tax_rate)
+
+    aca_cost = 0.0
+    aca_limit = None
+    if aca_covered_lives > 0:
+        aca_limit = get_annual_aca_limit(year, filing_status, aca_covered_lives)
+        household_key = "2_person" if filing_status == "MFJ" and aca_covered_lives >= 2 else "1_person"
+        aca_cost = calculate_aca_cost(magi, year, 2 if household_key == "2_person" else 1)
+
+    irmaa_first_cliff = None
+    irmaa_cost = 0.0
+    if medicare_covered_lives > 0:
+        if filing_status == "MFJ":
+            irmaa_cost = calculate_irmaa_cost(magi, year, medicare_covered_lives)
+            irmaa_first_cliff = get_first_irmaa_cliff_threshold(year)
+        else:
+            irmaa_first_cliff = get_annual_irmaa_first_cliff(year, filing_status)
+            single_irmaa_table = [(start * 0.5, end * 0.5, surcharge) for start, end, surcharge in get_latest_year_value(IRMAA_TABLE_BY_YEAR, year)]
+            annual_surcharge = 0.0
+            for start, end, surcharge in single_irmaa_table:
+                if magi >= start and magi < end:
+                    annual_surcharge = surcharge * 12.0
+                    break
+            irmaa_cost = annual_surcharge * max(1, medicare_covered_lives)
+
+    total_tax = federal_tax + state_tax
+    total_government_drag = total_tax + aca_cost + irmaa_cost
+    effective_tax_rate = total_tax / agi if agi > 0 else 0.0
+    marginal_rate = get_annual_marginal_rate(ordinary_taxable_income, year, filing_status)
+
+    return {
+        "Year": int(year),
+        "Filing Status": filing_status,
+        "Earned Income": earned_income,
+        "Other Ordinary Income": other_ordinary_income,
+        "IRA Withdrawals": ira_withdrawals,
+        "Conversions Already Done": conversions_done,
+        "Additional Conversion": additional_conversion,
+        "Total Conversion For Year": conversions_done + additional_conversion,
+        "Social Security Received": social_security_received,
+        "Realized LTCG": realized_ltcg,
+        "Qualified Dividends": qualified_dividends,
+        "Preferential Income": preferential_income,
+        "Provisional Income": provisional_income,
+        "Taxable SS": taxable_ss,
+        "Ordinary Income Before SS": ordinary_income_pre_ss,
+        "Ordinary Income Total": ordinary_income_total,
+        "AGI": agi,
+        "MAGI": magi,
+        "Standard Deduction": standard_deduction,
+        "Ordinary Taxable Income": ordinary_taxable_income,
+        "Preferential Taxable Income": preferential_taxable_income,
+        "Taxable Income": taxable_income,
+        "Federal Ordinary Tax": ordinary_tax,
+        "Federal LTCG/QD Tax": ltcg_qd_tax,
+        "Federal Tax": federal_tax,
+        "NC State Tax": state_tax,
+        "Total Tax": total_tax,
+        "ACA Cost": aca_cost,
+        "IRMAA Cost": irmaa_cost,
+        "Total Government Drag": total_government_drag,
+        "Effective Tax Rate": effective_tax_rate,
+        "Marginal Federal Rate": marginal_rate,
+        "ACA Limit": aca_limit,
+        "First IRMAA Cliff": irmaa_first_cliff,
+        "ACA Covered Lives": int(aca_covered_lives),
+        "Medicare Covered Lives": int(medicare_covered_lives),
+    }
+
+
+def find_max_additional_conversion_for_rule(
+    year: int,
+    filing_status: str,
+    earned_income: float,
+    other_ordinary_income: float,
+    ira_withdrawals: float,
+    conversions_done: float,
+    social_security_received: float,
+    realized_ltcg: float,
+    qualified_dividends: float,
+    standard_deduction: float,
+    state_tax_rate: float,
+    aca_covered_lives: int,
+    medicare_covered_lives: int,
+    max_additional_conversion: float,
+    step_size: float,
+    rule_fn,
+) -> tuple[float, dict]:
+    best_conversion = 0.0
+    best_candidate = evaluate_annual_tax_scenario(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+        conversions_done, 0.0, social_security_received, realized_ltcg, qualified_dividends,
+        standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+    )
+    step_index = 0
+    while True:
+        additional_conversion = min(max_additional_conversion, step_index * step_size)
+        candidate = evaluate_annual_tax_scenario(
+            year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+            conversions_done, additional_conversion, social_security_received, realized_ltcg, qualified_dividends,
+            standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+        )
+        if rule_fn(candidate):
+            best_conversion = additional_conversion
+            best_candidate = candidate
+        else:
+            break
+        if additional_conversion >= max_additional_conversion - 1e-9:
+            break
+        step_index += 1
+    return float(best_conversion), best_candidate
+
+
+def run_standalone_annual_tax_engine(
+    year: int,
+    filing_status: str,
+    earned_income: float,
+    other_ordinary_income: float,
+    ira_withdrawals: float,
+    conversions_done: float,
+    social_security_received: float,
+    realized_ltcg: float,
+    qualified_dividends: float,
+    standard_deduction: float,
+    state_tax_rate: float,
+    aca_covered_lives: int,
+    medicare_covered_lives: int,
+    target_bracket: str,
+    safety_buffer: float,
+    max_additional_conversion: float,
+    step_size: float,
+    use_bracket_guardrail: bool,
+    use_aca_guardrail: bool,
+    use_irmaa_guardrail: bool,
+) -> dict:
+    baseline = evaluate_annual_tax_scenario(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+        conversions_done, 0.0, social_security_received, realized_ltcg, qualified_dividends,
+        standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+    )
+
+    bracket_tops = get_annual_bracket_tops(year, filing_status)
+    target_bracket_top = float(bracket_tops[target_bracket])
+    bracket_limit = max(0.0, target_bracket_top - float(safety_buffer))
+
+    threshold_rows = []
+    active_caps = []
+
+    bracket_max, bracket_candidate = find_max_additional_conversion_for_rule(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals, conversions_done,
+        social_security_received, realized_ltcg, qualified_dividends, standard_deduction, state_tax_rate,
+        aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
+        lambda c: float(c["Ordinary Taxable Income"]) <= bracket_limit,
+    )
+    threshold_rows.append({
+        "Rule": f"Top of {target_bracket} bracket",
+        "Enabled": bool(use_bracket_guardrail),
+        "Threshold": target_bracket_top,
+        "Buffered Threshold": bracket_limit,
+        "Max Additional Conversion": bracket_max,
+        "MAGI At Max": float(bracket_candidate["MAGI"]),
+        "Taxable Income At Max": float(bracket_candidate["Taxable Income"]),
+        "Federal Tax At Max": float(bracket_candidate["Federal Tax"]),
+        "NC Tax At Max": float(bracket_candidate["NC State Tax"]),
+        "Total Drag At Max": float(bracket_candidate["Total Government Drag"]),
+        "Binding Metric": "Ordinary Taxable Income",
+    })
+    if use_bracket_guardrail:
+        active_caps.append(bracket_max)
+
+    aca_limit = get_annual_aca_limit(year, filing_status, aca_covered_lives)
+    if aca_limit is not None:
+        aca_limit_buffered = max(0.0, float(aca_limit) - float(safety_buffer))
+        aca_max, aca_candidate = find_max_additional_conversion_for_rule(
+            year, filing_status, earned_income, other_ordinary_income, ira_withdrawals, conversions_done,
+            social_security_received, realized_ltcg, qualified_dividends, standard_deduction, state_tax_rate,
+            aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
+            lambda c: float(c["MAGI"]) <= aca_limit_buffered,
+        )
+        threshold_rows.append({
+            "Rule": "ACA MAGI limit",
+            "Enabled": bool(use_aca_guardrail),
+            "Threshold": float(aca_limit),
+            "Buffered Threshold": float(aca_limit_buffered),
+            "Max Additional Conversion": aca_max,
+            "MAGI At Max": float(aca_candidate["MAGI"]),
+            "Taxable Income At Max": float(aca_candidate["Taxable Income"]),
+            "Federal Tax At Max": float(aca_candidate["Federal Tax"]),
+            "NC Tax At Max": float(aca_candidate["NC State Tax"]),
+            "Total Drag At Max": float(aca_candidate["Total Government Drag"]),
+            "Binding Metric": "MAGI",
+        })
+        if use_aca_guardrail:
+            active_caps.append(aca_max)
+
+    irmaa_first_cliff = None
+    if medicare_covered_lives > 0:
+        irmaa_first_cliff = get_annual_irmaa_first_cliff(year, filing_status)
+        irmaa_limit_buffered = max(0.0, float(irmaa_first_cliff) - float(safety_buffer))
+        irmaa_max, irmaa_candidate = find_max_additional_conversion_for_rule(
+            year, filing_status, earned_income, other_ordinary_income, ira_withdrawals, conversions_done,
+            social_security_received, realized_ltcg, qualified_dividends, standard_deduction, state_tax_rate,
+            aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
+            lambda c: float(c["MAGI"]) <= irmaa_limit_buffered,
+        )
+        threshold_rows.append({
+            "Rule": "First IRMAA cliff",
+            "Enabled": bool(use_irmaa_guardrail),
+            "Threshold": float(irmaa_first_cliff),
+            "Buffered Threshold": float(irmaa_limit_buffered),
+            "Max Additional Conversion": irmaa_max,
+            "MAGI At Max": float(irmaa_candidate["MAGI"]),
+            "Taxable Income At Max": float(irmaa_candidate["Taxable Income"]),
+            "Federal Tax At Max": float(irmaa_candidate["Federal Tax"]),
+            "NC Tax At Max": float(irmaa_candidate["NC State Tax"]),
+            "Total Drag At Max": float(irmaa_candidate["Total Government Drag"]),
+            "Binding Metric": "MAGI",
+        })
+        if use_irmaa_guardrail:
+            active_caps.append(irmaa_max)
+
+    recommended_additional_conversion = min(active_caps) if active_caps else max_additional_conversion
+    recommended_additional_conversion = floor_to_step(recommended_additional_conversion, step_size)
+    recommended = evaluate_annual_tax_scenario(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+        conversions_done, recommended_additional_conversion, social_security_received, realized_ltcg, qualified_dividends,
+        standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+    )
+
+    summary_inputs = {
+        "year": int(year),
+        "filing_status": filing_status,
+        "earned_income": earned_income,
+        "other_ordinary_income": other_ordinary_income,
+        "ira_withdrawals": ira_withdrawals,
+        "conversions_done": conversions_done,
+        "social_security_received": social_security_received,
+        "realized_ltcg": realized_ltcg,
+        "qualified_dividends": qualified_dividends,
+        "standard_deduction": standard_deduction,
+        "state_tax_rate": state_tax_rate,
+        "aca_covered_lives": int(aca_covered_lives),
+        "medicare_covered_lives": int(medicare_covered_lives),
+        "target_bracket": target_bracket,
+        "safety_buffer": safety_buffer,
+        "max_additional_conversion": max_additional_conversion,
+        "step_size": step_size,
+        "use_bracket_guardrail": bool(use_bracket_guardrail),
+        "use_aca_guardrail": bool(use_aca_guardrail),
+        "use_irmaa_guardrail": bool(use_irmaa_guardrail),
+    }
+    scenario_fingerprint = build_scenario_fingerprint(summary_inputs, max_additional_conversion, step_size)
+
+    compare_rows = []
+    for label, candidate in [("Current", baseline), ("After Recommended Additional Conversion", recommended)]:
+        compare_rows.append({
+            "Scenario": label,
+            "Additional Conversion": float(candidate["Additional Conversion"]),
+            "Total Conversion For Year": float(candidate["Total Conversion For Year"]),
+            "Taxable SS": float(candidate["Taxable SS"]),
+            "AGI": float(candidate["AGI"]),
+            "MAGI": float(candidate["MAGI"]),
+            "Taxable Income": float(candidate["Taxable Income"]),
+            "Federal Tax": float(candidate["Federal Tax"]),
+            "NC State Tax": float(candidate["NC State Tax"]),
+            "Federal LTCG/QD Tax": float(candidate["Federal LTCG/QD Tax"]),
+            "ACA Cost": float(candidate["ACA Cost"]),
+            "IRMAA Cost": float(candidate["IRMAA Cost"]),
+            "Total Government Drag": float(candidate["Total Government Drag"]),
+            "Effective Tax Rate": float(candidate["Effective Tax Rate"]),
+        })
+
+    summary = {
+        "Scenario Fingerprint": scenario_fingerprint,
+        "Year": int(year),
+        "Filing Status": filing_status,
+        "Recommended Additional Conversion": float(recommended_additional_conversion),
+        "Target Bracket": target_bracket,
+        "Safety Buffer": float(safety_buffer),
+        "Standard Deduction": float(standard_deduction),
+        "ACA Covered Lives": int(aca_covered_lives),
+        "Medicare Covered Lives": int(medicare_covered_lives),
+    }
+
+    return {
+        "summary": summary,
+        "baseline_candidate": baseline,
+        "recommended_candidate": recommended,
+        "threshold_df": pd.DataFrame(threshold_rows),
+        "compare_df": pd.DataFrame(compare_rows),
+    }
+
+
+def render_standalone_annual_tax_results(result: dict) -> None:
+    summary = result["summary"]
+    current = result["baseline_candidate"]
+    recommended = result["recommended_candidate"]
+
+    st.subheader("Annual Tax Engine Summary")
+    st.write(f"Scenario Fingerprint: `{summary['Scenario Fingerprint']}`")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Recommended Additional Conversion", f"${float(summary['Recommended Additional Conversion']):,.0f}")
+    m2.metric("Current MAGI", f"${float(current['MAGI']):,.0f}")
+    m3.metric("Recommended MAGI", f"${float(recommended['MAGI']):,.0f}")
+    m4.metric("Incremental Total Drag", f"${float(recommended['Total Government Drag'] - current['Total Government Drag']):,.0f}")
+
+    st.subheader("Current-Year Snapshot")
+    snapshot_rows = [
+        ("Filing Status", current["Filing Status"]),
+        ("Provisional Income", current["Provisional Income"]),
+        ("Taxable Social Security", current["Taxable SS"]),
+        ("AGI", current["AGI"]),
+        ("MAGI", current["MAGI"]),
+        ("Taxable Income", current["Taxable Income"]),
+        ("Federal Ordinary Tax", current["Federal Ordinary Tax"]),
+        ("Federal LTCG/QD Tax", current["Federal LTCG/QD Tax"]),
+        ("Projected Federal Tax", current["Federal Tax"]),
+        ("Projected NC State Tax", current["NC State Tax"]),
+        ("Total Projected Tax", current["Total Tax"]),
+        ("Effective Tax Rate", current["Effective Tax Rate"]),
+        ("Marginal Federal Rate", current["Marginal Federal Rate"]),
+    ]
+    snapshot_df = pd.DataFrame(snapshot_rows, columns=["Metric", "Current"])
+    st.dataframe(snapshot_df, use_container_width=True)
+
+    st.subheader("Additional Conversion Guardrails")
+    st.dataframe(result["threshold_df"], use_container_width=True)
+
+    st.subheader("Current vs Recommended Additional Conversion")
+    st.dataframe(result["compare_df"], use_container_width=True)
+
 def go_to_page(page_name: str) -> None:
     st.session_state["app_page"] = page_name
 
@@ -2886,20 +3394,16 @@ def render_top_nav(current_page: str) -> None:
     st.divider()
 
 
+
 def render_home_page() -> None:
     st.title("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
-        "Use the Annual Conversion Calculator for this year's threshold management, or open the Conversion Optimizer for the full lifetime break-even governor and SS optimizer."
+        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Conversion Optimizer for the full lifetime break-even governor and SS optimizer."
     )
-    c1, c2 = st.columns(2)
-    with c1:
-        st.button("Open Annual Calculator", on_click=go_to_page, args=("annual",), use_container_width=True)
-    with c2:
-        st.button("Open Conversion Optimizer", on_click=go_to_page, args=("conversion",), use_container_width=True)
-
+    render_top_nav("home")
     st.info(
-        "State is kept across pages. Current-year annual calculator inputs stay in session and remain available when you switch tools."
+        "State is kept across pages. Annual current-year inputs stay in session and remain available when you switch tools."
     )
 
 
@@ -3041,6 +3545,7 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     st.title("Conversion Optimizer")
+    render_top_nav("conversion")
     st.caption("Full lifetime break-even Roth conversion governor, with optional SS optimizer.")
 
     inputs = render_shared_household_inputs()
@@ -3194,7 +3699,7 @@ def render_conversion_page() -> None:
 
     if "annual_calc_year" in st.session_state:
         st.info(
-            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
         )
 
     if run_ss_optimizer_toggle:
@@ -3235,133 +3740,112 @@ def render_conversion_page() -> None:
                 st.dataframe(result["decision_df"], use_container_width=True)
 
 
+
 def render_annual_page() -> None:
     st.title("Annual Conversion Calculator")
-    st.caption("Deterministic current-year threshold manager for bracket, ACA, and IRMAA guardrails.")
-
-    inputs = render_shared_household_inputs()
-    inputs.update(
-        {
-            "cash_sweep_threshold": st.session_state.get("cash_sweep_threshold", 50000.0),
-            "state_tax_rate": st.session_state.get("state_tax_rate", 0.0399),
-            "target_trad_balance_enabled": st.session_state.get("target_trad_balance_enabled", False),
-            "target_trad_balance": st.session_state.get("target_trad_balance", 300000.0),
-            "target_trad_override_enabled": st.session_state.get("target_trad_override_enabled", False),
-            "target_trad_override_max_rate": st.session_state.get("target_trad_override_max_rate", 0.22),
-            "post_aca_target_bracket": st.session_state.get("post_aca_target_bracket", "22%"),
-            "rmd_era_target_bracket": st.session_state.get("rmd_era_target_bracket", "22%"),
-        }
-    )
-
-    calc_default_year = START_YEAR
-    calc_params_preview = build_common_params(inputs)
-    calc_owner_ss_default = float(calc_params_preview['owner_ss_annual']) if calc_default_year >= int(calc_params_preview['owner_ss_start']) else 0.0
-    calc_spouse_ss_default = float(calc_params_preview['spouse_ss_annual']) if calc_default_year >= int(calc_params_preview['spouse_ss_start']) else 0.0
-    calc_total_ss_default = calc_owner_ss_default + calc_spouse_ss_default
+    render_top_nav("annual")
+    st.caption("Standalone annual tax cockpit for this-year conversion decisions. No long-term planning inputs live here.")
 
     st.header("Current-Year Inputs")
-    acc1, acc2, acc3 = st.columns(3)
-    with acc1:
+    row1 = st.columns(3)
+    with row1[0]:
         annual_calc_year = st.number_input(
-            "Conversion Calculator Year",
+            "Tax Year",
             min_value=START_YEAR,
             max_value=END_YEAR,
-            value=calc_default_year,
+            value=int(st.session_state.get("annual_calc_year", START_YEAR)),
             step=1,
-            help="Standalone current/future-year conversion check. This does not run the full lifetime simulation.",
             key="annual_calc_year",
         )
-        derived_other_income_default = float(inputs["earned_income_annual"]) if annual_calc_year >= inputs["earned_income_start_year"] and annual_calc_year <= inputs["earned_income_end_year"] else 0.0
-        annual_calc_other_income = st.number_input(
-            "Other Ordinary Income For Year",
-            min_value=0.0,
-            value=derived_other_income_default,
-            step=1000.0,
-            help="Use wages, pensions, IRA withdrawals already planned, etc. Exclude Roth conversions here.",
-            key="annual_calc_other_income",
+        annual_calc_filing_status = st.selectbox(
+            "Filing Status",
+            ANNUAL_FILING_STATUS_OPTIONS,
+            index=0 if st.session_state.get("annual_calc_filing_status", "MFJ") == "MFJ" else 1,
+            key="annual_calc_filing_status",
         )
-    with acc2:
-        annual_calc_ltcg = st.number_input(
-            "Realized LTCG For Year",
+        standard_deduction_default = get_annual_standard_deduction_default(int(annual_calc_year), annual_calc_filing_status)
+        annual_calc_standard_deduction = st.number_input(
+            "Standard Deduction",
             min_value=0.0,
-            value=0.0,
-            step=1000.0,
-            help="Enter realized long-term capital gains already expected for the year.",
-            key="annual_calc_ltcg",
-        )
-        annual_calc_total_ss = st.number_input(
-            "Social Security For Year",
-            min_value=0.0,
-            value=float(calc_total_ss_default),
-            step=1000.0,
-            help="Editable. Defaults to the annual SS implied by the current claim-age settings if benefits have started by the selected year.",
-            key="annual_calc_total_ss",
-        )
-    with acc3:
-        annual_calc_income_buffer = st.number_input(
-            "Income Safety Buffer ($)",
-            min_value=0.0,
-            value=1000.0,
+            value=float(st.session_state.get("annual_calc_standard_deduction", standard_deduction_default)),
             step=500.0,
-            help="Reduces each guardrail threshold by this amount before recommending a conversion.",
-            key="annual_calc_income_buffer",
+            key="annual_calc_standard_deduction",
         )
+    with row1[1]:
+        annual_calc_earned_income = st.number_input("Earned Income", min_value=0.0, value=float(st.session_state.get("annual_calc_earned_income", 0.0)), step=1000.0, key="annual_calc_earned_income")
+        annual_calc_other_income = st.number_input("Other Ordinary Income", min_value=0.0, value=float(st.session_state.get("annual_calc_other_income", 0.0)), step=1000.0, key="annual_calc_other_income")
+        annual_calc_ira_withdrawals = st.number_input("IRA Withdrawals Already Taken", min_value=0.0, value=float(st.session_state.get("annual_calc_ira_withdrawals", 0.0)), step=1000.0, key="annual_calc_ira_withdrawals")
+    with row1[2]:
+        annual_calc_conversions_done = st.number_input("Roth Conversions Already Completed", min_value=0.0, value=float(st.session_state.get("annual_calc_conversions_done", 0.0)), step=1000.0, key="annual_calc_conversions_done")
+        annual_calc_total_ss = st.number_input("Social Security Received", min_value=0.0, value=float(st.session_state.get("annual_calc_total_ss", 0.0)), step=1000.0, key="annual_calc_total_ss")
+        annual_calc_ltcg = st.number_input("LTCG Realized", min_value=0.0, value=float(st.session_state.get("annual_calc_ltcg", 0.0)), step=1000.0, key="annual_calc_ltcg")
+
+    row2 = st.columns(3)
+    with row2[0]:
+        annual_calc_qualified_dividends = st.number_input("Qualified Dividends", min_value=0.0, value=float(st.session_state.get("annual_calc_qualified_dividends", 0.0)), step=1000.0, key="annual_calc_qualified_dividends")
         annual_calc_target_bracket = st.selectbox(
-            "Annual Calculator Target Bracket",
-            ["12%", "22%", "24%"],
-            index=1,
-            help="Primary federal ordinary-income guardrail for the annual conversion calculator.",
+            "Target Bracket For Additional Conversion",
+            ANNUAL_TARGET_BRACKET_OPTIONS,
+            index=ANNUAL_TARGET_BRACKET_OPTIONS.index(st.session_state.get("annual_calc_target_bracket", "22%")),
             key="annual_calc_target_bracket",
         )
+        annual_calc_income_buffer = st.number_input("Income Safety Buffer ($)", min_value=0.0, value=float(st.session_state.get("annual_calc_income_buffer", 1000.0)), step=500.0, key="annual_calc_income_buffer")
+    with row2[1]:
+        filing_status = annual_calc_filing_status
+        max_aca_lives = 2 if filing_status == "MFJ" else 1
+        max_medicare_lives = 2 if filing_status == "MFJ" else 1
+        annual_calc_aca_lives = st.number_input("ACA-Covered Lives", min_value=0, max_value=max_aca_lives, value=int(min(st.session_state.get("annual_calc_aca_lives", max_aca_lives), max_aca_lives)), step=1, key="annual_calc_aca_lives")
+        annual_calc_medicare_lives = st.number_input("Medicare-Covered Lives", min_value=0, max_value=max_medicare_lives, value=int(min(st.session_state.get("annual_calc_medicare_lives", 0), max_medicare_lives)), step=1, key="annual_calc_medicare_lives")
+        annual_calc_state_tax_rate = st.number_input("NC State Tax Rate", min_value=0.0, max_value=0.20, value=float(st.session_state.get("annual_calc_state_tax_rate", st.session_state.get("state_tax_rate", 0.0399))), step=0.0001, format="%.4f", key="annual_calc_state_tax_rate")
+    with row2[2]:
+        annual_calc_use_bracket_guardrail = st.checkbox("Use Bracket Guardrail", value=bool(st.session_state.get("annual_calc_use_bracket_guardrail", True)), key="annual_calc_use_bracket_guardrail")
+        annual_calc_use_aca_guardrail = st.checkbox("Use ACA Guardrail", value=bool(st.session_state.get("annual_calc_use_aca_guardrail", True)), key="annual_calc_use_aca_guardrail")
+        annual_calc_use_irmaa_guardrail = st.checkbox("Use IRMAA Guardrail", value=bool(st.session_state.get("annual_calc_use_irmaa_guardrail", True)), key="annual_calc_use_irmaa_guardrail")
 
-    acg1, acg2, acg3 = st.columns(3)
-    with acg1:
-        annual_calc_use_bracket_guardrail = st.checkbox(
-            "Use Bracket Guardrail",
-            value=True,
-            help="Keeps ordinary taxable income at or below the selected federal bracket target.",
-            key="annual_calc_use_bracket_guardrail",
-        )
-    with acg2:
-        annual_calc_use_aca_guardrail = st.checkbox(
-            "Use ACA Guardrail",
-            value=True,
-            help="When ACA lives exist in the selected year, keeps MAGI under the ACA cliff/headroom line.",
-            key="annual_calc_use_aca_guardrail",
-        )
-    with acg3:
-        annual_calc_use_irmaa_guardrail = st.checkbox(
-            "Use IRMAA Guardrail",
-            value=True,
-            help="When Medicare lives exist in the selected year, keeps MAGI under the first IRMAA tier threshold.",
-            key="annual_calc_use_irmaa_guardrail",
-        )
+    with st.expander("Annual Engine Advanced Settings"):
+        adv1, adv2 = st.columns(2)
+        with adv1:
+            annual_calc_max_additional_conversion = st.number_input(
+                "Max Additional Conversion To Test",
+                min_value=0.0,
+                value=float(st.session_state.get("annual_calc_max_additional_conversion", st.session_state.get("max_conversion", 300000.0))),
+                step=5000.0,
+                key="annual_calc_max_additional_conversion",
+            )
+        with adv2:
+            annual_calc_step_size = st.number_input(
+                "Annual Engine Step Size",
+                min_value=100.0,
+                value=float(st.session_state.get("annual_calc_step_size", 1000.0)),
+                step=100.0,
+                key="annual_calc_step_size",
+                help="Used to scan for the maximum additional conversion that stays under the active guardrails.",
+            )
 
-    st.caption("These annual inputs are kept in session and remain available when you switch back to the Conversion Optimizer.")
+    st.caption("This page solves for additional Roth conversion from now. It applies Social Security taxation and capital-gain/dividend stacking inside the annual tax calculation.")
 
     if st.button("Run Annual Conversion Calculator"):
-        annual_conversion_result = run_annual_conversion_calculator(
-            inputs=inputs,
-            calc_year=int(annual_calc_year),
-            external_other_ordinary_income=annual_calc_other_income,
-            realized_ltcg_so_far=annual_calc_ltcg,
-            total_ss_for_year=annual_calc_total_ss,
+        annual_result = run_standalone_annual_tax_engine(
+            year=int(annual_calc_year),
+            filing_status=annual_calc_filing_status,
+            earned_income=annual_calc_earned_income,
+            other_ordinary_income=annual_calc_other_income,
+            ira_withdrawals=annual_calc_ira_withdrawals,
+            conversions_done=annual_calc_conversions_done,
+            social_security_received=annual_calc_total_ss,
+            realized_ltcg=annual_calc_ltcg,
+            qualified_dividends=annual_calc_qualified_dividends,
+            standard_deduction=annual_calc_standard_deduction,
+            state_tax_rate=annual_calc_state_tax_rate,
+            aca_covered_lives=int(annual_calc_aca_lives),
+            medicare_covered_lives=int(annual_calc_medicare_lives),
             target_bracket=annual_calc_target_bracket,
-            income_safety_buffer=annual_calc_income_buffer,
-            max_conversion=st.session_state.get("max_conversion", 300000.0),
-            step_size=st.session_state.get("step_size", 5000.0),
-            apply_bracket_guardrail=annual_calc_use_bracket_guardrail,
-            apply_aca_guardrail=annual_calc_use_aca_guardrail,
-            apply_irmaa_guardrail=annual_calc_use_irmaa_guardrail,
+            safety_buffer=annual_calc_income_buffer,
+            max_additional_conversion=annual_calc_max_additional_conversion,
+            step_size=annual_calc_step_size,
+            use_bracket_guardrail=annual_calc_use_bracket_guardrail,
+            use_aca_guardrail=annual_calc_use_aca_guardrail,
+            use_irmaa_guardrail=annual_calc_use_irmaa_guardrail,
         )
-        render_annual_conversion_calculator_results(annual_conversion_result)
+        render_standalone_annual_tax_results(annual_result)
 
-
-render_top_nav(get_app_page())
-current_page = get_app_page()
-if current_page == "home":
-    render_home_page()
-elif current_page == "annual":
-    render_annual_page()
-else:
-    render_conversion_page()
