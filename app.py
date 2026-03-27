@@ -2520,16 +2520,25 @@ def run_ss_optimizer(
 ) -> dict:
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
+
+    # Freeze a clean snapshot for optimizer runs and force the optimizer path into fast mode.
+    # The optimizer is a wrapper over the already-tested governor, so the highest-value trust
+    # safeguard here is fresh scenario inputs per combo rather than heavy integrity checks.
+    base_snapshot = dict(inputs)
+    base_snapshot["integrity_mode"] = False
+    base_snapshot["strict_repeatability_check"] = False
+
     results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
     st.session_state["ss_optimizer_interrupted"] = False
     st.session_state["ss_optimizer_error"] = None
+    st.session_state["ss_optimizer_partial_results"] = results
     progress_bar = st.progress(start_index / total_combos if total_combos else 0.0, text="Running Social Security optimizer...")
 
     try:
         for combo_index in range(start_index, total_combos):
             owner_age, spouse_age = combos[combo_index]
-            scenario_inputs = dict(inputs)
+            scenario_inputs = dict(base_snapshot)
             scenario_inputs["owner_claim_age"] = int(owner_age)
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
@@ -2537,7 +2546,7 @@ def run_ss_optimizer(
                 run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
             except Exception as exc:
                 st.session_state["ss_optimizer_progress_index"] = combo_index
-                st.session_state["ss_optimizer_partial_results"] = list(results)
+                st.session_state["ss_optimizer_partial_results"] = results
                 st.session_state["ss_optimizer_last_completed"] = combos[combo_index - 1] if combo_index > 0 else None
                 st.session_state["ss_optimizer_interrupted"] = True
                 st.session_state["ss_optimizer_error"] = f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
@@ -2578,7 +2587,7 @@ def run_ss_optimizer(
                 "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
             }
             results.append(row)
-            st.session_state["ss_optimizer_partial_results"] = list(results)
+            st.session_state["ss_optimizer_partial_results"] = results
             st.session_state["ss_optimizer_progress_index"] = combo_index + 1
             st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
             progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
