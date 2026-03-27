@@ -121,6 +121,37 @@ def format_percent(value: float) -> str:
         return str(value)
 
 
+def get_ss_optimizer_combo_count() -> int:
+    return 9 * 9
+
+
+def clear_ss_optimizer_state(clear_last_result: bool = True) -> None:
+    st.session_state["ss_optimizer_running"] = False
+    st.session_state["ss_optimizer_interrupted"] = False
+    st.session_state["ss_optimizer_error"] = None
+    st.session_state["ss_optimizer_progress_index"] = 0
+    st.session_state["ss_optimizer_partial_results"] = []
+    st.session_state["ss_optimizer_last_completed"] = None
+    if clear_last_result:
+        st.session_state["ss_optimizer_last_result"] = None
+
+
+def set_annual_std_deduction_default_callback() -> None:
+    year = int(st.session_state.get("annual_calc_year", START_YEAR))
+    filing_status = st.session_state.get("annual_calc_filing_status", "MFJ")
+    default_val = float(get_annual_standard_deduction_default(year, filing_status))
+    st.session_state["annual_calc_standard_deduction"] = default_val
+    st.session_state["annual_calc_standard_deduction_auto"] = True
+
+
+def set_annual_std_deduction_custom_callback() -> None:
+    st.session_state["annual_calc_standard_deduction_auto"] = False
+
+
+def mark_annual_std_deduction_custom_from_input() -> None:
+    st.session_state["annual_calc_standard_deduction_auto"] = False
+
+
 def get_page_specific_state_keys(page: str) -> list[str]:
     prefixes = PAGE_STATE_KEY_PREFIXES.get(page, [])
     keys = []
@@ -2488,13 +2519,15 @@ def run_ss_optimizer(
     existing_results: list | None = None,
 ) -> dict:
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
+    total_combos = len(combos)
     results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
     st.session_state["ss_optimizer_interrupted"] = False
-    progress_bar = st.progress(start_index / len(combos) if combos else 0.0, text="Running Social Security optimizer...")
+    st.session_state["ss_optimizer_error"] = None
+    progress_bar = st.progress(start_index / total_combos if total_combos else 0.0, text="Running Social Security optimizer...")
 
     try:
-        for combo_index in range(start_index, len(combos)):
+        for combo_index in range(start_index, total_combos):
             owner_age, spouse_age = combos[combo_index]
             scenario_inputs = dict(inputs)
             scenario_inputs["owner_claim_age"] = int(owner_age)
@@ -2504,11 +2537,28 @@ def run_ss_optimizer(
                 run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
             except Exception as exc:
                 st.session_state["ss_optimizer_progress_index"] = combo_index
-                st.session_state["ss_optimizer_partial_results"] = results
+                st.session_state["ss_optimizer_partial_results"] = list(results)
                 st.session_state["ss_optimizer_last_completed"] = combos[combo_index - 1] if combo_index > 0 else None
-                raise RuntimeError(
-                    f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
-                ) from exc
+                st.session_state["ss_optimizer_interrupted"] = True
+                st.session_state["ss_optimizer_error"] = f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
+                interrupted_df = pd.DataFrame(results) if results else pd.DataFrame()
+                return {
+                    "all_results_df": interrupted_df.copy(),
+                    "all_results_export_df": interrupted_df.copy(),
+                    "top_10_df": interrupted_df.head(10).copy(),
+                    "top_10_export_df": interrupted_df.head(10).copy(),
+                    "comparison_df": pd.DataFrame(),
+                    "comparison_display_df": pd.DataFrame(),
+                    "best_result": None,
+                    "best_validation": None,
+                    "best_rerun_summary": None,
+                    "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+                    "interrupted_partial_df": interrupted_df.copy(),
+                    "completed": False,
+                    "progress_index": combo_index,
+                    "total_combos": total_combos,
+                    "error_message": st.session_state["ss_optimizer_error"],
+                }
 
             row = {
                 "Owner SS Age": int(owner_age),
@@ -2528,10 +2578,10 @@ def run_ss_optimizer(
                 "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
             }
             results.append(row)
-            st.session_state["ss_optimizer_partial_results"] = results
+            st.session_state["ss_optimizer_partial_results"] = list(results)
             st.session_state["ss_optimizer_progress_index"] = combo_index + 1
             st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
-            progress_bar.progress((combo_index + 1) / len(combos), text=f"Running Social Security optimizer... {combo_index + 1}/{len(combos)}")
+            progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
 
         results_df = pd.DataFrame(results).sort_values(
             by=["Score", "Final Net Worth"],
@@ -2595,9 +2645,7 @@ def run_ss_optimizer(
             best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
 
         progress_bar.empty()
-        st.session_state["ss_optimizer_partial_results"] = []
-        st.session_state["ss_optimizer_progress_index"] = 0
-        st.session_state["ss_optimizer_last_completed"] = None
+        clear_ss_optimizer_state(clear_last_result=False)
         st.session_state["ss_optimizer_last_result"] = {
             "all_results_df": results_df,
             "top_10_df": top_10_df,
@@ -2606,6 +2654,11 @@ def run_ss_optimizer(
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "completed": True,
+            "progress_index": total_combos,
+            "total_combos": total_combos,
+            "interrupted_partial_df": None,
+            "error_message": None,
         }
         return {
             "all_results_df": results_df,
@@ -2619,12 +2672,17 @@ def run_ss_optimizer(
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
             "interrupted_partial_df": None,
+            "completed": True,
+            "progress_index": total_combos,
+            "total_combos": total_combos,
+            "error_message": None,
         }
-    except Exception:
-        st.session_state["ss_optimizer_interrupted"] = True
-        raise
     finally:
         st.session_state["ss_optimizer_running"] = False
+        try:
+            progress_bar.empty()
+        except Exception:
+            pass
 
 
 def render_ss_optimizer_results(result: dict):
@@ -2645,8 +2703,12 @@ def render_ss_optimizer_results(result: dict):
             st.error("Best-strategy rerun validation failed. The optimizer winner did not match a fresh rerun.")
             st.dataframe(validation["mismatch_df"], use_container_width=True)
 
-    if result.get("interrupted_partial_df") is not None:
-        st.warning("A prior optimizer run was interrupted before all 81 combinations finished. Resume it to complete the full result set.")
+    if result.get("interrupted_partial_df") is not None or not result.get("completed", True):
+        msg = result.get("error_message") or "A prior optimizer run was interrupted before all 81 combinations finished."
+        st.warning(f"{msg} Resume it to complete the full result set.")
+
+    if not result.get("completed", True):
+        return
 
     st.subheader("Top 10 SS Strategies")
     st.dataframe(
@@ -4044,20 +4106,24 @@ def render_conversion_page() -> None:
         )
 
     if run_ss_optimizer_toggle:
+        total_combos = get_ss_optimizer_combo_count()
         if st.session_state.get("ss_optimizer_running"):
-            st.info("SS optimizer is running. Inputs are effectively locked until the run finishes.")
-        partial_results = st.session_state.get("ss_optimizer_partial_results", [])
+            # Recover gracefully from stale locks after interrupted runs.
+            st.session_state["ss_optimizer_running"] = False
+        partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
         progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
         last_completed = st.session_state.get("ss_optimizer_last_completed")
-        if partial_results:
+        partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
+        if partial_available:
             last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
-            st.warning(f"Optimizer progress saved: {progress_index}/81 completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
-        b1, b2 = st.columns(2)
+            st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
+        optimizer_error = st.session_state.get("ss_optimizer_error")
+        if optimizer_error:
+            st.error(optimizer_error)
+        b1, b2, b3 = st.columns(3)
         with b1:
-            if st.button("Run All SS Strategies", disabled=bool(st.session_state.get("ss_optimizer_running", False)), use_container_width=True):
-                st.session_state["ss_optimizer_partial_results"] = []
-                st.session_state["ss_optimizer_progress_index"] = 0
-                st.session_state["ss_optimizer_last_completed"] = None
+            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
+                clear_ss_optimizer_state(clear_last_result=True)
                 optimizer_result = run_ss_optimizer(
                     inputs=inputs,
                     max_conversion=max_conversion,
@@ -4069,10 +4135,11 @@ def render_conversion_page() -> None:
                     existing_results=[],
                 )
                 st.session_state["ss_optimizer_last_result"] = optimizer_result
-                mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
-                render_ss_optimizer_results(optimizer_result)
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
+                st.rerun()
         with b2:
-            resume_disabled = bool(st.session_state.get("ss_optimizer_running", False)) or not partial_results
+            resume_disabled = not partial_available
             if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
                 optimizer_result = run_ss_optimizer(
                     inputs=inputs,
@@ -4085,19 +4152,20 @@ def render_conversion_page() -> None:
                     existing_results=partial_results,
                 )
                 st.session_state["ss_optimizer_last_result"] = optimizer_result
-                mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
-                render_ss_optimizer_results(optimizer_result)
-        if st.button("Reset SS Optimizer Progress", disabled=bool(st.session_state.get("ss_optimizer_running", False)) and not partial_results, use_container_width=True):
-            st.session_state["ss_optimizer_partial_results"] = []
-            st.session_state["ss_optimizer_progress_index"] = 0
-            st.session_state["ss_optimizer_last_completed"] = None
-            st.session_state["ss_optimizer_interrupted"] = False
-            st.session_state["ss_optimizer_last_result"] = None
-            st.rerun()
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
+                st.rerun()
+        with b3:
+            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
+            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
+                clear_ss_optimizer_state(clear_last_result=True)
+                st.rerun()
 
         if st.session_state.get("ss_optimizer_last_result") is not None:
-            render_stale_warning("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda}, "SS optimizer results")
-            render_ss_optimizer_results(st.session_state["ss_optimizer_last_result"])
+            last_result = st.session_state["ss_optimizer_last_result"]
+            if last_result.get("completed", False):
+                render_stale_warning("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda}, "SS optimizer results")
+            render_ss_optimizer_results(last_result)
     else:
         btn1, btn2 = st.columns(2)
 
@@ -4159,23 +4227,20 @@ def render_annual_page() -> None:
         if auto_key not in st.session_state:
             st.session_state[auto_key] = True
         if st.session_state[auto_key]:
-            st.session_state["annual_calc_standard_deduction"] = standard_deduction_default
+            st.session_state["annual_calc_standard_deduction"] = float(standard_deduction_default)
         annual_calc_standard_deduction = st.number_input(
             "Standard Deduction",
             min_value=0.0,
             value=float(st.session_state.get("annual_calc_standard_deduction", standard_deduction_default)),
             step=500.0,
             key="annual_calc_standard_deduction",
+            on_change=mark_annual_std_deduction_custom_from_input,
         )
         cstd1, cstd2 = st.columns([1,1])
         with cstd1:
-            if st.button("Use IRS Default", key="annual_std_use_default", use_container_width=True):
-                st.session_state["annual_calc_standard_deduction"] = standard_deduction_default
-                st.session_state[auto_key] = True
-                st.rerun()
+            st.button("Use IRS Default", key="annual_std_use_default", use_container_width=True, on_click=set_annual_std_deduction_default_callback)
         with cstd2:
-            if st.button("Keep Custom", key="annual_std_keep_custom", use_container_width=True):
-                st.session_state[auto_key] = False
+            st.button("Keep Custom", key="annual_std_keep_custom", use_container_width=True, on_click=set_annual_std_deduction_custom_callback)
     with row1[1]:
         annual_calc_earned_income = st.number_input("Earned Income", min_value=0.0, value=float(st.session_state.get("annual_calc_earned_income", 0.0)), step=1000.0, key="annual_calc_earned_income")
         annual_calc_other_income = st.number_input("Other Ordinary Income", min_value=0.0, value=float(st.session_state.get("annual_calc_other_income", 0.0)), step=1000.0, key="annual_calc_other_income")
