@@ -122,20 +122,53 @@ def format_percent(value: float) -> str:
         return str(value)
 
 
+def _coerce_numeric_or_none(value):
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _extract_display_conversion_value(row: pd.Series):
+    candidate_keys = [
+        "Chosen Conversion",
+        "Conversion Income Component",
+        "selected_conversion",
+        "chosen_conversion",
+        "conversion_amount",
+        "roth_conversion",
+        "conversion",
+        "conversion_income",
+    ]
+    values = {}
+    for key in candidate_keys:
+        if key in row.index:
+            values[key] = row.get(key)
+
+    for key in candidate_keys:
+        if key in values:
+            num = _coerce_numeric_or_none(values[key])
+            if num is not None:
+                target = _coerce_numeric_or_none(row.get("Target Bracket"))
+                if target is not None and abs(num - target) < 1e-9 and num <= 50:
+                    continue
+                return num
+
+    num = _coerce_numeric_or_none(row.get("Chosen Conversion"))
+    return 0.0 if num is None else num
+
+
 def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
     working = df.copy()
+    working["Chosen Conversion Display"] = working.apply(_extract_display_conversion_value, axis=1)
 
-    # Always surface actual conversion dollars. In some yearly frames the true
-    # conversion amount is also preserved in Conversion Income Component.
-    if "Chosen Conversion" not in working.columns and "Conversion Income Component" in working.columns:
-        working["Chosen Conversion"] = working["Conversion Income Component"]
-    elif "Conversion Income Component" in working.columns:
-        working["Chosen Conversion"] = working["Chosen Conversion"].fillna(working["Conversion Income Component"])
-
-    # Make the active limiter explicit instead of overloading the target bracket column.
     if "Binding Constraint" not in working.columns:
         def _binding_constraint(row: pd.Series) -> str:
             target = str(row.get("Target Bracket", "") or "")
@@ -146,7 +179,7 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
 
     preferred_cols = [
         "Year",
-        "Chosen Conversion",
+        "Chosen Conversion Display",
         "Binding Constraint",
         "Target Bracket",
         "Current Marginal Tax Rate",
@@ -165,7 +198,7 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in preferred_cols if c in working.columns]
     out = working[cols].copy()
     rename_map = {
-        "Chosen Conversion": "Chosen Conversion ($)",
+        "Chosen Conversion Display": "Chosen Conversion ($)",
         "Binding Constraint": "Binding Constraint",
         "Target Bracket": "Target Bracket (%)",
         "Current Marginal Tax Rate": "Current Marginal Rate (%)",
@@ -4724,7 +4757,14 @@ def render_conversion_page() -> None:
                 render_summary("Break-Even Governor Summary", result)
                 st.subheader("Chosen Year-by-Year Path")
                 path_display_df = build_chosen_path_display_df(result["df"])
-                st.caption("Chosen Conversion ($) is the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
+                st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
+                with st.expander("Debug: First Year Raw Data", expanded=False):
+                    try:
+                        if result.get("df") is not None and not result["df"].empty:
+                            first_row_raw = result["df"].iloc[0].to_dict()
+                            st.json(first_row_raw)
+                    except Exception as debug_exc:
+                        st.write(f"Debug panel unavailable: {debug_exc}")
                 if path_display_df is not None and not path_display_df.empty:
                     fmt = {}
                     non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
