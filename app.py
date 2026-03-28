@@ -4080,6 +4080,14 @@ def go_to_page(page_name: str) -> None:
     st.session_state["app_page"] = page_name
 
 
+def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, source_label: str = "quick_recommendation") -> None:
+    st.session_state["owner_claim_age"] = int(owner_age)
+    st.session_state["spouse_claim_age"] = int(spouse_age)
+    st.session_state["selected_recommendation_strategy"] = f"{int(owner_age)}/{int(spouse_age)}"
+    st.session_state["selected_recommendation_source"] = source_label
+    st.session_state["app_page"] = "conversion"
+
+
 def get_app_page() -> str:
     if "app_page" not in st.session_state:
         st.session_state["app_page"] = "home"
@@ -4263,6 +4271,11 @@ def render_shared_household_inputs() -> dict:
 def render_conversion_page() -> None:
     ensure_default_state()
     st.title("Conversion Optimizer")
+    selected_strategy = st.session_state.get("selected_recommendation_strategy")
+    selected_source = st.session_state.get("selected_recommendation_source")
+    if selected_strategy:
+        source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
+        st.info(f"Using Social Security claim ages {selected_strategy}{source_text}. You can adjust them below before running the optimizer.")
     render_top_nav("conversion")
     
     inputs = render_shared_household_inputs()
@@ -4423,6 +4436,15 @@ def render_conversion_page() -> None:
             st.subheader("Recommended Next Steps")
             for item in guidance:
                 st.write(f"- {item}")
+        top_ranked_rows = quick_result.get("ranked_rows", [])
+        if top_ranked_rows:
+            top_strategy = top_ranked_rows[0]
+            st.button(
+                f"Open Conversion Optimizer for {top_strategy['Strategy']}",
+                on_click=launch_conversion_optimizer_from_strategy,
+                args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation"),
+                use_container_width=True,
+            )
 
     st.header("Integrity / Speed")
     integrity_mode = st.checkbox(
