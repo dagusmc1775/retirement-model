@@ -124,7 +124,7 @@ def format_percent(value: float) -> str:
 
 PROFILE_PRESETS = {
     "Balanced": {
-        "weights": {"nw": 0.35, "legacy": 0.15, "trad": 0.20, "stability": 0.15, "risk": 0.15},
+        "weights": {"nw": 0.28, "legacy": 0.16, "trad": 0.24, "stability": 0.20, "risk": 0.12},
         "description": "You are balancing growth, tax efficiency, and long-term stability.",
         "bullets": [
             "avoid extreme strategies in either direction",
@@ -134,7 +134,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may not produce the single highest projected net worth, but it is designed to be more well-rounded.",
     },
     "Growth": {
-        "weights": {"nw": 0.55, "legacy": 0.10, "trad": 0.10, "stability": 0.10, "risk": 0.15},
+        "weights": {"nw": 0.52, "legacy": 0.10, "trad": 0.10, "stability": 0.13, "risk": 0.15},
         "description": "You are prioritizing maximum projected long-term wealth.",
         "bullets": [
             "favor strategies that keep more assets invested",
@@ -144,7 +144,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may increase upside, but it can also increase future tax exposure and market dependence.",
     },
     "Tax-Efficient Stability": {
-        "weights": {"nw": 0.30, "legacy": 0.20, "trad": 0.25, "stability": 0.15, "risk": 0.10},
+        "weights": {"nw": 0.20, "legacy": 0.22, "trad": 0.33, "stability": 0.20, "risk": 0.05},
         "description": "You are prioritizing tax efficiency, lower Traditional IRA burden, and more stable later-life income.",
         "bullets": [
             "favor strategies that improve Roth conversion opportunities",
@@ -154,7 +154,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
     },
     "Legacy Focused": {
-        "weights": {"nw": 0.20, "legacy": 0.30, "trad": 0.30, "stability": 0.10, "risk": 0.10},
+        "weights": {"nw": 0.12, "legacy": 0.33, "trad": 0.38, "stability": 0.12, "risk": 0.05},
         "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
         "bullets": [
             "favor more tax-efficient assets at death",
@@ -164,7 +164,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may reduce maximum projected wealth somewhat, but it can improve after-tax inheritance value.",
     },
     "Spend With Confidence": {
-        "weights": {"nw": 0.20, "legacy": 0.15, "trad": 0.15, "stability": 0.30, "risk": 0.20},
+        "weights": {"nw": 0.15, "legacy": 0.10, "trad": 0.15, "stability": 0.35, "risk": 0.25},
         "description": "You are prioritizing confidence, flexibility, and the ability to enjoy retirement spending safely.",
         "bullets": [
             "place more value on reliable income and stability",
@@ -234,26 +234,42 @@ def build_strategy_metrics(run_result: dict) -> dict:
 
 def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[dict]:
     weights = get_profile_summary(profile_name)["weights"]
+
     nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
     legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
     trad_norm = normalize_series([m["ending_traditional_ira_balance"] for m in metrics_list])
     stability_norm = normalize_series([m["stability_value"] for m in metrics_list])
+    ss_income_norm = normalize_series([m["final_household_ss_income"] for m in metrics_list])
+    survivor_ss_norm = normalize_series([m["survivor_ss_income"] for m in metrics_list])
     risk_norm = normalize_series([m["risk_value"] for m in metrics_list])
+
     scored = []
     for i, metrics in enumerate(metrics_list):
+        nw_adjusted = nw_norm[i] ** 0.7
+        legacy_adjusted = legacy_norm[i]
+        trad_penalty = trad_norm[i] ** 1.5
+        stability_adjusted = 0.50 * (stability_norm[i] ** 1.35) + 0.35 * (ss_income_norm[i] ** 1.35) + 0.15 * (survivor_ss_norm[i] ** 1.20)
+        risk_penalty = risk_norm[i]
+
         score = (
-            weights["nw"] * nw_norm[i]
-            + weights["legacy"] * legacy_norm[i]
-            - weights["trad"] * trad_norm[i]
-            + weights["stability"] * stability_norm[i]
-            - weights["risk"] * risk_norm[i]
+            weights["nw"] * nw_adjusted
+            + weights["legacy"] * legacy_adjusted
+            - weights["trad"] * trad_penalty
+            + weights["stability"] * stability_adjusted
+            - weights["risk"] * risk_penalty
         )
+
         scored.append({
             **metrics,
             "score": float(score),
             "score_100": float(score * 100.0),
-            "stability_label": qualitative_bucket(stability_norm[i]),
-            "risk_label": qualitative_bucket(risk_norm[i], reverse=True),
+            "stability_label": qualitative_bucket(stability_adjusted),
+            "risk_label": qualitative_bucket(risk_penalty, reverse=True),
+            "nw_component": float(nw_adjusted),
+            "legacy_component": float(legacy_adjusted),
+            "trad_component": float(trad_penalty),
+            "stability_component": float(stability_adjusted),
+            "risk_component": float(risk_penalty),
         })
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
