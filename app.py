@@ -225,6 +225,9 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "final_net_worth": float(run_result["final_net_worth"]),
         "after_tax_legacy": float(after_tax_legacy),
         "ending_traditional_ira_balance": float(ending_trad),
+        "ending_roth_balance": float(ending_roth),
+        "ending_brokerage_balance": float(ending_brokerage),
+        "ending_cash_balance": float(ending_cash),
         "stability_value": float(stability_value),
         "risk_value": float(risk_value),
         "final_household_ss_income": float(final_household_ss),
@@ -307,6 +310,58 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
     return " ".join(pieces)
 
 
+def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
+    if len(ranked_rows) < 2:
+        return False
+    top_score = float(ranked_rows[0].get("score", 0.0))
+    second_score = float(ranked_rows[1].get("score", 0.0))
+    denom = max(abs(top_score), 1e-9)
+    return abs(top_score - second_score) / denom <= tolerance_pct
+
+
+def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> list[str]:
+    if not ranked_rows:
+        return []
+    winner = ranked_rows[0]
+    trad = float(winner.get("Ending Traditional IRA Balance", winner.get("ending_traditional_ira_balance", 0.0)))
+    roth = float(winner.get("Roth @ End", winner.get("ending_roth_balance", 0.0)))
+    brokerage = float(winner.get("Brokerage @ End", winner.get("ending_brokerage_balance", 0.0)))
+    cash = float(winner.get("ending_cash_balance", 0.0))
+    total = trad + roth + brokerage + cash
+    guidance = []
+    if total > 0:
+        trad_pct = trad / total
+        roth_pct = roth / total
+        if trad_pct >= 0.40:
+            guidance.append(
+                f"The recommended strategy still leaves about {trad_pct:.0%} of end balances in Traditional IRA. Social Security timing alone is not enough to solve the pre-tax balance problem."
+            )
+            guidance.append(
+                "Next step: run the Conversion Optimizer with this Social Security strategy and test more aggressive Roth conversion settings, especially before RMD years."
+            )
+        if roth_pct < 0.30:
+            guidance.append(
+                f"Roth assets are still only about {roth_pct:.0%} of end balances. Increasing Roth conversion activity could improve tax flexibility and after-tax legacy quality."
+            )
+    if profile_name == "Legacy Focused":
+        guidance.append(
+            "Because you selected Legacy Focused, pay special attention to whether remaining Traditional IRA is still large enough that you may want to direct some or all of it to charity in your estate plan."
+        )
+    elif profile_name == "Tax-Efficient Stability":
+        guidance.append(
+            "Because you selected Tax-Efficient Stability, compare the winner against 70/67 or 70/70 in the full optimizer to confirm you are getting enough conversion runway and guaranteed income later in life."
+        )
+    elif profile_name == "Spend With Confidence":
+        guidance.append(
+            "Because you selected Spend With Confidence, use the winning strategy as a base case for later spending analysis rather than chasing the absolute highest net worth result."
+        )
+    else:
+        guidance.append(
+            "If the recommendation looks reasonable, the best confirmation step is to run the full 81-strategy optimizer and then compare the winner's balance mix, not just net worth."
+        )
+    return guidance
+
+
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     base_inputs = copy.deepcopy(inputs)
     metric_rows = []
@@ -326,6 +381,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
                 "Final Net Worth": float(metrics["final_net_worth"]),
                 "After-Tax Legacy": float(metrics["after_tax_legacy"]),
                 "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+                "Roth @ End": float(metrics["ending_roth_balance"]),
+                "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
                 "Stability Value": float(metrics["stability_value"]),
                 "Risk Value": float(metrics["risk_value"]),
                 "Final Household SS Income": float(metrics["final_household_ss_income"]),
@@ -344,6 +401,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
             "Net Worth": row["Final Net Worth"],
             "After-Tax Legacy": row["After-Tax Legacy"],
             "Trad IRA @ End": row["Ending Traditional IRA Balance"],
+            "Roth @ End": row["Roth @ End"],
+            "Brokerage @ End": row["Brokerage @ End"],
             "Stability": row["stability_label"],
             "Risk": row["risk_label"],
             "Final Household SS Income": row["Final Household SS Income"],
@@ -356,6 +415,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "summary_df": summary_df,
         "ranked_rows": ranked,
         "advisor_text": explanation,
+        "close_result": is_close_quick_result(ranked),
+        "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
     }
 
@@ -4337,11 +4398,17 @@ def render_conversion_page() -> None:
                 "Net Worth": "${:,.0f}",
                 "After-Tax Legacy": "${:,.0f}",
                 "Trad IRA @ End": "${:,.0f}",
+                "Roth @ End": "${:,.0f}",
+                "Brokerage @ End": "${:,.0f}",
                 "Final Household SS Income": "${:,.0f}",
                 "Survivor SS Income": "${:,.0f}",
             }),
             use_container_width=True,
         )
+        if quick_result.get("close_result"):
+            st.info(
+                "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
+            )
         st.download_button(
             "Download Strategy Summary (CSV)",
             data=quick_result["summary_df"].to_csv(index=False),
@@ -4351,6 +4418,11 @@ def render_conversion_page() -> None:
         )
         st.subheader("Advisor Interpretation")
         st.write(quick_result["advisor_text"])
+        guidance = quick_result.get("next_step_guidance", [])
+        if guidance:
+            st.subheader("Recommended Next Steps")
+            for item in guidance:
+                st.write(f"- {item}")
 
     st.header("Integrity / Speed")
     integrity_mode = st.checkbox(
