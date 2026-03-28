@@ -293,26 +293,33 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     base_inputs = copy.deepcopy(inputs)
-    rows = []
+    metric_rows = []
+    errors = []
     for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
-        scenario_inputs = copy.deepcopy(base_inputs)
-        scenario_inputs["owner_claim_age"] = int(owner_age)
-        scenario_inputs["spouse_claim_age"] = int(spouse_age)
-        run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
-        metrics = build_strategy_metrics(run_result)
-        rows.append({
-            "Strategy": f"{owner_age}/{spouse_age}",
-            "Owner SS Age": int(owner_age),
-            "Spouse SS Age": int(spouse_age),
-            "Final Net Worth": float(metrics["final_net_worth"]),
-            "After-Tax Legacy": float(metrics["after_tax_legacy"]),
-            "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
-            "Stability Value": float(metrics["stability_value"]),
-            "Risk Value": float(metrics["risk_value"]),
-            "Final Household SS Income": float(metrics["final_household_ss_income"]),
-            "Survivor SS Income": float(metrics["survivor_ss_income"]),
-        })
-    ranked = score_strategy_metrics(rows, profile_name)
+        try:
+            scenario_inputs = copy.deepcopy(base_inputs)
+            scenario_inputs["owner_claim_age"] = int(owner_age)
+            scenario_inputs["spouse_claim_age"] = int(spouse_age)
+            run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+            metrics = build_strategy_metrics(run_result)
+            metric_rows.append({
+                **metrics,
+                "Strategy": f"{owner_age}/{spouse_age}",
+                "Owner SS Age": int(owner_age),
+                "Spouse SS Age": int(spouse_age),
+                "Final Net Worth": float(metrics["final_net_worth"]),
+                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+                "Stability Value": float(metrics["stability_value"]),
+                "Risk Value": float(metrics["risk_value"]),
+                "Final Household SS Income": float(metrics["final_household_ss_income"]),
+                "Survivor SS Income": float(metrics["survivor_ss_income"]),
+            })
+        except Exception as exc:
+            errors.append(f"{owner_age}/{spouse_age}: {exc}")
+    if not metric_rows:
+        raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
+    ranked = score_strategy_metrics(metric_rows, profile_name)
     summary_rows = []
     for row in ranked:
         summary_rows.append({
@@ -333,6 +340,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "summary_df": summary_df,
         "ranked_rows": ranked,
         "advisor_text": explanation,
+        "errors": errors,
     }
 
 
@@ -4219,7 +4227,7 @@ def render_conversion_page() -> None:
     tg1, tg2 = st.columns(2)
     with tg1:
         target_trad_balance_enabled = st.checkbox(
-            "Use Target Trad Balance Goal",
+            "Use Target Traditional IRA Balance Goal",
             value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
             help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
             key="target_trad_balance_enabled",
@@ -4237,7 +4245,7 @@ def render_conversion_page() -> None:
     ov1, ov2 = st.columns(2)
     with ov1:
         target_trad_override_enabled = st.checkbox(
-            "Allow Target Trad Planner Override",
+            "Allow Target Traditional IRA Planner Override",
             value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
             help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
             key="target_trad_override_enabled",
