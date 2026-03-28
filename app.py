@@ -80,7 +80,8 @@ DEFAULT_APP_STATE = {
     "spouse_claim_age": 62,
     "spouse_current_age": 0,
     "spouse_ss_base": 0.0,
-    "state_tax_rate": 0.0,
+    "state_tax_rate": 0.0399,
+    "planning_profile": "Balanced",
     "step_size": 1000.0,
     "integrity_mode": False,
     "strict_repeatability_check": False,
@@ -119,6 +120,220 @@ def format_percent(value: float) -> str:
         return f"{float(value):.2%}"
     except Exception:
         return str(value)
+
+
+PROFILE_PRESETS = {
+    "Balanced": {
+        "weights": {"nw": 0.35, "legacy": 0.15, "trad": 0.20, "stability": 0.15, "risk": 0.15},
+        "description": "You are balancing growth, tax efficiency, and long-term stability.",
+        "bullets": [
+            "avoid extreme strategies in either direction",
+            "give moderate credit to tax efficiency and stability",
+            "look for outcomes that reduce regret across multiple priorities",
+        ],
+        "tradeoff": "This approach may not produce the single highest projected net worth, but it is designed to be more well-rounded.",
+    },
+    "Growth": {
+        "weights": {"nw": 0.55, "legacy": 0.10, "trad": 0.10, "stability": 0.10, "risk": 0.15},
+        "description": "You are prioritizing maximum projected long-term wealth.",
+        "bullets": [
+            "favor strategies that keep more assets invested",
+            "place less emphasis on shrinking Traditional IRA balances",
+            "accept more reliance on market returns later in life",
+        ],
+        "tradeoff": "This approach may increase upside, but it can also increase future tax exposure and market dependence.",
+    },
+    "Tax-Efficient Stability": {
+        "weights": {"nw": 0.30, "legacy": 0.20, "trad": 0.25, "stability": 0.15, "risk": 0.10},
+        "description": "You are prioritizing tax efficiency, lower Traditional IRA burden, and more stable later-life income.",
+        "bullets": [
+            "favor strategies that improve Roth conversion opportunities",
+            "penalize large Traditional IRA balances at death",
+            "give more credit to delayed Social Security and stronger guaranteed income",
+        ],
+        "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
+    },
+    "Legacy Focused": {
+        "weights": {"nw": 0.20, "legacy": 0.30, "trad": 0.30, "stability": 0.10, "risk": 0.10},
+        "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
+        "bullets": [
+            "favor more tax-efficient assets at death",
+            "penalize large remaining Traditional IRA balances",
+            "accept some reduction in projected net worth if legacy quality improves",
+        ],
+        "tradeoff": "This approach may reduce maximum projected wealth somewhat, but it can improve after-tax inheritance value.",
+    },
+    "Spend With Confidence": {
+        "weights": {"nw": 0.20, "legacy": 0.15, "trad": 0.15, "stability": 0.30, "risk": 0.20},
+        "description": "You are prioritizing confidence, flexibility, and the ability to enjoy retirement spending safely.",
+        "bullets": [
+            "place more value on reliable income and stability",
+            "reduce emphasis on maximizing wealth at death",
+            "favor strategies that support spending without excessive fear of future shortfall",
+        ],
+        "tradeoff": "This approach may leave less money at death than a growth-focused strategy, but it is designed to support a more confident retirement lifestyle.",
+    },
+}
+
+QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
+
+
+def normalize_series(values):
+    vals = [float(v) for v in values]
+    vmin = min(vals)
+    vmax = max(vals)
+    if abs(vmax - vmin) < 1e-9:
+        return [0.5 for _ in vals]
+    return [(v - vmin) / (vmax - vmin) for v in vals]
+
+
+def qualitative_bucket(norm_value: float, reverse: bool = False) -> str:
+    v = float(norm_value)
+    if reverse:
+        if v <= 0.33:
+            return "Low"
+        if v <= 0.66:
+            return "Medium"
+        return "High"
+    if v >= 0.67:
+        return "High"
+    if v >= 0.34:
+        return "Medium"
+    return "Low"
+
+
+def get_profile_summary(profile_name: str) -> dict:
+    return PROFILE_PRESETS.get(profile_name, PROFILE_PRESETS["Balanced"])
+
+
+def build_strategy_metrics(run_result: dict) -> dict:
+    df = run_result["df"]
+    last = df.iloc[-1]
+    ending_trad = float(run_result.get("ending_trad_balance", last.get("EOY Trad", 0.0)))
+    ending_roth = float(last.get("EOY Roth", 0.0))
+    ending_brokerage = float(last.get("EOY Brokerage", 0.0))
+    ending_cash = float(last.get("EOY Cash", 0.0))
+    ending_owner_ss = float(last.get("Owner SS", 0.0))
+    ending_spouse_ss = float(last.get("Spouse SS", 0.0))
+    final_household_ss = float(last.get("Total SS", ending_owner_ss + ending_spouse_ss))
+    survivor_ss = max(ending_owner_ss, ending_spouse_ss)
+    min_liquid_assets = float((df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).min())
+    after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + 0.65 * ending_trad
+    stability_value = final_household_ss + 0.5 * survivor_ss
+    risk_value = -min_liquid_assets
+    return {
+        "final_net_worth": float(run_result["final_net_worth"]),
+        "after_tax_legacy": float(after_tax_legacy),
+        "ending_traditional_ira_balance": float(ending_trad),
+        "stability_value": float(stability_value),
+        "risk_value": float(risk_value),
+        "final_household_ss_income": float(final_household_ss),
+        "survivor_ss_income": float(survivor_ss),
+    }
+
+
+def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[dict]:
+    weights = get_profile_summary(profile_name)["weights"]
+    nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
+    legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
+    trad_norm = normalize_series([m["ending_traditional_ira_balance"] for m in metrics_list])
+    stability_norm = normalize_series([m["stability_value"] for m in metrics_list])
+    risk_norm = normalize_series([m["risk_value"] for m in metrics_list])
+    scored = []
+    for i, metrics in enumerate(metrics_list):
+        score = (
+            weights["nw"] * nw_norm[i]
+            + weights["legacy"] * legacy_norm[i]
+            - weights["trad"] * trad_norm[i]
+            + weights["stability"] * stability_norm[i]
+            - weights["risk"] * risk_norm[i]
+        )
+        scored.append({
+            **metrics,
+            "score": float(score),
+            "score_100": float(score * 100.0),
+            "stability_label": qualitative_bucket(stability_norm[i]),
+            "risk_label": qualitative_bucket(risk_norm[i], reverse=True),
+        })
+    return sorted(scored, key=lambda x: x["score"], reverse=True)
+
+
+def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
+    if not ranked_rows:
+        return "No recommendation is available yet."
+    winner = ranked_rows[0]
+    baseline = next((r for r in ranked_rows if r["Strategy"] == "62/62"), ranked_rows[0])
+    nw_delta = float(baseline["Final Net Worth"] - winner["Final Net Worth"])
+    trad_delta = float(baseline["Ending Traditional IRA Balance"] - winner["Ending Traditional IRA Balance"])
+    legacy_delta = float(winner["After-Tax Legacy"] - baseline["After-Tax Legacy"])
+    pieces = [
+        f"Based on your selected priorities ({profile_name}), the model recommends {winner['Strategy']} as the best overall quick strategy.",
+    ]
+    if winner["Strategy"] != baseline["Strategy"]:
+        pieces.append(
+            f"Compared with 62/62, the recommended strategy lowers ending Traditional IRA by {format_dollars(trad_delta)} and changes after-tax legacy value by {format_dollars(legacy_delta)}."
+        )
+        if nw_delta > 0:
+            pieces.append(
+                f"It gives up about {format_dollars(nw_delta)} of projected final net worth in exchange for a cleaner asset mix, better late-life income support, or both."
+            )
+        else:
+            pieces.append(
+                f"It also matches or improves projected final net worth versus 62/62 while better aligning with your stated planning priorities."
+            )
+    else:
+        pieces.append(
+            "In this quick comparison, the same strategy that wins on net worth also best fits your selected planning profile."
+        )
+    pieces.append(
+        "Use this as a fast recommendation layer. Then, if needed, confirm it with the full 81-strategy optimizer."
+    )
+    return " ".join(pieces)
+
+
+def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
+    base_inputs = copy.deepcopy(inputs)
+    rows = []
+    for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
+        scenario_inputs = copy.deepcopy(base_inputs)
+        scenario_inputs["owner_claim_age"] = int(owner_age)
+        scenario_inputs["spouse_claim_age"] = int(spouse_age)
+        run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+        metrics = build_strategy_metrics(run_result)
+        rows.append({
+            "Strategy": f"{owner_age}/{spouse_age}",
+            "Owner SS Age": int(owner_age),
+            "Spouse SS Age": int(spouse_age),
+            "Final Net Worth": float(metrics["final_net_worth"]),
+            "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+            "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+            "Stability Value": float(metrics["stability_value"]),
+            "Risk Value": float(metrics["risk_value"]),
+            "Final Household SS Income": float(metrics["final_household_ss_income"]),
+            "Survivor SS Income": float(metrics["survivor_ss_income"]),
+        })
+    ranked = score_strategy_metrics(rows, profile_name)
+    summary_rows = []
+    for row in ranked:
+        summary_rows.append({
+            "Strategy": row["Strategy"],
+            "Score": row["score_100"],
+            "Net Worth": row["Final Net Worth"],
+            "After-Tax Legacy": row["After-Tax Legacy"],
+            "Trad IRA @ End": row["Ending Traditional IRA Balance"],
+            "Stability": row["stability_label"],
+            "Risk": row["risk_label"],
+            "Final Household SS Income": row["Final Household SS Income"],
+            "Survivor SS Income": row["Survivor SS Income"],
+        })
+    summary_df = pd.DataFrame(summary_rows)
+    explanation = generate_advisor_interpretation(profile_name, ranked)
+    return {
+        "profile_name": profile_name,
+        "summary_df": summary_df,
+        "ranked_rows": ranked,
+        "advisor_text": explanation,
+    }
 
 
 def get_ss_optimizer_combo_count() -> int:
@@ -4058,6 +4273,60 @@ def render_conversion_page() -> None:
             help="Used once the household reaches the first RMD year.",
             key="rmd_era_target_bracket",
         )
+
+    st.header("Recommendation Engine v1")
+    planning_profile = st.selectbox(
+        "Optimize For",
+        list(PROFILE_PRESETS.keys()),
+        index=list(PROFILE_PRESETS.keys()).index(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))),
+        help="Choose the planning lens the recommendation engine should use when ranking quick Social Security strategies.",
+        key="planning_profile",
+    )
+    profile_summary = get_profile_summary(planning_profile)
+    st.info(
+        f"{profile_summary['description']}\n\n"
+        f"This means the model will: \n- {profile_summary['bullets'][0]}\n- {profile_summary['bullets'][1]}\n- {profile_summary['bullets'][2]}\n\n"
+        f"Tradeoff to expect: {profile_summary['tradeoff']}"
+    )
+
+    rec_col1, rec_col2 = st.columns([1, 2])
+    with rec_col1:
+        if st.button("Run Quick Strategy Recommendation", use_container_width=True):
+            recommendation_result = run_quick_strategy_recommendation(
+                inputs=inputs,
+                max_conversion=max_conversion,
+                step_size=step_size,
+                profile_name=planning_profile,
+            )
+            st.session_state["quick_strategy_recommendation_result"] = recommendation_result
+            mark_result_state("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+    with rec_col2:
+        st.caption("Quick Strategy Mode compares: 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation before running the full 81-strategy optimizer.")
+
+    quick_result = st.session_state.get("quick_strategy_recommendation_result")
+    if quick_result is not None:
+        render_stale_warning("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile}, "Quick recommendation results")
+        st.subheader("Strategy Summary")
+        st.dataframe(
+            quick_result["summary_df"].style.format({
+                "Score": "{:.1f}",
+                "Net Worth": "${:,.0f}",
+                "After-Tax Legacy": "${:,.0f}",
+                "Trad IRA @ End": "${:,.0f}",
+                "Final Household SS Income": "${:,.0f}",
+                "Survivor SS Income": "${:,.0f}",
+            }),
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download Strategy Summary (CSV)",
+            data=quick_result["summary_df"].to_csv(index=False),
+            file_name="quick_strategy_summary.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        st.subheader("Advisor Interpretation")
+        st.write(quick_result["advisor_text"])
 
     st.header("Integrity / Speed")
     integrity_mode = st.checkbox(
