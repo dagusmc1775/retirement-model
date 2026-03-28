@@ -4727,8 +4727,12 @@ def render_conversion_page() -> None:
                 st.caption("Chosen Conversion ($) is the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
                 if path_display_df is not None and not path_display_df.empty:
                     fmt = {}
+                    non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
                     for col in path_display_df.columns:
-                        if col in {"Year", "Target Bracket / Constraint"}:
+                        if col in non_currency_cols:
+                            continue
+                        series = path_display_df[col]
+                        if not pd.api.types.is_numeric_dtype(series):
                             continue
                         if "Rate" in col:
                             fmt[col] = "{:.2%}"
