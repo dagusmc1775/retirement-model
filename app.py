@@ -286,26 +286,26 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
     trad_delta = float(baseline["Ending Traditional IRA Balance"] - winner["Ending Traditional IRA Balance"])
     legacy_delta = float(winner["After-Tax Legacy"] - baseline["After-Tax Legacy"])
     pieces = [
-        f"Based on your selected priorities ({profile_name}), the model recommends {winner['Strategy']} as the best overall quick strategy.",
+        f"Based on your selected priorities ({profile_name}), the model recommends {winner['Strategy']} as the strongest overall quick strategy.",
     ]
     if winner["Strategy"] != baseline["Strategy"]:
         pieces.append(
-            f"Compared with 62/62, the recommended strategy lowers ending Traditional IRA by {format_dollars(trad_delta)} and changes after-tax legacy value by {format_dollars(legacy_delta)}."
+            f"Compared with 62/62, the recommended strategy changes ending Traditional IRA by {format_dollars(trad_delta)} and changes after-tax legacy value by {format_dollars(legacy_delta)}."
         )
         if nw_delta > 0:
             pieces.append(
-                f"It gives up about {format_dollars(nw_delta)} of projected final net worth in exchange for a cleaner asset mix, better late-life income support, or both."
+                f"It also changes projected final net worth by {format_dollars(-nw_delta)} versus 62/62. This is not a strictly better outcome. It is a tradeoff between maximizing total wealth and improving tax efficiency, guaranteed income later in life, or both."
             )
         else:
             pieces.append(
-                f"It also matches or improves projected final net worth versus 62/62 while better aligning with your stated planning priorities."
+                "It also matches or improves projected final net worth versus 62/62 while better aligning with your stated planning priorities."
             )
     else:
         pieces.append(
             "In this quick comparison, the same strategy that wins on net worth also best fits your selected planning profile."
         )
     pieces.append(
-        "Use this as a fast recommendation layer. Then, if needed, confirm it with the full 81-strategy optimizer."
+        "Use this as a fast recommendation layer. If you want a tighter check, test a few nearby claim-age combinations around the winner before deciding whether a full 81-strategy run is worth it."
     )
     return " ".join(pieces)
 
@@ -334,30 +334,37 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
         roth_pct = roth / total
         if trad_pct >= 0.40:
             guidance.append(
-                f"The recommended strategy still leaves about {trad_pct:.0%} of end balances in Traditional IRA. Social Security timing alone is not enough to solve the pre-tax balance problem."
+                f"About {trad_pct:.0%} of ending balances still sit in Traditional IRA. That means Social Security timing alone is not materially reducing the tax-deferred balance."
             )
             guidance.append(
-                "Next step: run the Conversion Optimizer with this Social Security strategy and test more aggressive Roth conversion settings, especially before RMD years."
+                "Recommended next lever: run the Conversion Optimizer with this Social Security strategy and test stronger Roth conversion settings, especially before RMD years."
             )
         if roth_pct < 0.30:
             guidance.append(
-                f"Roth assets are still only about {roth_pct:.0%} of end balances. Increasing Roth conversion activity could improve tax flexibility and after-tax legacy quality."
+                f"Roth assets are still only about {roth_pct:.0%} of ending balances. More Roth conversion activity could improve tax flexibility and after-tax legacy quality."
             )
     if profile_name == "Legacy Focused":
         guidance.append(
-            "Because you selected Legacy Focused, pay special attention to whether remaining Traditional IRA is still large enough that you may want to direct some or all of it to charity in your estate plan."
+            "For Legacy Focused results, use this recommendation as a Social Security starting point, then test whether more aggressive conversions can shrink Traditional IRA enough to make the remaining balance small or intentionally charitable."
+        )
+        guidance.append(
+            "If you want to refine this further, check a small nearby set such as 70/70, 70/69, 70/68, 69/70, and 69/69 before deciding whether a full 81-strategy run adds enough value."
         )
     elif profile_name == "Tax-Efficient Stability":
         guidance.append(
-            "Because you selected Tax-Efficient Stability, compare the winner against 70/67 or 70/70 in the full optimizer to confirm you are getting enough conversion runway and guaranteed income later in life."
+            "For Tax-Efficient Stability, compare the winner against a few nearby delayed-claim options such as 70/69, 70/68, or 69/70 to confirm you are getting enough conversion runway and guaranteed income later in life."
         )
     elif profile_name == "Spend With Confidence":
         guidance.append(
-            "Because you selected Spend With Confidence, use the winning strategy as a base case for later spending analysis rather than chasing the absolute highest net worth result."
+            "For Spend With Confidence, use the winner as a base case for future spending analysis rather than chasing the absolute highest net worth result."
+        )
+    elif profile_name == "Balanced":
+        guidance.append(
+            "Because this profile often produces close calls, compare a small nearby cluster around the winner instead of jumping straight to all 81 combinations."
         )
     else:
         guidance.append(
-            "If the recommendation looks reasonable, the best confirmation step is to run the full 81-strategy optimizer and then compare the winner's balance mix, not just net worth."
+            "If the recommendation looks reasonable, the best confirmation step is to test a few nearby claim-age combinations around the winner and compare balance composition, not just net worth."
         )
     return guidance
 
@@ -4399,7 +4406,7 @@ def render_conversion_page() -> None:
             st.session_state["quick_strategy_recommendation_result"] = recommendation_result
             mark_result_state("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
     with rec_col2:
-        st.caption("Quick Strategy Mode compares: 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation before running the full 81-strategy optimizer.")
+        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then refine around the winner with a small nearby set if needed.")
 
     quick_result = st.session_state.get("quick_strategy_recommendation_result")
     if quick_result is not None:
