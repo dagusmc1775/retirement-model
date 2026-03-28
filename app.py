@@ -122,6 +122,42 @@ def format_percent(value: float) -> str:
         return str(value)
 
 
+def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+
+    preferred_cols = [
+        "Year",
+        "Chosen Conversion",
+        "Target Bracket",
+        "Current Marginal Tax Rate",
+        "SOY Trad",
+        "EOY Trad",
+        "SOY Roth",
+        "EOY Roth",
+        "MAGI",
+        "Taxable Income",
+        "Federal Tax",
+        "State Tax",
+        "ACA Cost",
+        "IRMAA Cost",
+        "Net Worth",
+    ]
+    cols = [c for c in preferred_cols if c in df.columns]
+    out = df[cols].copy()
+    rename_map = {
+        "Chosen Conversion": "Chosen Conversion ($)",
+        "Target Bracket": "Target Bracket / Constraint",
+        "Current Marginal Tax Rate": "Current Marginal Rate",
+        "SOY Trad": "Starting Traditional IRA",
+        "EOY Trad": "Ending Traditional IRA",
+        "SOY Roth": "Starting Roth",
+        "EOY Roth": "Ending Roth",
+    }
+    out = out.rename(columns=rename_map)
+    return out
+
+
 PROFILE_PRESETS = {
     "Balanced": {
         "weights": {"nw": 0.28, "legacy": 0.16, "trad": 0.24, "stability": 0.20, "risk": 0.12},
@@ -4667,7 +4703,20 @@ def render_conversion_page() -> None:
                 result = st.session_state["break_even_last_result"]
                 render_summary("Break-Even Governor Summary", result)
                 st.subheader("Chosen Year-by-Year Path")
-                st.dataframe(result["df"], use_container_width=True)
+                path_display_df = build_chosen_path_display_df(result["df"])
+                st.caption("The Chosen Conversion column below is the actual conversion amount in dollars for each year. The Target Bracket / Constraint column shows the policy limit or binding rule the governor was working under.")
+                if path_display_df is not None and not path_display_df.empty:
+                    fmt = {}
+                    for col in path_display_df.columns:
+                        if col in {"Year", "Target Bracket / Constraint"}:
+                            continue
+                        if "Rate" in col:
+                            fmt[col] = "{:.2%}"
+                        else:
+                            fmt[col] = "${:,.0f}"
+                    st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+                else:
+                    st.dataframe(result["df"], use_container_width=True)
                 st.subheader("Per-Step Break-Even Testing")
                 st.dataframe(result["decision_df"], use_container_width=True)
 
