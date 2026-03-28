@@ -126,9 +126,28 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
+    working = df.copy()
+
+    # Always surface actual conversion dollars. In some yearly frames the true
+    # conversion amount is also preserved in Conversion Income Component.
+    if "Chosen Conversion" not in working.columns and "Conversion Income Component" in working.columns:
+        working["Chosen Conversion"] = working["Conversion Income Component"]
+    elif "Conversion Income Component" in working.columns:
+        working["Chosen Conversion"] = working["Chosen Conversion"].fillna(working["Conversion Income Component"])
+
+    # Make the active limiter explicit instead of overloading the target bracket column.
+    if "Binding Constraint" not in working.columns:
+        def _binding_constraint(row: pd.Series) -> str:
+            target = str(row.get("Target Bracket", "") or "")
+            if target == "ACA":
+                return "ACA"
+            return target if target else ""
+        working["Binding Constraint"] = working.apply(_binding_constraint, axis=1)
+
     preferred_cols = [
         "Year",
         "Chosen Conversion",
+        "Binding Constraint",
         "Target Bracket",
         "Current Marginal Tax Rate",
         "SOY Trad",
@@ -143,12 +162,13 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
         "IRMAA Cost",
         "Net Worth",
     ]
-    cols = [c for c in preferred_cols if c in df.columns]
-    out = df[cols].copy()
+    cols = [c for c in preferred_cols if c in working.columns]
+    out = working[cols].copy()
     rename_map = {
         "Chosen Conversion": "Chosen Conversion ($)",
-        "Target Bracket": "Target Bracket / Constraint",
-        "Current Marginal Tax Rate": "Current Marginal Rate",
+        "Binding Constraint": "Binding Constraint",
+        "Target Bracket": "Target Bracket (%)",
+        "Current Marginal Tax Rate": "Current Marginal Rate (%)",
         "SOY Trad": "Starting Traditional IRA",
         "EOY Trad": "Ending Traditional IRA",
         "SOY Roth": "Starting Roth",
@@ -4704,7 +4724,7 @@ def render_conversion_page() -> None:
                 render_summary("Break-Even Governor Summary", result)
                 st.subheader("Chosen Year-by-Year Path")
                 path_display_df = build_chosen_path_display_df(result["df"])
-                st.caption("The Chosen Conversion column below is the actual conversion amount in dollars for each year. The Target Bracket / Constraint column shows the policy limit or binding rule the governor was working under.")
+                st.caption("Chosen Conversion ($) is the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
                 if path_display_df is not None and not path_display_df.empty:
                     fmt = {}
                     for col in path_display_df.columns:
