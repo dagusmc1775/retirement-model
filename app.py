@@ -206,6 +206,69 @@ def get_profile_summary(profile_name: str) -> dict:
     return PROFILE_PRESETS.get(profile_name, PROFILE_PRESETS["Balanced"])
 
 
+def get_break_even_governor_presets(profile_name: str, current_trad_balance: float) -> dict:
+    current_trad_balance = float(current_trad_balance or 0.0)
+    seeded_target = current_trad_balance * 0.25 if current_trad_balance > 0 else 0.0
+    presets = {
+        "Growth": {
+            "target_trad_balance_enabled": False,
+            "target_trad_override_enabled": False,
+            "target_trad_override_max_rate": 0.0,
+            "post_aca_target_bracket": "22%",
+            "rmd_era_target_bracket": "22%",
+            "preset_note": "Growth preset: lighter conversion pressure, more emphasis on keeping assets invested.",
+        },
+        "Balanced": {
+            "target_trad_balance_enabled": False,
+            "target_trad_override_enabled": False,
+            "target_trad_override_max_rate": 0.0,
+            "post_aca_target_bracket": "22%",
+            "rmd_era_target_bracket": "22%",
+            "preset_note": "Balanced preset: neutral conversion posture with moderate bracket targets.",
+        },
+        "Tax-Efficient Stability": {
+            "target_trad_balance_enabled": True,
+            "target_trad_balance": seeded_target,
+            "target_trad_override_enabled": True,
+            "target_trad_override_max_rate": 0.35,
+            "post_aca_target_bracket": "24%",
+            "rmd_era_target_bracket": "24%",
+            "preset_note": "Tax-Efficient Stability preset: stronger Roth conversion push and more willingness to use conversion runway.",
+        },
+        "Legacy Focused": {
+            "target_trad_balance_enabled": True,
+            "target_trad_balance": seeded_target,
+            "target_trad_override_enabled": True,
+            "target_trad_override_max_rate": 0.40,
+            "post_aca_target_bracket": "24%",
+            "rmd_era_target_bracket": "24%",
+            "preset_note": "Legacy Focused preset: stronger pressure to reduce Traditional IRA and improve after-tax inheritance structure.",
+        },
+        "Spend With Confidence": {
+            "target_trad_balance_enabled": True,
+            "target_trad_balance": seeded_target,
+            "target_trad_override_enabled": True,
+            "target_trad_override_max_rate": 0.30,
+            "post_aca_target_bracket": "22%",
+            "rmd_era_target_bracket": "22%",
+            "preset_note": "Spend With Confidence preset: emphasizes steadier income support while keeping conversion settings moderate.",
+        },
+    }
+    return presets.get(profile_name, presets["Balanced"])
+
+
+def apply_break_even_governor_profile_presets(profile_name: str, current_trad_balance: float, force: bool = False) -> None:
+    preset = get_break_even_governor_presets(profile_name, current_trad_balance)
+    for key, value in preset.items():
+        if key == "preset_note":
+            continue
+        if force or key not in st.session_state:
+            st.session_state[key] = value
+    st.session_state["selected_recommendation_profile"] = profile_name
+    st.session_state["break_even_governor_preset_note"] = preset.get("preset_note", "")
+    st.session_state["break_even_governor_presets_applied"] = True
+
+
 def build_strategy_metrics(run_result: dict) -> dict:
     df = run_result["df"]
     last = df.iloc[-1]
@@ -337,7 +400,7 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
                 f"About {trad_pct:.0%} of ending balances still sit in Traditional IRA. That means Social Security timing alone is not materially reducing the tax-deferred balance."
             )
             guidance.append(
-                "Recommended next lever: run the Conversion Optimizer with this Social Security strategy and test stronger Roth conversion settings, especially before RMD years."
+                "Recommended next lever: open the Break-Even Governor with this Social Security strategy and test stronger Roth conversion settings, especially before RMD years."
             )
         if roth_pct < 0.30:
             guidance.append(
@@ -4087,11 +4150,14 @@ def go_to_page(page_name: str) -> None:
     st.session_state["app_page"] = page_name
 
 
-def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, source_label: str = "quick_recommendation") -> None:
+def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, source_label: str = "quick_recommendation", profile_name: str | None = None) -> None:
     st.session_state["owner_claim_age"] = int(owner_age)
     st.session_state["spouse_claim_age"] = int(spouse_age)
     st.session_state["selected_recommendation_strategy"] = f"{int(owner_age)}/{int(spouse_age)}"
     st.session_state["selected_recommendation_source"] = source_label
+    if profile_name:
+        st.session_state["planning_profile"] = profile_name
+        apply_break_even_governor_profile_presets(profile_name, st.session_state.get("trad", 0.0), force=True)
     st.session_state["app_page"] = "conversion"
 
 
@@ -4280,9 +4346,14 @@ def render_conversion_page() -> None:
     st.title("Conversion Optimizer")
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
+    selected_profile = st.session_state.get("selected_recommendation_profile")
+    preset_note = st.session_state.get("break_even_governor_preset_note")
     if selected_strategy:
         source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
-        st.info(f"Using Social Security claim ages {selected_strategy}{source_text}. You can adjust them below before running the optimizer.")
+        profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
+        st.info(f"Using Social Security claim ages {selected_strategy}{source_text}{profile_text}. You can adjust them below before running the Break-Even Governor.")
+    if preset_note:
+        st.caption(preset_note)
     render_top_nav("conversion")
     
     inputs = render_shared_household_inputs()
@@ -4406,7 +4477,7 @@ def render_conversion_page() -> None:
             st.session_state["quick_strategy_recommendation_result"] = recommendation_result
             mark_result_state("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
     with rec_col2:
-        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then refine around the winner with a small nearby set if needed.")
+        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
 
     quick_result = st.session_state.get("quick_strategy_recommendation_result")
     if quick_result is not None:
@@ -4447,9 +4518,9 @@ def render_conversion_page() -> None:
         if top_ranked_rows:
             top_strategy = top_ranked_rows[0]
             st.button(
-                f"Open Conversion Optimizer for {top_strategy['Strategy']}",
+                f"Open Break-Even Governor for {top_strategy['Strategy']}",
                 on_click=launch_conversion_optimizer_from_strategy,
-                args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation"),
+                args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
                 use_container_width=True,
             )
 
