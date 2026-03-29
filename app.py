@@ -1,3 +1,4 @@
+# version: hard-target-depletion-v22
 # version: override-valuation-columns
 # version: target-trad-override-v3-relaxed-cap
 # version: target-trad-override-handoff-fix
@@ -2536,7 +2537,7 @@ def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate:
 
 
 def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
-    current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0, projection_cache=projection_cache)
+    current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
     next_path = run_projection_from_state(year, state, params, first_year_conversion=next_conversion, later_year_conversion=0.0)
 
     current_row = current_path["df"].iloc[0]
@@ -3080,33 +3081,62 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             break
         step_index += 1
 
-    # Optional planning overlay: if the Trad target goal implies a higher pre-RMD conversion,
-    # allow a larger conversion under either pure BETR guardrails or planner override cap.
+    # Hard target-depletion overlay: if the plan is still projected to miss the target
+    # by household RMD start, target mode becomes authoritative in pre-RMD non-ACA years.
+    # In that case, the governor should not be allowed to sit at tiny conversions or zero.
     selection_mode = "BETR"
-    if float(target_pressure_conversion) > float(selected_conversion) + 1e-9:
-        chosen_override_conversion = None
-        if float(highest_guardrail_conversion) >= float(target_pressure_conversion) - 1e-9:
-            chosen_override_conversion = float(target_pressure_conversion)
-            selection_mode = "TRAD_TARGET_PRESSURE"
-        elif bool(params.get("target_trad_override_enabled", False)) and float(highest_override_conversion) > float(selected_conversion) + 1e-9:
-            chosen_override_conversion = float(min(target_pressure_conversion, highest_override_conversion))
-            selection_mode = "TRAD_TARGET_OVERRIDE"
+    actual_required_conversion = float(target_pressure_conversion)
+    hard_target_floor = 0.0
+    if target_lane_active and float(target_gap_at_rmd_start) > 1e-9:
+        hard_target_floor = float(target_pressure_conversion)
 
-        if chosen_override_conversion is not None and float(chosen_override_conversion) > float(selected_conversion) + 1e-9:
-            selected_conversion = float(chosen_override_conversion)
-            selected_row = dict(run_projection_summary_from_state(year, state, params, first_year_conversion=selected_conversion, later_year_conversion=0.0, projection_cache=projection_cache)["first_row"])
+        # When behind target, use the full bracket runway first. This is the exact behavior
+        # the user expects in years like 2036-2040: post-ACA, pre-RMD, MFJ, wide 24% bracket.
+        if float(highest_bracket_fill_conversion) > hard_target_floor + 1e-9:
+            hard_target_floor = float(highest_bracket_fill_conversion)
+            selection_mode = "HARD_TARGET_BRACKET_FILL"
+        else:
+            selection_mode = "TRAD_TARGET_PRESSURE"
+
+        # If the planner override cap allows even more than the bracket-fill winner, take it.
+        if bool(params.get("target_trad_override_enabled", False)) and float(highest_override_conversion) > hard_target_floor + 1e-9:
+            hard_target_floor = float(highest_override_conversion)
+            selection_mode = "HARD_TARGET_OVERRIDE"
+
+        if float(hard_target_floor) > float(selected_conversion) + 1e-9:
+            selected_conversion = float(hard_target_floor)
+            selected_row = dict(run_projection_summary_from_state(
+                year,
+                state,
+                params,
+                first_year_conversion=selected_conversion,
+                later_year_conversion=0.0,
+                projection_cache=projection_cache,
+            )["first_row"])
+
+    actual_required_conversion = float(hard_target_floor if hard_target_floor > 0 else target_pressure_conversion)
+    target_status = "OFF"
+    if target_lane_active:
+        if float(target_gap_at_rmd_start) <= 1e-9:
+            target_status = "ON TRACK"
+        elif float(selected_conversion) + 1e-9 >= float(actual_required_conversion):
+            target_status = "ON TRACK"
+        else:
+            target_status = "BEHIND"
 
     diag_df = pd.DataFrame(tested_rows)
     if not diag_df.empty:
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
         diag_df["Target Trad Pressure Conversion"] = float(target_pressure_conversion)
+        diag_df["Required Annual Conversion To Target"] = float(actual_required_conversion)
         diag_df["Target Trad Highest Bracket Fill Conversion"] = float(highest_bracket_fill_conversion)
         diag_df["Target Trad Highest Override Conversion"] = float(highest_override_conversion)
         diag_df["Projected Trad At RMD Start (No Extra Conv)"] = float(projected_trad_at_rmd_start)
         diag_df["Target Trad Gap At RMD Start"] = float(target_gap_at_rmd_start)
+        diag_df["Target Path Status"] = target_status
         diag_df["Selection Mode Detail"] = selection_mode
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, a stricter post-RMD hurdle, and a stronger target-Traditional-IRA bracket-fill lane before RMD start."
+        diag_df["Bracket Solver Note"] = "Non-ACA years use BETR diagnostics, but when the target Traditional IRA path is behind schedule before RMD start, the target lane becomes authoritative: fill the bracket runway first, then use the planner override cap if available."
     return round(selected_conversion, 2), selected_row, diag_df
 
 
