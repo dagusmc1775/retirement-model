@@ -27,6 +27,7 @@ ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
+APP_VERSION = "v23-governor-unified"
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -611,6 +612,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
+        "data_source": "break_even_governor",
     }
 
 
@@ -694,6 +696,28 @@ def inputs_are_stale(result_key: str, inputs: dict) -> bool:
 def render_stale_warning(result_key: str, inputs: dict, label: str) -> None:
     if inputs_are_stale(result_key, inputs):
         st.warning(f"{label} shown below was generated from an earlier set of inputs. Run it again to refresh the results.")
+
+
+def tag_result_payload(result: dict, *, engine: str, inputs: dict | None = None) -> dict:
+    payload = dict(result)
+    payload["app_version"] = APP_VERSION
+    payload["engine"] = engine
+    if inputs is not None:
+        payload["input_hash"] = build_scenario_fingerprint(inputs)
+    return payload
+
+
+def get_current_result_payload(session_key: str):
+    result = st.session_state.get(session_key)
+    if result is None:
+        return None
+    if not isinstance(result, dict):
+        st.session_state[session_key] = None
+        return None
+    if result.get("app_version") != APP_VERSION:
+        st.session_state[session_key] = None
+        return None
+    return result
 
 
 def should_suppress_quick_recommendation_stale_warning(current_inputs: dict) -> bool:
@@ -3376,7 +3400,7 @@ def run_ss_optimizer(
                 st.session_state["ss_optimizer_interrupted"] = True
                 st.session_state["ss_optimizer_error"] = f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
                 interrupted_df = pd.DataFrame(results) if results else pd.DataFrame()
-                return {
+                return tag_result_payload({
                     "all_results_df": interrupted_df.copy(),
                     "all_results_export_df": interrupted_df.copy(),
                     "top_10_df": interrupted_df.head(10).copy(),
@@ -3392,8 +3416,9 @@ def run_ss_optimizer(
                     "progress_index": combo_index,
                     "total_combos": total_combos,
                     "error_message": st.session_state["ss_optimizer_error"],
-                }
+                }, engine="ss_optimizer")
 
+            trad_penalty_applied = float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"])
             row = {
                 "Owner SS Age": int(owner_age),
                 "Spouse SS Age": int(spouse_age),
@@ -3409,7 +3434,8 @@ def run_ss_optimizer(
                 "Max MAGI": float(run_result["max_magi"]),
                 "ACA Hit Years": int(run_result["aca_hit_years"]),
                 "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
-                "Score": float(run_result["final_net_worth"]) - float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"]),
+                "Traditional IRA Penalty Applied": trad_penalty_applied,
+                "Score": float(run_result["final_net_worth"]) - trad_penalty_applied,
             }
             results.append(row)
             st.session_state["ss_optimizer_partial_results"] = results
@@ -3440,6 +3466,7 @@ def run_ss_optimizer(
             ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
             ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
             ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
+            ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
             ("Score", lambda r: format_dollars(r["Score"])),
         ]
 
@@ -3480,7 +3507,7 @@ def run_ss_optimizer(
 
         progress_bar.empty()
         clear_ss_optimizer_state(clear_last_result=False)
-        st.session_state["ss_optimizer_last_result"] = {
+        st.session_state["ss_optimizer_last_result"] = tag_result_payload({
             "all_results_df": results_df,
             "top_10_df": top_10_df,
             "comparison_df": comparison_df,
@@ -3493,8 +3520,8 @@ def run_ss_optimizer(
             "total_combos": total_combos,
             "interrupted_partial_df": None,
             "error_message": None,
-        }
-        return {
+        }, engine="ss_optimizer")
+        return tag_result_payload({
             "all_results_df": results_df,
             "all_results_export_df": results_df.copy(),
             "top_10_df": top_10_df,
@@ -3510,7 +3537,7 @@ def run_ss_optimizer(
             "progress_index": total_combos,
             "total_combos": total_combos,
             "error_message": None,
-        }
+        }, engine="ss_optimizer")
     finally:
         st.session_state["ss_optimizer_running"] = False
         try:
@@ -3555,6 +3582,7 @@ def render_ss_optimizer_results(result: dict):
             "Total Government Drag": "${:,.0f}",
             "Total Conversions": "${:,.0f}",
             "Ending Traditional IRA Balance": "${:,.0f}",
+            "Traditional IRA Penalty Applied": "${:,.0f}",
             "Max MAGI": "${:,.0f}",
             "Score": "${:,.0f}",
         }),
@@ -3589,6 +3617,7 @@ def render_ss_optimizer_results(result: dict):
                 "Total Government Drag": "${:,.0f}",
                 "Total Conversions": "${:,.0f}",
                 "Ending Traditional IRA Balance": "${:,.0f}",
+                "Traditional IRA Penalty Applied": "${:,.0f}",
                 "Max MAGI": "${:,.0f}",
                 "Score": "${:,.0f}",
             }),
@@ -4762,9 +4791,6 @@ def render_shared_household_inputs() -> dict:
     )
     st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
 
-    st.header("Planning Inputs")
-    annual_conversion = st.number_input("Flat Annual Conversion", min_value=0.0, value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])), step=5000.0, key="annual_conversion")
-
     inputs = {
         "trad": trad,
         "roth": roth,
@@ -4780,7 +4806,7 @@ def render_shared_household_inputs() -> dict:
         "go_go_multiplier": go_go_multiplier,
         "slow_go_multiplier": slow_go_multiplier,
         "no_go_multiplier": no_go_multiplier,
-        "annual_conversion": annual_conversion,
+        "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
         "conversion_tax_funding_policy": conversion_tax_funding_policy,
         "owner_current_age": owner_current_age,
         "spouse_current_age": spouse_current_age,
@@ -4937,12 +4963,12 @@ def render_conversion_page() -> None:
                     step_size=step_size,
                     profile_name=planning_profile,
                 )
-            st.session_state["quick_strategy_recommendation_result"] = recommendation_result
+            st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
             mark_result_state("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
     with rec_col2:
         st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
 
-    quick_result = st.session_state.get("quick_strategy_recommendation_result")
+    quick_result = get_current_result_payload("quick_strategy_recommendation_result")
     if quick_result is not None:
         quick_inputs_snapshot = {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile}
         if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
@@ -4951,6 +4977,7 @@ def render_conversion_page() -> None:
         else:
             render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
         st.subheader("Strategy Summary")
+        st.caption("These strategy rows are produced by the same Break-Even Governor engine used below. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
         st.dataframe(
             quick_result["summary_df"].style.format({
                 "Score": "{:.1f}",
@@ -5076,7 +5103,7 @@ def render_conversion_page() -> None:
                     start_index=0,
                     existing_results=[],
                 )
-                st.session_state["ss_optimizer_last_result"] = optimizer_result
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
                 if optimizer_result.get("completed", False):
                     mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
                 st.rerun()
@@ -5093,7 +5120,7 @@ def render_conversion_page() -> None:
                     start_index=progress_index,
                     existing_results=partial_results,
                 )
-                st.session_state["ss_optimizer_last_result"] = optimizer_result
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
                 if optimizer_result.get("completed", False):
                     mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
                 st.rerun()
@@ -5103,21 +5130,40 @@ def render_conversion_page() -> None:
                 clear_ss_optimizer_state(clear_last_result=True)
                 st.rerun()
 
-        if st.session_state.get("ss_optimizer_last_result") is not None:
-            last_result = st.session_state["ss_optimizer_last_result"]
+        last_result = get_current_result_payload("ss_optimizer_last_result")
+        if last_result is not None:
             if last_result.get("completed", False):
                 render_stale_warning("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda}, "SS optimizer results")
             render_ss_optimizer_results(last_result)
     else:
+        st.header("Flat Strategy Inputs")
+        flat_annual_conversion = st.number_input(
+            "Flat Annual Conversion",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+            step=5000.0,
+            key="annual_conversion",
+            help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
+        )
+
         btn1, btn2 = st.columns(2)
 
         with btn1:
             if st.button("Run Flat Strategy Test"):
-                result = run_model_fixed(inputs)
-                result["scenario_fingerprint"] = build_scenario_fingerprint(inputs)
-                render_summary("Flat Strategy Summary", result)
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                result = run_model_fixed(flat_inputs)
+                result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
+                st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
+                mark_result_state("flat_strategy", flat_inputs)
+            flat_result = get_current_result_payload("flat_strategy_last_result")
+            if flat_result is not None:
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
+                render_summary("Flat Strategy Summary", flat_result)
                 st.subheader("Flat Strategy Yearly Results")
-                st.dataframe(result["df"], use_container_width=True)
+                st.dataframe(flat_result["df"], use_container_width=True)
 
         with btn2:
             if st.button("Run Break-Even Governor"):
@@ -5128,11 +5174,11 @@ def render_conversion_page() -> None:
                     integrity_mode=integrity_mode,
                     tol=validation_tolerance,
                 )
-                st.session_state["break_even_last_result"] = result
+                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
                 mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
-            if st.session_state.get("break_even_last_result") is not None:
+            result = get_current_result_payload("break_even_last_result")
+            if result is not None:
                 render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
-                result = st.session_state["break_even_last_result"]
                 render_summary("Break-Even Governor Summary", result)
                 st.subheader("Chosen Year-by-Year Path")
                 path_display_df = build_chosen_path_display_df(result["df"])
