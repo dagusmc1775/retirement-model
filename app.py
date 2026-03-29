@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v23-governor-unified"
+APP_VERSION = "v24-profile-aligned"
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -124,7 +124,7 @@ DEFAULT_APP_STATE = {
     "target_trad_override_enabled": False,
     "target_trad_override_max_rate": 0.0,
     "trad": 0.0,
-    "trad_balance_penalty_lambda": 0.25,
+    "trad_balance_penalty_lambda": 1.00,
     "validation_tolerance": 0.01,
 }
 
@@ -392,6 +392,19 @@ def apply_break_even_governor_profile_presets(profile_name: str, current_trad_ba
     st.session_state["break_even_governor_presets_applied"] = True
 
 
+def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict, dict]:
+    adjusted = copy.deepcopy(inputs)
+    preset = get_break_even_governor_presets(profile_name, float(adjusted.get("trad", 0.0)))
+    for key, value in preset.items():
+        if key == "preset_note":
+            continue
+        adjusted[key] = copy.deepcopy(value)
+    adjusted["planning_profile"] = profile_name
+    adjusted["selected_recommendation_profile"] = profile_name
+    adjusted["break_even_governor_preset_note"] = preset.get("preset_note", "")
+    return adjusted, preset
+
+
 def build_strategy_metrics(run_result: dict) -> dict:
     df = run_result["df"]
     last = df.iloc[-1]
@@ -557,7 +570,7 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     step_size = sanitize_governor_step_size(step_size)
-    base_inputs = copy.deepcopy(inputs)
+    base_inputs, preset = build_profile_adjusted_inputs(profile_name, inputs)
     metric_rows = []
     errors = []
     for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
@@ -613,6 +626,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
         "data_source": "break_even_governor",
+        "applied_preset_note": preset.get("preset_note", ""),
     }
 
 
@@ -3361,11 +3375,12 @@ def run_ss_optimizer(
     inputs: dict,
     max_conversion: float,
     step_size: float,
-    trad_balance_penalty_lambda: float = 0.25,
+    trad_balance_penalty_lambda: float = 1.00,
     integrity_mode: bool = False,
     validation_tolerance: float = 0.01,
     start_index: int = 0,
     existing_results: list | None = None,
+    profile_name: str = "Balanced",
 ) -> dict:
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
@@ -3373,7 +3388,7 @@ def run_ss_optimizer(
     # Freeze a clean snapshot for optimizer runs and force the optimizer path into fast mode.
     # The optimizer is a wrapper over the already-tested governor, so the highest-value trust
     # safeguard here is fresh scenario inputs per combo rather than heavy integrity checks.
-    base_snapshot = dict(inputs)
+    base_snapshot, preset = build_profile_adjusted_inputs(profile_name, inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
 
@@ -3411,6 +3426,7 @@ def run_ss_optimizer(
                     "best_validation": None,
                     "best_rerun_summary": None,
                     "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+                    "profile_name": profile_name,
                     "interrupted_partial_df": interrupted_df.copy(),
                     "completed": False,
                     "progress_index": combo_index,
@@ -3532,6 +3548,8 @@ def run_ss_optimizer(
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "profile_name": profile_name,
+            "applied_preset_note": preset.get("preset_note", ""),
             "interrupted_partial_df": None,
             "completed": True,
             "progress_index": total_combos,
@@ -3549,6 +3567,10 @@ def run_ss_optimizer(
 def render_ss_optimizer_results(result: dict):
     st.subheader("Social Security Optimizer Summary")
     st.write(f"Scoring lambda (Trad IRA penalty): {result['trad_balance_penalty_lambda']:.2f}")
+    if result.get("profile_name"):
+        st.write(f"Planning profile used: {result['profile_name']}")
+    if result.get("applied_preset_note"):
+        st.caption(result["applied_preset_note"])
     if result["best_result"] is not None:
         best = result["best_result"]
         st.write(f"Best SS Ages: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
@@ -4963,21 +4985,26 @@ def render_conversion_page() -> None:
                     step_size=step_size,
                     profile_name=planning_profile,
                 )
-            st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
-            mark_result_state("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+            quick_hash_inputs, _ = build_profile_adjusted_inputs(planning_profile, inputs)
+            quick_hash_inputs.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+            st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
+            mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
     with rec_col2:
         st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
 
     quick_result = get_current_result_payload("quick_strategy_recommendation_result")
     if quick_result is not None:
-        quick_inputs_snapshot = {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile}
+        quick_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
+        quick_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
         if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
             st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
             st.session_state["suppress_quick_recommendation_stale_once"] = False
         else:
             render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
         st.subheader("Strategy Summary")
-        st.caption("These strategy rows are produced by the same Break-Even Governor engine used below. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+        st.caption("These strategy rows are produced by the same Break-Even Governor engine used below, with the selected planning-profile presets applied before the quick run. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+        if quick_result.get("applied_preset_note"):
+            st.caption(quick_result["applied_preset_note"])
         st.dataframe(
             quick_result["summary_df"].style.format({
                 "Score": "{:.1f}",
@@ -5052,7 +5079,7 @@ def render_conversion_page() -> None:
             value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
             step=0.05,
             format="%.2f",
-            help="Score = Final Net Worth - lambda x Ending Traditional IRA Balance",
+            help="Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
             key="trad_balance_penalty_lambda",
         )
 
@@ -5119,6 +5146,7 @@ def render_conversion_page() -> None:
                     validation_tolerance=validation_tolerance,
                     start_index=progress_index,
                     existing_results=partial_results,
+                    profile_name=planning_profile,
                 )
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
                 if optimizer_result.get("completed", False):
@@ -5133,7 +5161,9 @@ def render_conversion_page() -> None:
         last_result = get_current_result_payload("ss_optimizer_last_result")
         if last_result is not None:
             if last_result.get("completed", False):
-                render_stale_warning("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda}, "SS optimizer results")
+                optimizer_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
+                optimizer_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "planning_profile": planning_profile})
+                render_stale_warning("ss_optimizer", optimizer_inputs_snapshot, "SS optimizer results")
             render_ss_optimizer_results(last_result)
     else:
         st.header("Flat Strategy Inputs")
