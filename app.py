@@ -2468,11 +2468,18 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         selected_conversion = 0.0
         selected_row = baseline_row
 
+        # In ACA years, the relevant ceiling is MAGI headroom, not the tax-bracket label.
+        # Search directly within buffered ACA headroom so the chosen conversion is a dollar amount,
+        # not a leaked bracket-like value such as 24.
+        aca_buffer = max(float(params.get("aca_headroom_buffer", ACA_HEADROOM_BUFFER)), 1.0)
+        aca_headroom = max(0.0, float(aca_limit) - baseline_magi - aca_buffer)
+        max_test = min(cap, floor_to_step(aca_headroom, step_size))
+
         prev = None
         step_index = 0
         while True:
-            current_conversion = min(cap, step_index * step_size)
-            if current_conversion > cap + 0.01:
+            current_conversion = min(max_test, step_index * step_size)
+            if current_conversion > max_test + 0.01:
                 break
 
             path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
@@ -2568,7 +2575,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 break
 
             prev = {"conversion": current_conversion, "path": path, "row": row}
-            if current_conversion >= cap - 0.01:
+            if current_conversion >= max_test - 0.01:
                 break
             step_index += 1
 
@@ -2576,7 +2583,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         if not diag_df.empty:
             diag_df["Selected Conversion After Test"] = selected_conversion
             diag_df["Selected MAGI"] = float(selected_row["MAGI"])
-            diag_df["ACA Solver Note"] = "ACA years use highest tested conversion that stays within ACA MAGI limit"
+            diag_df["ACA Solver Note"] = "ACA years use buffered MAGI headroom and select the highest tested conversion that stays within the ACA limit"
+            diag_df["Buffered ACA Headroom"] = float(aca_headroom)
         return round(selected_conversion, 2), selected_row, diag_df
 
     # Non-ACA years: use true incremental BETR math, subject to target bracket and tax-funding guardrails.
