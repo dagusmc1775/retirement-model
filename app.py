@@ -960,6 +960,31 @@ def build_scenario_fingerprint(inputs: dict, max_conversion: float | None = None
     return hashlib.md5(canonical.encode("utf-8")).hexdigest()[:12]
 
 
+def _make_projection_cache_key(start_year: int, starting_state: dict, params: dict, first_year_conversion: float, later_year_conversion: float) -> str:
+    payload = {
+        "start_year": int(start_year),
+        "starting_state": _json_safe({
+            "trad": float(starting_state["trad"]),
+            "roth": float(starting_state["roth"]),
+            "brokerage": float(starting_state["brokerage"]),
+            "brokerage_basis": float(starting_state.get("brokerage_basis", starting_state["brokerage"])),
+            "cash": float(starting_state["cash"]),
+        }),
+        "params": _json_safe(params),
+        "first_year_conversion": round(float(first_year_conversion), 10),
+        "later_year_conversion": round(float(later_year_conversion), 10),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(canonical.encode("utf-8")).hexdigest()
+
+
+def _clone_projection_result(result: dict) -> dict:
+    cloned = dict(result)
+    if "df" in cloned and isinstance(cloned["df"], pd.DataFrame):
+        cloned["df"] = cloned["df"].copy(deep=True)
+    return cloned
+
+
 CONSISTENCY_KEYS = [
     "final_net_worth",
     "ending_trad_balance",
@@ -1943,7 +1968,14 @@ def organize_decision_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[:, _ordered_subset(list(df.columns), preferred)]
 
 
-def enrich_year_row_for_display(year: int, state_before: dict, params: dict, row: dict) -> dict:
+def enrich_year_row_for_display(
+    year: int,
+    state_before: dict,
+    params: dict,
+    row: dict,
+    baseline_row: dict | None = None,
+    projection_cache: dict | None = None,
+) -> dict:
     """
     Add the same readability/diagnostic columns to both the flat-strategy table
     and the governor table so the schemas stay aligned.
@@ -1954,14 +1986,16 @@ def enrich_year_row_for_display(year: int, state_before: dict, params: dict, row
         int(params["spouse_aca_end_year"]),
     )
     aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
-    baseline_path = run_projection_from_state(
-        year,
-        dict(state_before),
-        params,
-        first_year_conversion=0.0,
-        later_year_conversion=0.0,
-    )
-    baseline_row = baseline_path["df"].iloc[0].to_dict()
+    if baseline_row is None:
+        baseline_path = run_projection_from_state(
+            year,
+            dict(state_before),
+            params,
+            first_year_conversion=0.0,
+            later_year_conversion=0.0,
+            projection_cache=projection_cache,
+        )
+        baseline_row = baseline_path["df"].iloc[0].to_dict()
     target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
     target_top = get_target_bracket_top(year, target_label)
     baseline_ord = float(baseline_row.get("Ordinary Taxable Income", 0.0))
@@ -2240,7 +2274,27 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
 # -----------------------------
 # PATH RUNNERS
 # -----------------------------
-def run_projection_from_state(start_year: int, starting_state: dict, params: dict, first_year_conversion: float = 0.0, later_year_conversion: float = 0.0) -> dict:
+def run_projection_from_state(
+    start_year: int,
+    starting_state: dict,
+    params: dict,
+    first_year_conversion: float = 0.0,
+    later_year_conversion: float = 0.0,
+    projection_cache: dict | None = None,
+) -> dict:
+    cache_key = None
+    if projection_cache is not None:
+        cache_key = _make_projection_cache_key(
+            start_year,
+            starting_state,
+            params,
+            first_year_conversion,
+            later_year_conversion,
+        )
+        cached = projection_cache.get(cache_key)
+        if cached is not None:
+            return _clone_projection_result(cached)
+
     state = {
         "trad": float(starting_state["trad"]),
         "roth": float(starting_state["roth"]),
@@ -2258,8 +2312,92 @@ def run_projection_from_state(start_year: int, starting_state: dict, params: dic
     df = pd.DataFrame(rows)
     result = summarize_run(df, params)
     result["start_year"] = start_year
+
+    if projection_cache is not None and cache_key is not None:
+        projection_cache[cache_key] = _clone_projection_result(result)
+
     return result
 
+
+
+
+def run_projection_summary_from_state(
+    start_year: int,
+    starting_state: dict,
+    params: dict,
+    first_year_conversion: float = 0.0,
+    later_year_conversion: float = 0.0,
+    projection_cache: dict | None = None,
+) -> dict:
+    cache_key = None
+    if projection_cache is not None:
+        cache_key = "summary:" + _make_projection_cache_key(
+            start_year,
+            starting_state,
+            params,
+            first_year_conversion,
+            later_year_conversion,
+        )
+        cached = projection_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+
+    state = {
+        "trad": float(starting_state["trad"]),
+        "roth": float(starting_state["roth"]),
+        "brokerage": float(starting_state["brokerage"]),
+        "brokerage_basis": float(starting_state.get("brokerage_basis", starting_state["brokerage"])),
+        "cash": float(starting_state["cash"]),
+    }
+
+    first_row = None
+    last_row = None
+    total_federal_taxes = 0.0
+    total_state_taxes = 0.0
+    total_aca_cost = 0.0
+    total_irmaa_cost = 0.0
+    total_shortfall = 0.0
+    total_conversions = 0.0
+    max_magi = 0.0
+
+    for year in range(start_year, END_YEAR + 1):
+        conversion = float(first_year_conversion) if year == start_year else float(later_year_conversion)
+        state, row = simulate_one_year(year, state, params, conversion)
+        if first_row is None:
+            first_row = dict(row)
+        last_row = dict(row)
+        total_federal_taxes += float(row.get("Federal Tax", 0.0))
+        total_state_taxes += float(row.get("State Tax", 0.0))
+        total_aca_cost += float(row.get("ACA Cost", 0.0))
+        total_irmaa_cost += float(row.get("IRMAA Cost", 0.0))
+        total_shortfall += float(row.get("Year Shortfall", 0.0))
+        total_conversions += float(row.get("Chosen Conversion", 0.0))
+        max_magi = max(max_magi, float(row.get("MAGI", 0.0)))
+
+    if last_row is None:
+        last_row = {}
+        first_row = {}
+
+    result = {
+        "start_year": int(start_year),
+        "first_row": first_row,
+        "last_row": last_row,
+        "final_net_worth": float(last_row.get("Net Worth", 0.0)),
+        "total_federal_taxes": float(total_federal_taxes),
+        "total_state_taxes": float(total_state_taxes),
+        "total_aca_cost": float(total_aca_cost),
+        "total_irmaa_cost": float(total_irmaa_cost),
+        "total_government_drag": float(total_federal_taxes + total_state_taxes + total_aca_cost + total_irmaa_cost),
+        "total_shortfall": float(total_shortfall),
+        "max_magi": float(max_magi),
+        "total_conversions": float(total_conversions),
+        "ending_trad_balance": float(last_row.get("EOY Trad", 0.0)),
+    }
+
+    if projection_cache is not None and cache_key is not None:
+        projection_cache[cache_key] = copy.deepcopy(result)
+
+    return result
 
 def run_model_fixed(inputs: dict) -> dict:
     params = build_common_params(inputs)
@@ -2345,7 +2483,7 @@ def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate:
 
 
 def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
-    current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
+    current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0, projection_cache=projection_cache)
     next_path = run_projection_from_state(year, state, params, first_year_conversion=next_conversion, later_year_conversion=0.0)
 
     current_row = current_path["df"].iloc[0]
@@ -2461,14 +2599,14 @@ def estimate_future_marginal_rate(year: int, state: dict, params: dict) -> dict:
     }
 
 
-def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_conversion: float, step_size: float) -> tuple:
+def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_conversion: float, step_size: float, projection_cache: dict | None = None) -> tuple:
     cap = get_year_conversion_cap(state, params, max_conversion)
     step_size = sanitize_governor_step_size(step_size)
     coverage = get_coverage_status(year, int(params["primary_aca_end_year"]), int(params["spouse_aca_end_year"]))
 
     if cap <= 0.0:
-        zero_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
-        zero_row = zero_path["df"].iloc[0].to_dict()
+        zero_path = run_projection_summary_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0, projection_cache=projection_cache)
+        zero_row = dict(zero_path["first_row"])
         diag = pd.DataFrame([{
             "Year": year,
             "Base Conversion": 0.0,
@@ -2484,47 +2622,123 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         return 0.0, zero_row, diag
 
     def _future_drag(path: dict, first_row: dict) -> dict:
-        total_state_taxes = float(path["df"]["State Tax"].sum()) if "State Tax" in path["df"].columns else 0.0
         return {
             "federal": float(path["total_federal_taxes"]) - float(first_row.get("Federal Tax", 0.0)),
-            "state": total_state_taxes - float(first_row.get("State Tax", 0.0)),
+            "state": float(path.get("total_state_taxes", 0.0)) - float(first_row.get("State Tax", 0.0)),
             "aca": float(path["total_aca_cost"]) - float(first_row.get("ACA Cost", 0.0)),
             "irmaa": float(path["total_irmaa_cost"]) - float(first_row.get("IRMAA Cost", 0.0)),
         }
 
-    # ACA years: maximize conversion under ACA limit, but also expose true incremental economics
+    # ACA years: maximize conversion under ACA limit, but do it efficiently.
     if coverage["aca_lives"] > 0:
         aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
         tested_rows = []
-        baseline_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
-        baseline_row = baseline_path["df"].iloc[0].to_dict()
+        baseline_path = run_projection_summary_from_state(
+            year,
+            state,
+            params,
+            first_year_conversion=0.0,
+            later_year_conversion=0.0,
+            projection_cache=projection_cache,
+        )
+        baseline_row = dict(baseline_path["first_row"])
         baseline_magi = float(baseline_row["MAGI"])
+        baseline_total_tax = float(
+            baseline_row.get("Federal Tax", 0.0)
+            + baseline_row.get("State Tax", 0.0)
+            + baseline_row.get("ACA Cost", 0.0)
+            + baseline_row.get("IRMAA Cost", 0.0)
+        )
         selected_conversion = 0.0
         selected_row = baseline_row
 
-        # In ACA years, the relevant ceiling is MAGI headroom, not the tax-bracket label.
-        # Search directly within buffered ACA headroom so the chosen conversion is a dollar amount,
-        # not a leaked bracket-like value such as 24.
         aca_buffer = max(float(params.get("aca_headroom_buffer", ACA_HEADROOM_BUFFER)), 1.0)
         aca_headroom = max(0.0, float(aca_limit) - baseline_magi - aca_buffer)
         max_test = min(cap, floor_to_step(aca_headroom, step_size))
 
-        prev = None
-        step_index = 0
-        while True:
-            current_conversion = min(max_test, step_index * step_size)
-            if current_conversion > max_test + 0.01:
-                break
+        eval_cache: dict[float, dict] = {}
 
-            path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
-            row = path["df"].iloc[0].to_dict()
-            within_limit = bool(float(row["MAGI"]) <= aca_limit + 0.01)
+        def _evaluate_aca_conversion(current_conversion: float) -> dict:
+            current_conversion = float(round(current_conversion, 10))
+            cached_eval = eval_cache.get(current_conversion)
+            if cached_eval is not None:
+                return cached_eval
+
+            path = run_projection_summary_from_state(
+                year,
+                state,
+                params,
+                first_year_conversion=current_conversion,
+                later_year_conversion=0.0,
+                projection_cache=projection_cache,
+            )
+            row = dict(path["first_row"])
             tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(row)
             roth_tax_used = "roth" in tax_sources
+            within_limit = bool(float(row["MAGI"]) <= aca_limit + 0.01)
 
-            current_effective = 0.0
-            future_effective = 0.0
-            net_benefit_rate = 0.0
+            test_total_tax = float(
+                row["Federal Tax"]
+                + row.get("State Tax", 0.0)
+                + row["ACA Cost"]
+                + row["IRMAA Cost"]
+            )
+            if current_conversion <= 1e-9:
+                delta_total_tax = 0.0
+                current_effective = 0.0
+                whole_effective_rate = 0.0
+            else:
+                delta_total_tax = float(test_total_tax - baseline_total_tax)
+                current_effective = sanitize_effective_rate(
+                    delta_total_tax / float(current_conversion),
+                    float(row.get("Current Marginal Tax Rate", 0.0)),
+                )
+                whole_effective_rate = max(0.0, delta_total_tax / float(current_conversion))
+
+            payload = {
+                "conversion": float(current_conversion),
+                "path": path,
+                "row": row,
+                "tax_sources": tax_sources,
+                "tax_source_penalty": float(tax_source_penalty),
+                "roth_tax_used": bool(roth_tax_used),
+                "within_limit": bool(within_limit),
+                "test_total_tax": float(test_total_tax),
+                "delta_total_tax": float(delta_total_tax),
+                "current_effective": float(current_effective),
+                "whole_effective_rate": float(whole_effective_rate),
+            }
+            eval_cache[current_conversion] = payload
+            return payload
+
+        if max_test <= 0.0:
+            eval_steps = [0.0]
+        else:
+            max_step_index = int(round(max_test / step_size))
+            lo = 0
+            hi = max_step_index
+            best_ok = 0
+            visited_indices = {0, max_step_index}
+
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                visited_indices.add(mid)
+                mid_conversion = float(mid * step_size)
+                info = _evaluate_aca_conversion(mid_conversion)
+                if info["within_limit"] and not info["roth_tax_used"]:
+                    best_ok = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+
+            eval_steps = sorted(float(idx * step_size) for idx in visited_indices if idx >= 0)
+            selected_conversion = float(best_ok * step_size)
+            selected_row = _evaluate_aca_conversion(selected_conversion)["row"]
+
+        prev_info = None
+        for step_index, current_conversion in enumerate(eval_steps):
+            info = _evaluate_aca_conversion(current_conversion)
+            row = info["row"]
             current_fed_delta = 0.0
             current_aca_delta = 0.0
             current_irmaa_delta = 0.0
@@ -2532,63 +2746,57 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_avoided_state = 0.0
             future_avoided_aca = 0.0
             future_avoided_irmaa = 0.0
-            baseline_total_tax = float(baseline_row.get("Federal Tax", 0.0) + baseline_row.get("State Tax", 0.0) + baseline_row.get("ACA Cost", 0.0) + baseline_row.get("IRMAA Cost", 0.0))
-            test_total_tax = float(row["Federal Tax"] + row.get("State Tax", 0.0) + row["ACA Cost"] + row["IRMAA Cost"])
-            if current_conversion <= 1e-9:
-                delta_total_tax = 0.0
-                current_effective = 0.0
-                whole_effective_rate = 0.0
-            else:
-                delta_total_tax = float(test_total_tax - baseline_total_tax)
-                current_effective = sanitize_effective_rate(delta_total_tax / float(current_conversion), float(row.get("Current Marginal Tax Rate", 0.0)))
-                whole_effective_rate = max(0.0, delta_total_tax / float(current_conversion))
-            if prev is not None and current_conversion > prev["conversion"] + 1e-9:
-                delta_conv = float(current_conversion - prev["conversion"])
-                current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
-                current_aca_delta = float(row["ACA Cost"]) - float(prev["row"]["ACA Cost"])
-                current_irmaa_delta = float(row["IRMAA Cost"]) - float(prev["row"]["IRMAA Cost"])
+            future_effective = 0.0
+            net_benefit_rate = 0.0
 
-                curr_future = _future_drag(path, row)
-                prev_future = _future_drag(prev["path"], prev["row"])
+            if prev_info is not None and current_conversion > prev_info["conversion"] + 1e-9:
+                delta_conv = float(current_conversion - prev_info["conversion"])
+                current_fed_delta = float(row["Federal Tax"]) - float(prev_info["row"]["Federal Tax"])
+                current_aca_delta = float(row["ACA Cost"]) - float(prev_info["row"]["ACA Cost"])
+                current_irmaa_delta = float(row["IRMAA Cost"]) - float(prev_info["row"]["IRMAA Cost"])
+
+                curr_future = _future_drag(info["path"], row)
+                prev_future = _future_drag(prev_info["path"], prev_info["row"])
                 future_avoided_fed = prev_future["federal"] - curr_future["federal"]
                 future_avoided_state = prev_future.get("state", 0.0) - curr_future.get("state", 0.0)
                 future_avoided_aca = prev_future["aca"] - curr_future["aca"]
                 future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
-                future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
-                net_benefit_rate = future_effective - current_effective
+                future_effective = (
+                    future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa
+                ) / delta_conv
+                net_benefit_rate = future_effective - info["current_effective"]
 
             tested_rows.append({
                 "Year": year,
                 "Decision Mode": "ACA Headroom",
                 "Step Index": int(step_index),
-                "Base Conversion": float(prev["conversion"]) if prev is not None else 0.0,
+                "Base Conversion": float(prev_info["conversion"]) if prev_info is not None else 0.0,
                 "Test Conversion": float(current_conversion),
-                "Step Amount": float(current_conversion - (prev["conversion"] if prev is not None else 0.0)),
+                "Step Amount": float(current_conversion - (prev_info["conversion"] if prev_info is not None else 0.0)),
                 "Baseline MAGI (0 Conv)": baseline_magi,
                 "ACA MAGI Limit": float(aca_limit),
                 "MAGI Headroom Before Conversion": float(max(0.0, aca_limit - baseline_magi)),
+                "Buffered ACA Headroom": float(aca_headroom),
                 "Test MAGI": float(row["MAGI"]),
                 "MAGI Remaining To Limit": float(aca_limit - float(row["MAGI"])),
-                "Within ACA Limit": bool(within_limit and not roth_tax_used),
-                "Current Marginal Incremental Cost Rate": float(current_effective),
+                "Within ACA Limit": bool(info["within_limit"] and not info["roth_tax_used"]),
+                "Current Marginal Incremental Cost Rate": float(info["current_effective"]),
                 "Projected Future Avoided Rate": float(future_effective),
                 "Net Benefit Rate": float(net_benefit_rate),
-                "Tax Funding Source": " + ".join(tax_sources) if tax_sources else "none",
-                "Tax Funding Penalty": float(tax_source_penalty),
+                "Tax Funding Source": " + ".join(info["tax_sources"]) if info["tax_sources"] else "none",
+                "Tax Funding Penalty": float(info["tax_source_penalty"]),
                 "Current Marginal Tax Rate": float(row.get("Current Marginal Tax Rate", 0.0)),
                 "Estimated Future Marginal Rate": float("nan"),
-                "Effective Current Rate (Adjusted)": float(adjusted_current_effective_rate(current_effective, tax_source_penalty)),
-                "Roth Used For Tax Payment": bool(roth_tax_used),
+                "Effective Current Rate (Adjusted)": float(adjusted_current_effective_rate(info["current_effective"], info["tax_source_penalty"])),
+                "Roth Used For Tax Payment": bool(info["roth_tax_used"]),
                 "Current Year Federal Tax Delta": float(current_fed_delta),
                 "Current Year ACA Delta": float(current_aca_delta),
                 "Current Year IRMAA Delta": float(current_irmaa_delta),
                 "Current Marginal Cost": float(current_fed_delta + current_aca_delta + current_irmaa_delta),
-            "Baseline Total Tax": float(baseline_total_tax),
-            "Test Total Tax": float(test_total_tax),
-            "Delta Total Tax": float(delta_total_tax),
                 "Baseline Total Tax": float(baseline_total_tax),
-                "Test Total Tax": float(test_total_tax),
-                "Delta Total Tax": float(delta_total_tax),
+                "Test Total Tax": float(info["test_total_tax"]),
+                "Delta Total Tax": float(info["delta_total_tax"]),
+                "Whole Conversion Effective Cost Rate": float(0.0 if abs(info["whole_effective_rate"]) > 1.0 else info["whole_effective_rate"]),
                 "Future Avoided Federal Tax": float(future_avoided_fed),
                 "Future Avoided State Tax": float(future_avoided_state),
                 "Future Avoided ACA Cost": float(future_avoided_aca),
@@ -2600,32 +2808,25 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "EOY Trad": float(row["EOY Trad"]),
                 "EOY Brokerage": float(row["EOY Brokerage"]),
                 "EOY Cash": float(row["EOY Cash"]),
-                "Final Net Worth (Zero Later Conv)": float(path["final_net_worth"]),
+                "Final Net Worth (Zero Later Conv)": float(info["path"]["final_net_worth"]),
             })
-            if within_limit and not roth_tax_used:
-                selected_conversion = float(current_conversion)
-                selected_row = row
-            else:
-                break
-
-            prev = {"conversion": current_conversion, "path": path, "row": row}
-            if current_conversion >= max_test - 0.01:
-                break
-            step_index += 1
+            prev_info = info
 
         diag_df = pd.DataFrame(tested_rows)
         if not diag_df.empty:
             diag_df["Selected Conversion After Test"] = selected_conversion
             diag_df["Selected MAGI"] = float(selected_row["MAGI"])
-            diag_df["ACA Solver Note"] = "ACA years use buffered MAGI headroom and select the highest tested conversion that stays within the ACA limit"
-            diag_df["Buffered ACA Headroom"] = float(aca_headroom)
+            diag_df["ACA Solver Note"] = (
+                "ACA years use buffered MAGI headroom, cached projections, and binary search "
+                "to select the highest tested conversion that stays within the ACA limit."
+            )
         return round(selected_conversion, 2), selected_row, diag_df
 
     # Non-ACA years: use true incremental BETR math, subject to target bracket and tax-funding guardrails.
     target_label = params["post_aca_target_bracket"] if year < int(params["household_rmd_start"]) else params["rmd_era_target_bracket"]
     target_top = get_target_bracket_top(year, target_label)
-    baseline_path = run_projection_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0)
-    baseline_row = baseline_path["df"].iloc[0].to_dict()
+    baseline_path = run_projection_summary_from_state(year, state, params, first_year_conversion=0.0, later_year_conversion=0.0, projection_cache=projection_cache)
+    baseline_row = dict(baseline_path["first_row"])
     baseline_ordinary_taxable = float(baseline_row.get("Ordinary Taxable Income", 0.0))
     target_headroom = max(0.0, float(target_top) - baseline_ordinary_taxable)
     future_rate_info = estimate_future_marginal_rate(year, state, params)
@@ -2649,8 +2850,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         if current_conversion > max_test + 0.01:
             break
 
-        path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
-        row = path["df"].iloc[0].to_dict()
+        path = run_projection_summary_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0, projection_cache=projection_cache)
+        row = dict(path["first_row"])
         ordinary_taxable = float(row.get("Ordinary Taxable Income", 0.0))
         current_rate = float(row.get("Current Marginal Tax Rate", 0.0))
         within_target = bool(ordinary_taxable <= float(target_top) + 0.01)
@@ -2820,7 +3021,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
 
         if chosen_override_conversion is not None and float(chosen_override_conversion) > float(selected_conversion) + 1e-9:
             selected_conversion = float(chosen_override_conversion)
-            selected_row = run_projection_from_state(year, state, params, first_year_conversion=selected_conversion, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+            selected_row = dict(run_projection_summary_from_state(year, state, params, first_year_conversion=selected_conversion, later_year_conversion=0.0, projection_cache=projection_cache)["first_row"])
 
     diag_df = pd.DataFrame(tested_rows)
     if not diag_df.empty:
@@ -2838,6 +3039,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
     params = build_common_params(inputs)
     max_conversion = sanitize_governor_max_conversion(max_conversion)
     step_size = sanitize_governor_step_size(step_size)
+    projection_cache: dict = {}
     state = {
         "trad": float(inputs["trad"]),
         "roth": float(inputs["roth"]),
@@ -2857,18 +3059,27 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             params=params,
             max_conversion=max_conversion,
             step_size=step_size,
+            projection_cache=projection_cache,
         )
 
         state, chosen_row = simulate_one_year(year, dict(state_before), params, optimal_conversion)
         coverage = get_coverage_status(year, int(params["primary_aca_end_year"]), int(params["spouse_aca_end_year"]))
         aca_limit = get_aca_magi_limit(year, coverage["aca_lives"])
-        baseline_row = run_projection_from_state(year, dict({
+        baseline_state = {
             "trad": chosen_row["SOY Trad"],
             "roth": chosen_row["SOY Roth"],
             "brokerage": chosen_row["SOY Brokerage"],
             "brokerage_basis": chosen_row["SOY Brokerage Basis"],
             "cash": chosen_row["SOY Cash"],
-        }), params, first_year_conversion=0.0, later_year_conversion=0.0)["df"].iloc[0].to_dict()
+        }
+        baseline_row = dict(run_projection_summary_from_state(
+            year,
+            dict(baseline_state),
+            params,
+            first_year_conversion=0.0,
+            later_year_conversion=0.0,
+            projection_cache=projection_cache,
+        )["first_row"])
         future_rate_info = estimate_future_marginal_rate(year, dict({
             "trad": chosen_row["SOY Trad"],
             "roth": chosen_row["SOY Roth"],
@@ -2897,7 +3108,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
         chosen_row["Baseline Ordinary Taxable Income (0 Conv)"] = baseline_ord
         chosen_row["Ordinary Income Headroom Before Conversion"] = float(max(0.0, target_top - baseline_ord)) if coverage["aca_lives"] == 0 else 0.0
         chosen_row["Ordinary Income Remaining To Target"] = float(target_top - float(chosen_row.get("Ordinary Taxable Income", 0.0))) if coverage["aca_lives"] == 0 else 0.0
-        chosen_row = enrich_year_row_for_display(year, dict(state_before), params, chosen_row)
+        chosen_row = enrich_year_row_for_display(year, dict(state_before), params, chosen_row, baseline_row=baseline_row, projection_cache=projection_cache)
         # Pull selected BETR metrics from the matching decision row when available
         if diag_df is not None and not diag_df.empty:
             match = diag_df[diag_df["Test Conversion"].round(2) == round(float(optimal_conversion), 2)]
@@ -2932,8 +3143,8 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                 if chosen_row.get("Whole Conversion Effective Cost Rate") in (None, ""):
                     chosen_row["Whole Conversion Effective Cost Rate"] = sel.get("Whole Conversion Effective Cost Rate", 0.0)
         # Compute selected-row receipts directly from a true 0-conversion baseline so they always print.
-        baseline_path = run_projection_from_state(year, dict(state_before), params, first_year_conversion=0.0, later_year_conversion=0.0)
-        baseline_first_row = baseline_path["df"].iloc[0].to_dict()
+        baseline_path = run_projection_summary_from_state(year, dict(state_before), params, first_year_conversion=0.0, later_year_conversion=0.0, projection_cache=projection_cache)
+        baseline_first_row = dict(baseline_path["first_row"])
         baseline_total_tax = float(baseline_first_row.get("Federal Tax", 0.0) + baseline_first_row.get("State Tax", 0.0) + baseline_first_row.get("ACA Cost", 0.0) + baseline_first_row.get("IRMAA Cost", 0.0))
         test_total_tax = float(chosen_row.get("Federal Tax", 0.0) + chosen_row.get("State Tax", 0.0) + chosen_row.get("ACA Cost", 0.0) + chosen_row.get("IRMAA Cost", 0.0))
         if float(optimal_conversion) <= 1e-9:
@@ -4330,7 +4541,7 @@ def render_home_page() -> None:
     st.title("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
-        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Conversion Optimizer for the full lifetime break-even governor and SS optimizer."
+        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Break-Even Governor for the full lifetime governor and SS optimizer."
     )
     render_top_nav("home")
     st.info(
@@ -4476,7 +4687,7 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.title("Conversion Optimizer")
+    st.title("Break-Even Governor")
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
@@ -4607,12 +4818,13 @@ def render_conversion_page() -> None:
     rec_col1, rec_col2 = st.columns([1, 2])
     with rec_col1:
         if st.button("Run Quick Strategy Recommendation", use_container_width=True):
-            recommendation_result = run_quick_strategy_recommendation(
-                inputs=inputs,
-                max_conversion=max_conversion,
-                step_size=step_size,
-                profile_name=planning_profile,
-            )
+            with st.spinner("Running quick strategy recommendation..."):
+                recommendation_result = run_quick_strategy_recommendation(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    profile_name=planning_profile,
+                )
             st.session_state["quick_strategy_recommendation_result"] = recommendation_result
             mark_result_state("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
     with rec_col2:
