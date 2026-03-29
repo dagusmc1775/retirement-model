@@ -38,6 +38,24 @@ def sanitize_governor_step_size(step_size: float) -> float:
     except Exception:
         return GOVERNOR_MIN_STEP_SIZE
 
+
+def sanitize_governor_max_conversion(max_conversion: float) -> float:
+    """
+    Guard against stale session/load values that accidentally saved a bracket-like
+    percentage (for example 24) into the max conversion field. The Break-Even
+    Governor's UI uses dollar amounts in $5,000 increments, so tiny positive values
+    are almost certainly invalid state rather than intentional user input.
+    """
+    try:
+        value = float(max_conversion)
+    except Exception:
+        return 300000.0
+    if value <= 0:
+        return 0.0
+    if value < 1000.0:
+        return 300000.0
+    return value
+
 IRMAA_FIRST_CLIFF_MFJ = 218000.0
 
 DEFAULT_APP_STATE = {
@@ -545,7 +563,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
             scenario_inputs = copy.deepcopy(base_inputs)
             scenario_inputs["owner_claim_age"] = int(owner_age)
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
-            run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+            run_result = run_model_break_even_governor(scenario_inputs, sanitize_governor_max_conversion(max_conversion), step_size)
             metrics = build_strategy_metrics(run_result)
             metric_rows.append({
                 **metrics,
@@ -2818,6 +2836,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
 
 def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size: float) -> dict:
     params = build_common_params(inputs)
+    max_conversion = sanitize_governor_max_conversion(max_conversion)
     step_size = sanitize_governor_step_size(step_size)
     state = {
         "trad": float(inputs["trad"]),
@@ -3027,7 +3046,7 @@ def run_ss_optimizer(
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
             try:
-                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+                run_result = run_model_break_even_governor(scenario_inputs, sanitize_governor_max_conversion(max_conversion), step_size)
             except Exception as exc:
                 st.session_state["ss_optimizer_progress_index"] = combo_index
                 st.session_state["ss_optimizer_partial_results"] = results
@@ -4473,7 +4492,10 @@ def render_conversion_page() -> None:
     inputs = render_shared_household_inputs()
 
     st.header("Break-Even Governor Inputs")
-    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"])), step=5000.0, key="max_conversion")
+    current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
+    if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
+        st.session_state["max_conversion"] = float(current_max_conversion_value)
+    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
     current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
     if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
         st.session_state["step_size"] = float(current_step_size_value)
