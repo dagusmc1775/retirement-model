@@ -24,6 +24,20 @@ UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
 ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
+
+GOVERNOR_MIN_STEP_SIZE = 1000.0
+
+def sanitize_governor_step_size(step_size: float) -> float:
+    """
+    Guard against stale session/load values from older app versions that may have
+    saved a bracket-like number (for example 24) into the governor step size.
+    The Break-Even Governor should never use a step size below $1,000.
+    """
+    try:
+        return max(GOVERNOR_MIN_STEP_SIZE, float(step_size))
+    except Exception:
+        return GOVERNOR_MIN_STEP_SIZE
+
 IRMAA_FIRST_CLIFF_MFJ = 218000.0
 
 DEFAULT_APP_STATE = {
@@ -522,6 +536,7 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
 
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
+    step_size = sanitize_governor_step_size(step_size)
     base_inputs = copy.deepcopy(inputs)
     metric_rows = []
     errors = []
@@ -967,6 +982,7 @@ def make_consistency_payload(first: dict, second: dict, tol: float = 0.01) -> di
 
 
 def run_governor_with_validation(inputs: dict, max_conversion: float, step_size: float, integrity_mode: bool = False, tol: float = 0.01) -> dict:
+    step_size = sanitize_governor_step_size(step_size)
     result = run_model_break_even_governor(inputs, max_conversion, step_size)
 
     if integrity_mode:
@@ -2429,7 +2445,7 @@ def estimate_future_marginal_rate(year: int, state: dict, params: dict) -> dict:
 
 def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_conversion: float, step_size: float) -> tuple:
     cap = get_year_conversion_cap(state, params, max_conversion)
-    step_size = max(1.0, float(step_size))
+    step_size = sanitize_governor_step_size(step_size)
     coverage = get_coverage_status(year, int(params["primary_aca_end_year"]), int(params["spouse_aca_end_year"]))
 
     if cap <= 0.0:
@@ -2802,6 +2818,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
 
 def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size: float) -> dict:
     params = build_common_params(inputs)
+    step_size = sanitize_governor_step_size(step_size)
     state = {
         "trad": float(inputs["trad"]),
         "roth": float(inputs["roth"]),
@@ -4457,12 +4474,15 @@ def render_conversion_page() -> None:
 
     st.header("Break-Even Governor Inputs")
     max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"])), step=5000.0, key="max_conversion")
+    current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
+    if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
+        st.session_state["step_size"] = float(current_step_size_value)
     step_size = st.number_input(
         "Break-Even Step Size",
         min_value=1000.0,
-        value=float(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"])),
+        value=float(current_step_size_value),
         step=1000.0,
-        help="Smaller steps improve accuracy but run slower.",
+        help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
         key="step_size",
     )
 
