@@ -695,6 +695,33 @@ def render_stale_warning(result_key: str, inputs: dict, label: str) -> None:
         st.warning(f"{label} shown below was generated from an earlier set of inputs. Run it again to refresh the results.")
 
 
+def should_suppress_quick_recommendation_stale_warning(current_inputs: dict) -> bool:
+    """
+    Suppress the quick-recommendation stale warning immediately after the user clicks
+    through into the Break-Even Governor from a recommended strategy. In that case the
+    recommendation table is still a valid snapshot; the user intentionally changed the
+    SS claim ages by following the recommendation.
+    """
+    if not bool(st.session_state.get("suppress_quick_recommendation_stale_once", False)):
+        return False
+    selected_strategy = st.session_state.get("selected_recommendation_strategy")
+    if not selected_strategy:
+        return False
+    try:
+        owner_age_str, spouse_age_str = str(selected_strategy).split("/")
+        owner_age = int(owner_age_str)
+        spouse_age = int(spouse_age_str)
+    except Exception:
+        return False
+    try:
+        return (
+            int(current_inputs.get("owner_claim_age", -1)) == owner_age
+            and int(current_inputs.get("spouse_claim_age", -1)) == spouse_age
+        )
+    except Exception:
+        return False
+
+
 def build_scenario_export_payload(scope: str = "full") -> str:
     state = collect_scenario_state() if scope == "full" else collect_page_state(scope)
     payload = {
@@ -2434,9 +2461,9 @@ def get_year_conversion_cap(state: dict, params: dict, max_conversion: float) ->
 
 def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dict, step_size: float, cap: float) -> float:
     """
-    Soft planning overlay: estimate the annual pre-RMD conversion needed to work toward a target
-    Traditional IRA balance by household RMD start. This is intentionally simple and conservative:
-    it spreads the current excess Trad balance over the remaining pre-RMD years.
+    Annual conversion needed to work toward the target Traditional IRA balance by the
+    first household RMD year. This is intentionally simple but no longer ultra-timid:
+    the governor can use it as an explicit pace target for pre-RMD depletion.
     """
     if not bool(params.get("target_trad_balance_enabled", False)):
         return 0.0
@@ -2448,9 +2475,35 @@ def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dic
     target_trad = max(0.0, float(params.get("target_trad_balance", 300000.0)))
     excess = max(0.0, current_trad - target_trad)
     annual_needed = excess / years_left
-    # Round to model step size and cap.
     rounded = floor_to_step(annual_needed, step_size)
     return max(0.0, min(float(cap), float(rounded)))
+
+
+def project_trad_balance_at_rmd_start(year: int, state: dict, params: dict, projection_cache: dict | None = None) -> float:
+    """
+    Project the ending Traditional IRA balance in the year immediately before the
+    first household RMD year, assuming no additional optional conversions from the
+    current year forward. This is used only as a planning diagnostic / pressure gauge.
+    """
+    rmd_start = int(params.get("household_rmd_start", year))
+    if year >= rmd_start:
+        return max(0.0, float(state.get("trad", 0.0)))
+
+    summary = run_projection_summary_from_state(
+        start_year=year,
+        starting_state=dict(state),
+        params=params,
+        first_year_conversion=0.0,
+        later_year_conversion=0.0,
+        projection_cache=projection_cache,
+    )
+    first_row = summary.get("first_row", {}) or {}
+    years_until_rmd = max(0, rmd_start - year - 1)
+    projected_trad = float(first_row.get("EOY Trad", state.get("trad", 0.0)))
+    growth = float(params.get("growth", 0.0))
+    for _ in range(years_until_rmd):
+        projected_trad *= (1.0 + growth)
+    return max(0.0, projected_trad)
 
 
 
@@ -2834,12 +2887,21 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
 
     max_test = min(cap, floor_to_step(target_headroom, step_size))
     target_pressure_conversion = estimate_target_trad_pressure_conversion(year, state, params, step_size, max_test)
+    projected_trad_at_rmd_start = project_trad_balance_at_rmd_start(year, state, params, projection_cache=projection_cache)
+    target_gap_at_rmd_start = max(0.0, projected_trad_at_rmd_start - float(params.get("target_trad_balance", 0.0)))
+    target_lane_active = bool(
+        params.get("target_trad_balance_enabled", False)
+        and year < int(params.get("household_rmd_start", year))
+        and target_pressure_conversion > 0.0
+    )
     tested_rows = []
     selected_conversion = 0.0
     selected_row = baseline_row
     selected_net_benefit = float("-inf")
     highest_guardrail_conversion = 0.0
     highest_guardrail_row = baseline_row
+    highest_bracket_fill_conversion = 0.0
+    highest_bracket_fill_row = baseline_row
     highest_override_conversion = 0.0
     highest_override_row = baseline_row
     prev = None
@@ -2969,13 +3031,24 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 and float(effective_current_adjusted) <= float(params.get("target_trad_override_max_rate", 0.22)) + 1e-12
             ),
             "Post-RMD Policy Active": bool(year >= int(params["household_rmd_start"])),
+            "Target Lane Active": bool(target_lane_active),
+            "Required Annual Conversion To Target": float(target_pressure_conversion),
+            "Projected Trad At RMD Start (No Extra Conv)": float(projected_trad_at_rmd_start),
+            "Target Trad Gap At RMD Start": float(target_gap_at_rmd_start),
         })
 
         # Winner selection:
         # - highest_guardrail_conversion tracks pure BETR-valid rows
+        # - highest_bracket_fill_conversion tracks the highest conversion that still fits
+        #   the chosen bracket without using Roth to pay tax
         # - highest_override_conversion tracks rows that stay under the planner override cap,
         #   even if pure BETR already says stop
         base_override_eligible = bool((not roth_tax_used))
+
+        if base_override_eligible and within_target:
+            if float(current_conversion) >= float(highest_bracket_fill_conversion) - 1e-12:
+                highest_bracket_fill_conversion = float(current_conversion)
+                highest_bracket_fill_row = row
 
         if within_limit:
             if float(current_conversion) >= float(highest_guardrail_conversion) - 1e-12:
@@ -3028,9 +3101,12 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         diag_df["Selected Conversion After Test"] = selected_conversion
         diag_df["Selected Ordinary Taxable Income"] = float(selected_row.get("Ordinary Taxable Income", 0.0))
         diag_df["Target Trad Pressure Conversion"] = float(target_pressure_conversion)
+        diag_df["Target Trad Highest Bracket Fill Conversion"] = float(highest_bracket_fill_conversion)
         diag_df["Target Trad Highest Override Conversion"] = float(highest_override_conversion)
+        diag_df["Projected Trad At RMD Start (No Extra Conv)"] = float(projected_trad_at_rmd_start)
+        diag_df["Target Trad Gap At RMD Start"] = float(target_gap_at_rmd_start)
         diag_df["Selection Mode Detail"] = selection_mode
-        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, a stricter post-RMD hurdle, and optional target-Trad pressure."
+        diag_df["Bracket Solver Note"] = "Non-ACA years use full-range BETR search with delta-based current cost, projected future marginal-rate comparison, highest-valid-conversion winner selection, a stricter post-RMD hurdle, and a stronger target-Traditional-IRA bracket-fill lane before RMD start."
     return round(selected_conversion, 2), selected_row, diag_df
 
 
@@ -3175,9 +3251,14 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     "Delta Total Tax",
                     "Whole Conversion Effective Cost Rate",
                     "Target Trad Pressure Conversion",
+                    "Target Trad Highest Bracket Fill Conversion",
                     "Target Trad Highest Override Conversion",
                     "Within Planner Override Cap",
                     "Selection Mode Detail",
+                    "Required Annual Conversion To Target",
+                    "Projected Trad At RMD Start (No Extra Conv)",
+                    "Target Trad Gap At RMD Start",
+                    "Target Lane Active",
                 ]:
                     if k in selected_diag:
                         chosen_row[k] = selected_diag[k]
@@ -4499,6 +4580,7 @@ def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, s
     st.session_state["spouse_claim_age"] = int(spouse_age)
     st.session_state["selected_recommendation_strategy"] = f"{int(owner_age)}/{int(spouse_age)}"
     st.session_state["selected_recommendation_source"] = source_label
+    st.session_state["suppress_quick_recommendation_stale_once"] = True
     if profile_name:
         st.session_state["planning_profile"] = profile_name
         apply_break_even_governor_profile_presets(profile_name, st.session_state.get("trad", 0.0), force=True)
@@ -4832,7 +4914,12 @@ def render_conversion_page() -> None:
 
     quick_result = st.session_state.get("quick_strategy_recommendation_result")
     if quick_result is not None:
-        render_stale_warning("quick_strategy_recommendation", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile}, "Quick recommendation results")
+        quick_inputs_snapshot = {**inputs, "max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile}
+        if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
+            st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
+            st.session_state["suppress_quick_recommendation_stale_once"] = False
+        else:
+            render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
         st.subheader("Strategy Summary")
         st.dataframe(
             quick_result["summary_df"].style.format({
