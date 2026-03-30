@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v26-profile-score-breakdown"
+APP_VERSION = "v33-ss-preference-checkbox"
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -116,6 +116,9 @@ DEFAULT_APP_STATE = {
     "spouse_ss_base": 0.0,
     "state_tax_rate": 0.0399,
     "planning_profile": "Balanced",
+    "preference_maximize_social_security": False,
+    "preference_minimize_trad_ira_for_heirs": False,
+    "preference_income_stability_focus": False,
     "step_size": 1000.0,
     "integrity_mode": False,
     "strict_repeatability_check": False,
@@ -137,7 +140,7 @@ PAGE_STATE_KEY_PREFIXES = {
         "no_go_", "optimizer_", "owner_", "post_aca_", "primary_aca_end_year", "retirement_smile_",
         "rmd_era_", "roth", "run_ss_optimizer_toggle", "slow_go_", "spending_inflation_rate_pct",
         "spouse_", "state_tax_rate", "step_size", "integrity_mode", "strict_repeatability_check", "target_trad_",
-        "trad", "validation_tolerance"
+        "trad", "validation_tolerance", "preference_"
     ],
 }
 
@@ -302,6 +305,8 @@ QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
 
 HEIR_EFFECTIVE_TRAD_TAX_RATE = 0.40
 TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE = 0.32
+SOCIAL_SECURITY_PRESENT_VALUE_MULTIPLIER = 22.0
+SURVIVOR_SOCIAL_SECURITY_PRESENT_VALUE_MULTIPLIER = 12.0
 
 
 def normalize_series(values):
@@ -330,6 +335,33 @@ def qualitative_bucket(norm_value: float, reverse: bool = False) -> str:
 
 def get_profile_summary(profile_name: str) -> dict:
     return PROFILE_PRESETS.get(profile_name, PROFILE_PRESETS["Balanced"])
+
+
+def extract_scoring_preferences(source: dict | None) -> dict:
+    source = source or {}
+    return {
+        "maximize_social_security": bool(source.get("preference_maximize_social_security", False)),
+        "minimize_trad_ira_for_heirs": bool(source.get("preference_minimize_trad_ira_for_heirs", False)),
+        "income_stability_focus": bool(source.get("preference_income_stability_focus", False)),
+    }
+
+
+def describe_active_scoring_preferences(preferences: dict) -> str:
+    labels = []
+    if preferences.get("maximize_social_security"):
+        labels.append("Maximize Social Security")
+    if preferences.get("minimize_trad_ira_for_heirs"):
+        labels.append("Minimize Traditional IRA for heirs")
+    if preferences.get("income_stability_focus"):
+        labels.append("Income stability focus")
+    return ", ".join(labels) if labels else "None"
+
+
+def estimate_social_security_present_value(final_household_ss_income: float, survivor_ss_income: float) -> float:
+    return (
+        max(0.0, float(final_household_ss_income)) * SOCIAL_SECURITY_PRESENT_VALUE_MULTIPLIER
+        + max(0.0, float(survivor_ss_income)) * SURVIVOR_SOCIAL_SECURITY_PRESENT_VALUE_MULTIPLIER
+    )
 
 
 def get_break_even_governor_presets(profile_name: str, current_trad_balance: float) -> dict:
@@ -424,6 +456,7 @@ def build_strategy_metrics(run_result: dict) -> dict:
     effective_legacy_value = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - HEIR_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
     stability_value = final_household_ss + 0.5 * survivor_ss
+    social_security_present_value = estimate_social_security_present_value(final_household_ss, survivor_ss)
     risk_value = -min_liquid_assets
     return {
         "final_net_worth": float(run_result["final_net_worth"]),
@@ -438,10 +471,11 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "risk_value": float(risk_value),
         "final_household_ss_income": float(final_household_ss),
         "survivor_ss_income": float(survivor_ss),
+        "social_security_present_value": float(social_security_present_value),
     }
 
 
-def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5) -> dict[str, pd.DataFrame]:
+def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None) -> dict[str, pd.DataFrame]:
     if not results_rows:
         return {}
 
@@ -463,6 +497,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
             "risk_value": float(row.get("Risk Value", 0.0)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
             "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
             "Total Conversions": float(row.get("Total Conversions", 0.0)),
             "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
@@ -477,7 +512,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
 
     shortlists = {}
     for profile_name in PROFILE_PRESETS.keys():
-        ranked = score_strategy_metrics(metric_rows, profile_name)
+        ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
         rows = []
         for idx, ranked_row in enumerate(ranked[:top_n], start=1):
             rows.append({
@@ -514,8 +549,9 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
     return shortlists
 
 
-def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[dict]:
+def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferences: dict | None = None) -> list[dict]:
     weights = get_profile_summary(profile_name)["weights"]
+    preferences = preferences or {}
 
     nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
     base_legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
@@ -525,6 +561,7 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
     stability_norm = normalize_series([m["stability_value"] for m in metrics_list])
     ss_income_norm = normalize_series([m["final_household_ss_income"] for m in metrics_list])
     survivor_ss_norm = normalize_series([m["survivor_ss_income"] for m in metrics_list])
+    ss_present_value_norm = normalize_series([float(m.get("social_security_present_value", estimate_social_security_present_value(m["final_household_ss_income"], m["survivor_ss_income"]))) for m in metrics_list])
     risk_norm = normalize_series([m["risk_value"] for m in metrics_list])
     drag_norm = normalize_series([float(m.get("Total Government Drag", 0.0)) for m in metrics_list])
     trad_share_values = []
@@ -563,6 +600,23 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
             risk_penalty = risk_norm[i] ** 1.10
             positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
             negative_score = (weights["trad"] * trad_penalty) + (weights["risk"] * risk_penalty) + (weights.get("drag", 0.0) * drag_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty)
+
+        preference_bonus = 0.0
+        preference_penalty = 0.0
+        if preferences.get("maximize_social_security"):
+            ss_bonus = 0.14 * (ss_present_value_norm[i] ** 1.15)
+            if profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
+                ss_bonus *= 1.15
+            preference_bonus += ss_bonus
+        if preferences.get("income_stability_focus"):
+            stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
+            preference_bonus += stability_bonus
+        if preferences.get("minimize_trad_ira_for_heirs"):
+            heir_structure_penalty = 0.12 * (trad_share_norm[i] ** 1.80) + 0.12 * (heir_tax_drag_norm[i] ** 1.20)
+            preference_penalty += heir_structure_penalty
+
+        positive_score += preference_bonus
+        negative_score += preference_penalty
         score = positive_score - negative_score
 
         scored.append({
@@ -579,6 +633,10 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
             "trad_share_component": float(weights.get("trad_share", 0.0) * trad_share_penalty),
             "risk_component": float(weights["risk"] * risk_penalty),
             "heir_tax_component": float((0.90 * weights["trad"] * heir_tax_penalty) if profile_name == "Legacy Focused" else 0.0),
+            "ss_value_component": float((0.14 * (ss_present_value_norm[i] ** 1.15) * (1.15 if (preferences.get("maximize_social_security") and profile_name in ("Spend With Confidence", "Tax-Efficient Stability")) else 1.0)) if preferences.get("maximize_social_security") else 0.0),
+            "preference_bonus_component": float(preference_bonus),
+            "preference_penalty_component": float(preference_penalty),
+            "social_security_present_value": float(metrics.get("social_security_present_value", estimate_social_security_present_value(metrics["final_household_ss_income"], metrics["survivor_ss_income"]))),
             "positive_score": float(positive_score),
             "negative_score": float(negative_score),
             "ending_traditional_ira_share": float(trad_share_values[i]),
@@ -713,7 +771,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
             errors.append(f"{owner_age}/{spouse_age}: {exc}")
     if not metric_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
-    ranked = score_strategy_metrics(metric_rows, profile_name)
+    ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
     summary_rows = []
     for row in ranked:
         summary_rows.append({
@@ -3573,6 +3631,7 @@ def run_ss_optimizer(
                 "Risk Value": float(metrics["risk_value"]),
                 "Final Household SS Income": float(metrics["final_household_ss_income"]),
                 "Survivor SS Income": float(metrics["survivor_ss_income"]),
+                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
                 "Total Federal Tax": float(run_result["total_federal_taxes"]),
                 "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
                 "Total ACA Cost": float(run_result["total_aca_cost"]),
@@ -3601,7 +3660,7 @@ def run_ss_optimizer(
 
         top_10_df = results_df.head(10).copy()
         top_3 = results_df.head(3).copy()
-        profile_shortlists = build_profile_shortlists_from_optimizer_rows(results)
+        profile_shortlists = build_profile_shortlists_from_optimizer_rows(results, preferences=extract_scoring_preferences(inputs))
 
         compare_metrics = [
             ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
@@ -5034,6 +5093,9 @@ def render_shared_household_inputs() -> dict:
         "earned_income_end_year": earned_income_end_year,
         "primary_aca_end_year": primary_aca_end_year,
         "spouse_aca_end_year": spouse_aca_end_year,
+        "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
+        "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
+        "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
     }
     return inputs
 
@@ -5122,19 +5184,23 @@ def render_conversion_page() -> None:
             key="target_trad_override_enabled",
         )
     with ov2:
-        target_trad_override_max_rate_pct = st.number_input(
+        current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
+        display_value = st.text_input(
             "Target Traditional IRA Override Max All-In Rate",
-            min_value=0.0,
-            max_value=100.0,
-            value=float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0,
-            step=1.0,
-            format="%.0f",
-            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override.",
+            value=f"{current_override_pct:.0f}%",
+            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
             key="target_trad_override_max_rate_pct_display",
         )
-        st.caption(f"Current value: {float(target_trad_override_max_rate_pct):.0f}%")
+        cleaned_display_value = str(display_value).strip().replace("%", "")
+        try:
+            target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
+        except Exception:
+            target_trad_override_max_rate_pct = current_override_pct
         target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
         st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
+        normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
+        if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
+            st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
 
     br1, br2 = st.columns(2)
     with br1:
@@ -5169,6 +5235,16 @@ def render_conversion_page() -> None:
         f"Tradeoff to expect: {profile_summary['tradeoff']}"
     )
 
+    st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
+    pref1, pref2, pref3 = st.columns(3)
+    with pref1:
+        st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
+    with pref2:
+        st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
+    with pref3:
+        st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+    st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(extract_scoring_preferences(st.session_state))}")
+
     rec_col1, rec_col2 = st.columns([1, 2])
     with rec_col1:
         if st.button("Run Quick Strategy Recommendation", use_container_width=True):
@@ -5199,6 +5275,7 @@ def render_conversion_page() -> None:
         st.caption("These strategy rows are produced by the same Break-Even Governor engine used below, with the selected planning-profile presets applied before the quick run. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
         if quick_result.get("applied_preset_note"):
             st.caption(quick_result["applied_preset_note"])
+        st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
         st.dataframe(
             quick_result["summary_df"].style.format({
                 "Score": "{:.1f}",
