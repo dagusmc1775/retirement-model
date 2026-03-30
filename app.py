@@ -5128,10 +5128,11 @@ def render_conversion_page() -> None:
             max_value=100.0,
             value=float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0,
             step=1.0,
-            format="%.0f%%",
+            format="%.0f",
             help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override.",
             key="target_trad_override_max_rate_pct_display",
         )
+        st.caption(f"Current value: {float(target_trad_override_max_rate_pct):.0f}%")
         target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
         st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
 
