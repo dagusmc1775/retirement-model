@@ -740,7 +740,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
         "data_source": "break_even_governor",
-        "applied_preset_note": preset.get("preset_note", ""),
+        "applied_preset_note": "",
     }
 
 
@@ -3686,7 +3686,7 @@ def run_ss_optimizer(
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
             "profile_name": profile_name,
-            "applied_preset_note": preset.get("preset_note", ""),
+            "applied_preset_note": "",
             "interrupted_partial_df": None,
             "completed": True,
             "progress_index": total_combos,
