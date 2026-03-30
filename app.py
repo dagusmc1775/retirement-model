@@ -801,10 +801,17 @@ def collect_scenario_state() -> dict:
     return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in SCENARIO_STATE_KEYS}
 
 
+def sync_widget_state_from_canonical_state() -> None:
+    """Keep UI-only widget keys aligned with the canonical saved scenario values."""
+    if "target_trad_override_max_rate" in st.session_state:
+        st.session_state["target_trad_override_max_rate_pct_display"] = float(st.session_state.get("target_trad_override_max_rate", 0.0)) * 100.0
+
+
 def apply_scenario_state(state: dict) -> None:
     ensure_default_state()
     for key in SCENARIO_STATE_KEYS:
         st.session_state[key] = copy.deepcopy(state.get(key, DEFAULT_APP_STATE[key]))
+    sync_widget_state_from_canonical_state()
 
 
 def reset_scenario_state() -> None:
@@ -3500,9 +3507,9 @@ def run_ss_optimizer(
     total_combos = len(combos)
 
     # Freeze a clean snapshot for optimizer runs and force the optimizer path into fast mode.
-    # The optimizer is a wrapper over the already-tested governor, so the highest-value trust
-    # safeguard here is fresh scenario inputs per combo rather than heavy integrity checks.
-    base_snapshot, preset = build_profile_adjusted_inputs(profile_name, inputs)
+    # This 81-combination scan is intentionally profile-neutral at the engine level so the
+    # resulting raw combo table can be rescored independently for every planning profile.
+    base_snapshot = copy.deepcopy(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
 
@@ -3540,7 +3547,8 @@ def run_ss_optimizer(
                     "best_validation": None,
                     "best_rerun_summary": None,
                     "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
-                    "profile_name": profile_name,
+                    "profile_name": None,
+                    "optimizer_is_profile_neutral": True,
                     "interrupted_partial_df": interrupted_df.copy(),
                     "completed": False,
                     "progress_index": combo_index,
@@ -3657,6 +3665,8 @@ def run_ss_optimizer(
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "profile_name": None,
+            "optimizer_is_profile_neutral": True,
             "completed": True,
             "progress_index": total_combos,
             "total_combos": total_combos,
@@ -3694,10 +3704,8 @@ def run_ss_optimizer(
 def render_ss_optimizer_results(result: dict):
     st.subheader("Social Security Optimizer Summary")
     st.write(f"Scoring lambda (Trad IRA penalty): {result['trad_balance_penalty_lambda']:.2f}")
-    if result.get("profile_name"):
-        st.write(f"Planning profile used: {result['profile_name']}")
-    if result.get("applied_preset_note"):
-        st.caption(result["applied_preset_note"])
+    if result.get("optimizer_is_profile_neutral", False):
+        st.caption("The full 81-combination optimizer run is profile-neutral at the engine level. The Top 5 profile tabs below rescore that same 81-row result set independently for each planning profile using the same scoring logic as Quick Strategy Recommendation.")
     if result["best_result"] is not None:
         best = result["best_result"]
         st.write(f"Best SS Ages: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
@@ -3721,6 +3729,7 @@ def render_ss_optimizer_results(result: dict):
         return
 
     st.subheader("Top 10 SS Strategies")
+    st.caption("This table is the raw optimizer ranking sorted by Final Net Worth minus the Traditional IRA penalty lambda. It is not a planning-profile ranking.")
     st.dataframe(
         result["top_10_df"].style.format({
             "Final Net Worth": "${:,.0f}",
@@ -5309,9 +5318,10 @@ def render_conversion_page() -> None:
                     start_index=0,
                     existing_results=[],
                 )
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
                 st.rerun()
         with b2:
             resume_disabled = not partial_available
@@ -5327,9 +5337,10 @@ def render_conversion_page() -> None:
                     existing_results=partial_results,
                     profile_name=planning_profile,
                 )
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", {**inputs, "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda})
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
                 st.rerun()
         with b3:
             reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
@@ -5340,8 +5351,8 @@ def render_conversion_page() -> None:
         last_result = get_current_result_payload("ss_optimizer_last_result")
         if last_result is not None:
             if last_result.get("completed", False):
-                optimizer_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-                optimizer_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "planning_profile": planning_profile})
+                optimizer_inputs_snapshot = copy.deepcopy(inputs)
+                optimizer_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True})
                 render_stale_warning("ss_optimizer", optimizer_inputs_snapshot, "SS optimizer results")
             render_ss_optimizer_results(last_result)
     else:
