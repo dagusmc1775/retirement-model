@@ -357,6 +357,85 @@ def describe_active_scoring_preferences(preferences: dict) -> str:
     return ", ".join(labels) if labels else "None"
 
 
+def get_profile_default_tilts(profile_name: str) -> list[str]:
+    default_map = {
+        "Balanced": ["moderate income stability", "moderate tax efficiency", "moderate total wealth"],
+        "Growth": ["maximum long-term wealth", "lighter Social Security emphasis", "lower penalty on Traditional IRA at death"],
+        "Tax-Efficient Stability": ["lower lifetime tax drag", "lower Traditional IRA burden", "stronger late-life stability"],
+        "Legacy Focused": ["higher after-tax inheritance", "smaller Traditional IRA for heirs", "cleaner inheritance structure"],
+        "Spend With Confidence": ["higher guaranteed income", "income stability", "delayed Social Security"],
+    }
+    return default_map.get(profile_name, default_map["Balanced"])
+
+
+def build_strategy_selection_summary(profile_name: str, preferences: dict) -> dict:
+    defaults = get_profile_default_tilts(profile_name)
+    modifier_lines = []
+    note_lines = []
+
+    if preferences.get("maximize_social_security"):
+        modifier_lines.append("Maximize Social Security")
+        if profile_name == "Growth":
+            note_lines.append("This adds a delayed-Social-Security tilt on top of Growth. It does not turn Growth off, but it can pull rankings away from earlier-claim strategies.")
+        elif profile_name in {"Spend With Confidence", "Tax-Efficient Stability"}:
+            note_lines.append("This reinforces a trait the selected profile already tends to favor.")
+    if preferences.get("minimize_trad_ira_for_heirs"):
+        modifier_lines.append("Minimize Traditional IRA for heirs")
+        if profile_name == "Legacy Focused":
+            note_lines.append("This reinforces Legacy Focused and makes the ranking lean harder toward smaller Traditional IRA balances and lower heir tax drag.")
+    if preferences.get("income_stability_focus"):
+        modifier_lines.append("Income stability focus")
+        if profile_name in {"Balanced", "Spend With Confidence"}:
+            note_lines.append("This reinforces the profile's natural stability bias.")
+
+    if not modifier_lines:
+        modifier_lines = ["No extra modifiers selected"]
+    if not note_lines:
+        note_lines = ["Your profile sets the base ranking logic. Modifiers act as nudges on top of that base profile rather than replacing it."]
+
+    return {
+        "title": f"Current ranking lens: {profile_name}",
+        "defaults": defaults,
+        "modifiers": modifier_lines,
+        "notes": note_lines,
+    }
+
+
+def scoring_preferences_match(current_profile: str, current_preferences: dict, prior_profile: str | None, prior_preferences: dict | None) -> bool:
+    return str(current_profile or "") == str(prior_profile or "") and dict(current_preferences or {}) == dict(prior_preferences or {})
+
+
+def render_optimizer_status_panel(inputs: dict, max_conversion: float, step_size: float, trad_balance_penalty_lambda: float, planning_profile: str, current_preferences: dict) -> None:
+    last_result = get_current_result_payload("ss_optimizer_last_result")
+    if last_result is None:
+        st.info("No 81-combination Social Security optimizer result is currently stored in this session. Run the optimizer after setting your assumptions if you want a fresh strategy universe.")
+        return
+
+    optimizer_inputs_snapshot = copy.deepcopy(inputs)
+    optimizer_inputs_snapshot.update({
+        "max_conversion": max_conversion,
+        "step_size": step_size,
+        "trad_balance_penalty_lambda": trad_balance_penalty_lambda,
+        "optimizer_is_profile_neutral": True,
+    })
+    facts_changed = inputs_are_stale("ss_optimizer", optimizer_inputs_snapshot)
+    prior_preferences = last_result.get("scoring_preferences_snapshot", {})
+    prior_profile = last_result.get("planning_profile_snapshot")
+    ranking_changed = not scoring_preferences_match(planning_profile, current_preferences, prior_profile, prior_preferences)
+
+    if facts_changed:
+        st.error("Scenario facts changed since the last 81-combination run. Re-run the optimizer to regenerate the strategy universe before trusting the rankings below.")
+    elif ranking_changed:
+        st.warning("Your ranking lens changed since the last optimizer scoring snapshot. Use 'Re-rank Existing 81 Results' to refresh the Top 5 profile shortlists without rerunning the 81-combination engine.")
+    else:
+        st.success("Scenario facts and ranking preferences match the last 81-combination result. You can review the current rankings without rerunning anything.")
+
+    cols = st.columns(3)
+    cols[0].metric("Scenario facts", "Changed" if facts_changed else "Up to date")
+    cols[1].metric("Ranking lens", "Changed" if ranking_changed else "Up to date")
+    cols[2].metric("Last scoring profile", str(prior_profile or planning_profile))
+
+
 def rerank_existing_optimizer_result(result_payload: dict, preferences: dict | None = None) -> dict:
     """
     Rebuild profile shortlists from an already-computed 81-row optimizer result set.
@@ -5274,7 +5353,20 @@ def render_conversion_page() -> None:
         st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
     with pref3:
         st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
-    st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(extract_scoring_preferences(st.session_state))}")
+    current_preferences = extract_scoring_preferences(st.session_state)
+    st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
+    selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
+    with st.container(border=True):
+        st.markdown(f"**{selection_summary['title']}**")
+        st.caption("Base profile tendencies")
+        for item in selection_summary["defaults"]:
+            st.write(f"- {item}")
+        st.caption("Active modifier nudges")
+        for item in selection_summary["modifiers"]:
+            st.write(f"- {item}")
+        st.caption("How this combination behaves")
+        for item in selection_summary["notes"]:
+            st.write(f"- {item}")
 
     rec_col1, rec_col2 = st.columns([1, 2])
     with rec_col1:
@@ -5440,6 +5532,7 @@ def render_conversion_page() -> None:
                     existing_results=[],
                 )
                 optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
                 optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
@@ -5460,6 +5553,7 @@ def render_conversion_page() -> None:
                     profile_name=planning_profile,
                 )
                 optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
                 optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
@@ -5473,6 +5567,7 @@ def render_conversion_page() -> None:
                     last_result_for_rerank,
                     preferences=extract_scoring_preferences(st.session_state),
                 )
+                reranked["planning_profile_snapshot"] = planning_profile
                 optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 st.rerun()
@@ -5485,15 +5580,10 @@ def render_conversion_page() -> None:
         last_result = get_current_result_payload("ss_optimizer_last_result")
         if last_result is not None:
             if last_result.get("completed", False):
-                optimizer_inputs_snapshot = copy.deepcopy(inputs)
-                optimizer_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True})
-                render_stale_warning("ss_optimizer", optimizer_inputs_snapshot, "SS optimizer results")
-                current_preferences = extract_scoring_preferences(st.session_state)
-                prior_preferences = last_result.get("scoring_preferences_snapshot", {})
-                if current_preferences != prior_preferences:
-                    st.warning("Your ranking preferences have changed since the last 81-combination run. Use 'Re-rank Existing 81 Results' to refresh the Top 5 profile tabs without rerunning the engine.")
-                else:
-                    st.caption(f"Profile shortlist preferences currently applied: {describe_active_scoring_preferences(current_preferences)}")
+                st.caption(
+                    f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
+                    f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
+                )
             render_ss_optimizer_results(last_result)
     else:
         st.header("Flat Strategy Inputs")
