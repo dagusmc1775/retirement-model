@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v25-profile-shortlists"
+APP_VERSION = "v26-profile-score-breakdown"
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -247,7 +247,7 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
 
 PROFILE_PRESETS = {
     "Balanced": {
-        "weights": {"nw": 0.28, "legacy": 0.16, "trad": 0.24, "stability": 0.20, "risk": 0.12},
+        "weights": {"nw": 0.24, "legacy": 0.14, "trad": 0.18, "stability": 0.18, "risk": 0.10, "drag": 0.08, "trad_share": 0.08},
         "description": "You are balancing growth, tax efficiency, and long-term stability.",
         "bullets": [
             "avoid extreme strategies in either direction",
@@ -257,7 +257,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may not produce the single highest projected net worth, but it is designed to be more well-rounded.",
     },
     "Growth": {
-        "weights": {"nw": 0.52, "legacy": 0.10, "trad": 0.10, "stability": 0.13, "risk": 0.15},
+        "weights": {"nw": 0.52, "legacy": 0.10, "trad": 0.06, "stability": 0.12, "risk": 0.12, "drag": 0.04, "trad_share": 0.04},
         "description": "You are prioritizing maximum projected long-term wealth.",
         "bullets": [
             "favor strategies that keep more assets invested",
@@ -267,7 +267,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may increase upside, but it can also increase future tax exposure and market dependence.",
     },
     "Tax-Efficient Stability": {
-        "weights": {"nw": 0.20, "legacy": 0.22, "trad": 0.33, "stability": 0.20, "risk": 0.05},
+        "weights": {"nw": 0.10, "legacy": 0.20, "trad": 0.34, "stability": 0.14, "risk": 0.04, "drag": 0.22, "trad_share": 0.20},
         "description": "You are prioritizing tax efficiency, lower Traditional IRA burden, and more stable later-life income.",
         "bullets": [
             "favor strategies that improve Roth conversion opportunities",
@@ -277,7 +277,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
     },
     "Legacy Focused": {
-        "weights": {"nw": 0.12, "legacy": 0.33, "trad": 0.38, "stability": 0.12, "risk": 0.05},
+        "weights": {"nw": 0.06, "legacy": 0.34, "trad": 0.40, "stability": 0.08, "risk": 0.04, "drag": 0.10, "trad_share": 0.28},
         "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
         "bullets": [
             "favor more tax-efficient assets at death",
@@ -287,7 +287,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may reduce maximum projected wealth somewhat, but it can improve after-tax inheritance value.",
     },
     "Spend With Confidence": {
-        "weights": {"nw": 0.15, "legacy": 0.10, "trad": 0.15, "stability": 0.35, "risk": 0.25},
+        "weights": {"nw": 0.10, "legacy": 0.08, "trad": 0.14, "stability": 0.34, "risk": 0.20, "drag": 0.06, "trad_share": 0.06},
         "description": "You are prioritizing confidence, flexibility, and the ability to enjoy retirement spending safely.",
         "bullets": [
             "place more value on reliable income and stability",
@@ -480,6 +480,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Net Worth": float(ranked_row["final_net_worth"]),
                 "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
                 "Trad IRA @ End": float(ranked_row["ending_traditional_ira_balance"]),
+                "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
                 "Roth @ End": float(ranked_row["ending_roth_balance"]),
                 "Brokerage @ End": float(ranked_row["ending_brokerage_balance"]),
                 "Stability": ranked_row["stability_label"],
@@ -489,6 +490,13 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
                 "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
                 "First IRMAA Year": ranked_row.get("First IRMAA Year"),
+                "NW Score +": float(ranked_row.get("nw_component", 0.0) * 100.0),
+                "Legacy Score +": float(ranked_row.get("legacy_component", 0.0) * 100.0),
+                "Stability Score +": float(ranked_row.get("stability_component", 0.0) * 100.0),
+                "Trad Penalty -": float(ranked_row.get("trad_component", 0.0) * 100.0),
+                "Trad Share Penalty -": float(ranked_row.get("trad_share_component", 0.0) * 100.0),
+                "Gov Drag Penalty -": float(ranked_row.get("drag_component", 0.0) * 100.0),
+                "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
             })
         shortlists[profile_name] = pd.DataFrame(rows)
     return shortlists
@@ -504,22 +512,41 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
     ss_income_norm = normalize_series([m["final_household_ss_income"] for m in metrics_list])
     survivor_ss_norm = normalize_series([m["survivor_ss_income"] for m in metrics_list])
     risk_norm = normalize_series([m["risk_value"] for m in metrics_list])
+    drag_norm = normalize_series([float(m.get("Total Government Drag", 0.0)) for m in metrics_list])
+    trad_share_values = []
+    for m in metrics_list:
+        end_total = max(
+            1.0,
+            float(m.get("ending_traditional_ira_balance", 0.0))
+            + float(m.get("ending_roth_balance", 0.0))
+            + float(m.get("ending_brokerage_balance", 0.0))
+            + float(m.get("ending_cash_balance", 0.0)),
+        )
+        trad_share_values.append(float(m.get("ending_traditional_ira_balance", 0.0)) / end_total)
+    trad_share_norm = normalize_series(trad_share_values)
 
     scored = []
     for i, metrics in enumerate(metrics_list):
-        nw_adjusted = nw_norm[i] ** 0.7
-        legacy_adjusted = legacy_norm[i]
-        trad_penalty = trad_norm[i] ** 1.5
+        nw_adjusted = nw_norm[i] ** 0.72
+        legacy_adjusted = legacy_norm[i] ** 1.05
+        trad_penalty = trad_norm[i] ** 1.85
+        drag_penalty = drag_norm[i] ** 1.20
+        trad_share_penalty = trad_share_norm[i] ** 1.65
         stability_adjusted = 0.50 * (stability_norm[i] ** 1.35) + 0.35 * (ss_income_norm[i] ** 1.35) + 0.15 * (survivor_ss_norm[i] ** 1.20)
-        risk_penalty = risk_norm[i]
+        risk_penalty = risk_norm[i] ** 1.10
 
-        score = (
+        positive_score = (
             weights["nw"] * nw_adjusted
             + weights["legacy"] * legacy_adjusted
-            - weights["trad"] * trad_penalty
             + weights["stability"] * stability_adjusted
-            - weights["risk"] * risk_penalty
         )
+        negative_score = (
+            weights["trad"] * trad_penalty
+            + weights["risk"] * risk_penalty
+            + weights.get("drag", 0.0) * drag_penalty
+            + weights.get("trad_share", 0.0) * trad_share_penalty
+        )
+        score = positive_score - negative_score
 
         scored.append({
             **metrics,
@@ -527,11 +554,16 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
             "score_100": float(score * 100.0),
             "stability_label": qualitative_bucket(stability_adjusted),
             "risk_label": qualitative_bucket(risk_penalty, reverse=True),
-            "nw_component": float(nw_adjusted),
-            "legacy_component": float(legacy_adjusted),
-            "trad_component": float(trad_penalty),
-            "stability_component": float(stability_adjusted),
-            "risk_component": float(risk_penalty),
+            "nw_component": float(weights["nw"] * nw_adjusted),
+            "legacy_component": float(weights["legacy"] * legacy_adjusted),
+            "stability_component": float(weights["stability"] * stability_adjusted),
+            "trad_component": float(weights["trad"] * trad_penalty),
+            "drag_component": float(weights.get("drag", 0.0) * drag_penalty),
+            "trad_share_component": float(weights.get("trad_share", 0.0) * trad_share_penalty),
+            "risk_component": float(weights["risk"] * risk_penalty),
+            "positive_score": float(positive_score),
+            "negative_score": float(negative_score),
+            "ending_traditional_ira_share": float(trad_share_values[i]),
         })
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
@@ -3712,18 +3744,27 @@ def render_ss_optimizer_results(result: dict):
                 if shortlist_df.empty:
                     st.info("No shortlist available for this profile yet.")
                     continue
+                st.caption("Score breakdown columns show which forces are helping or hurting each strategy for this profile. Positive columns help the score. Penalty columns subtract from it.")
                 st.dataframe(
                     shortlist_df.style.format({
                         "Score": "{:.2f}",
                         "Net Worth": "${:,.0f}",
                         "After-Tax Legacy": "${:,.0f}",
                         "Trad IRA @ End": "${:,.0f}",
+                        "Traditional IRA Share @ End": "{:.1%}",
                         "Roth @ End": "${:,.0f}",
                         "Brokerage @ End": "${:,.0f}",
                         "Final Household SS Income": "${:,.0f}",
                         "Survivor SS Income": "${:,.0f}",
                         "Total Government Drag": "${:,.0f}",
                         "Total Conversions": "${:,.0f}",
+                        "NW Score +": "{:.2f}",
+                        "Legacy Score +": "{:.2f}",
+                        "Stability Score +": "{:.2f}",
+                        "Trad Penalty -": "{:.2f}",
+                        "Trad Share Penalty -": "{:.2f}",
+                        "Gov Drag Penalty -": "{:.2f}",
+                        "Risk Penalty -": "{:.2f}",
                     }),
                     use_container_width=True,
                 )
