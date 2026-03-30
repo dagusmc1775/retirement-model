@@ -862,7 +862,8 @@ def collect_scenario_state() -> dict:
 def sync_widget_state_from_canonical_state() -> None:
     """Keep UI-only widget keys aligned with the canonical saved scenario values."""
     if "target_trad_override_max_rate" in st.session_state:
-        st.session_state["target_trad_override_max_rate_pct_display"] = float(st.session_state.get("target_trad_override_max_rate", 0.0)) * 100.0
+        pct = float(st.session_state.get("target_trad_override_max_rate", 0.0)) * 100.0
+        st.session_state["target_trad_override_max_rate_pct_display"] = f"{pct:.0f}%"
 
 
 def apply_scenario_state(state: dict) -> None:
@@ -5185,6 +5186,10 @@ def render_conversion_page() -> None:
         )
     with ov2:
         current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
+        existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
+        if not isinstance(existing_override_display, str):
+            existing_override_display = f"{float(existing_override_display):.0f}%"
+            st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
         display_value = st.text_input(
             "Target Traditional IRA Override Max All-In Rate",
             value=f"{current_override_pct:.0f}%",
