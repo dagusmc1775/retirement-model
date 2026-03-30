@@ -224,6 +224,9 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
         "EOY Trad",
         "SOY Roth",
         "EOY Roth",
+        "SOY Brokerage",
+        "EOY Brokerage",
+        "EOY Brokerage Basis",
         "MAGI",
         "Taxable Income",
         "Federal Tax",
@@ -243,6 +246,9 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
         "EOY Trad": "Ending Traditional IRA",
         "SOY Roth": "Starting Roth",
         "EOY Roth": "Ending Roth",
+        "SOY Brokerage": "Starting Brokerage",
+        "EOY Brokerage": "Ending Brokerage",
+        "EOY Brokerage Basis": "Ending Brokerage Basis",
     }
     out = out.rename(columns=rename_map)
     return out
