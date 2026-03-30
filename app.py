@@ -3972,8 +3972,9 @@ def render_ss_optimizer_results(result: dict):
                     use_container_width=True,
                 )
                 top_row = shortlist_df.iloc[0]
+                st.caption("This button loads the selected optimizer shortlist winner into the Governor below. It does not rerun the optimizer.")
                 st.button(
-                    f"Open Break-Even Governor for {top_row['Strategy']} ({profile_name} winner)",
+                    f"Apply {profile_name} winner {top_row['Strategy']} to Governor",
                     key=f"profile_shortlist_open_{profile_name}_{top_row['Strategy']}",
                     on_click=launch_conversion_optimizer_from_strategy,
                     args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", profile_name),
@@ -5253,17 +5254,27 @@ def render_conversion_page() -> None:
             key="cash_sweep_threshold",
         )
     with pol2:
-        state_tax_rate_pct = st.number_input(
-            "State Tax Rate (%)",
-            min_value=0.0,
-            max_value=20.0,
-            value=float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0,
-            step=0.1,
-            format="%.2f",
+        current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
+        existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
+        if not isinstance(existing_state_tax_display, str):
+            existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
+            st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
+        state_tax_display_value = st.text_input(
+            "State Tax Rate",
+            value=f"{current_state_tax_pct:.2f}%",
+            help="Enter the state tax rate as a percent, for example 4.75%.",
             key="state_tax_rate_pct_display",
         )
+        cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
+        try:
+            state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
+        except Exception:
+            state_tax_rate_pct = current_state_tax_pct
         state_tax_rate = state_tax_rate_pct / 100.0
         st.session_state["state_tax_rate"] = state_tax_rate
+        normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
+        if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
+            st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
 
     tg1, tg2 = st.columns(2)
     with tg1:
@@ -5434,9 +5445,10 @@ def render_conversion_page() -> None:
                 st.write(f"- {item}")
         top_ranked_rows = quick_result.get("ranked_rows", [])
         if top_ranked_rows:
-            top_strategy = top_ranked_rows[0]
+            top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
+            st.caption("Quick Strategy and Optimizer picks can differ because they come from different ranking layers. Use the button below to load this quick recommendation into the Governor.")
             st.button(
-                f"Open Break-Even Governor for {top_strategy['Strategy']}",
+                f"Apply Quick Strategy Winner {top_strategy['Strategy']} to Governor",
                 on_click=launch_conversion_optimizer_from_strategy,
                 args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
                 use_container_width=True,
@@ -5507,7 +5519,6 @@ def render_conversion_page() -> None:
     if run_ss_optimizer_toggle:
         total_combos = get_ss_optimizer_combo_count()
         if st.session_state.get("ss_optimizer_running"):
-            # Recover gracefully from stale locks after interrupted runs.
             st.session_state["ss_optimizer_running"] = False
         partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
         progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
@@ -5588,216 +5599,97 @@ def render_conversion_page() -> None:
                 )
             render_ss_optimizer_results(last_result)
     else:
-        st.header("Flat Strategy Inputs")
-        flat_annual_conversion = st.number_input(
-            "Flat Annual Conversion",
-            min_value=0.0,
-            value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
-            step=5000.0,
-            key="annual_conversion",
-            help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
-        )
+        st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
 
-        btn1, btn2 = st.columns(2)
+    st.header("Strategy Execution")
+    st.caption("These sections stay visible so you can always run or review the Break-Even Governor and Flat Strategy without hiding the optimizer.")
 
-        with btn1:
-            if st.button("Run Flat Strategy Test"):
-                flat_inputs = dict(inputs)
-                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
-                result = run_model_fixed(flat_inputs)
-                result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
-                st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
-                mark_result_state("flat_strategy", flat_inputs)
-            flat_result = get_current_result_payload("flat_strategy_last_result")
-            if flat_result is not None:
-                flat_inputs = dict(inputs)
-                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
-                render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
-                render_summary("Flat Strategy Summary", flat_result)
-                st.subheader("Flat Strategy Yearly Results")
-                st.dataframe(flat_result["df"], use_container_width=True)
-
-        with btn2:
-            if st.button("Run Break-Even Governor"):
-                result = run_governor_with_validation(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    integrity_mode=integrity_mode,
-                    tol=validation_tolerance,
-                )
-                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
-                mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
-            result = get_current_result_payload("break_even_last_result")
-            if result is not None:
-                render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
-                render_summary("Break-Even Governor Summary", result)
-                st.subheader("Chosen Year-by-Year Path")
-                path_display_df = build_chosen_path_display_df(result["df"])
-                st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
-                with st.expander("Debug: First Year Raw Data", expanded=False):
-                    try:
-                        if result.get("df") is not None and not result["df"].empty:
-                            first_row_raw = result["df"].iloc[0].to_dict()
-                            st.json(first_row_raw)
-                    except Exception as debug_exc:
-                        st.write(f"Debug panel unavailable: {debug_exc}")
-                if path_display_df is not None and not path_display_df.empty:
-                    fmt = {}
-                    non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
-                    for col in path_display_df.columns:
-                        if col in non_currency_cols:
-                            continue
-                        series = path_display_df[col]
-                        if not pd.api.types.is_numeric_dtype(series):
-                            continue
-                        if "Rate" in col:
-                            fmt[col] = "{:.2%}"
-                        else:
-                            fmt[col] = "${:,.0f}"
-                    st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
-                else:
-                    st.dataframe(result["df"], use_container_width=True)
-                st.subheader("Per-Step Break-Even Testing")
-                st.dataframe(result["decision_df"], use_container_width=True)
-
-
-
-def render_annual_page() -> None:
-    ensure_default_state()
-    st.title("Annual Conversion Calculator")
-    render_top_nav("annual")
-    st.caption("Standalone annual tax cockpit for this-year conversion decisions. No long-term planning inputs live here.")
-
-    st.header("Current-Year Inputs")
-    row1 = st.columns(3)
-    with row1[0]:
-        annual_calc_year = st.number_input(
-            "Tax Year",
-            min_value=START_YEAR,
-            max_value=END_YEAR,
-            value=int(st.session_state.get("annual_calc_year", START_YEAR)),
-            step=1,
-            key="annual_calc_year",
-        )
-        annual_calc_filing_status = st.selectbox(
-            "Filing Status",
-            ANNUAL_FILING_STATUS_OPTIONS,
-            index=0 if st.session_state.get("annual_calc_filing_status", "MFJ") == "MFJ" else 1,
-            key="annual_calc_filing_status",
-        )
-        standard_deduction_default = get_annual_standard_deduction_default(int(annual_calc_year), annual_calc_filing_status)
-        auto_key = "annual_calc_standard_deduction_auto"
-        if auto_key not in st.session_state:
-            st.session_state[auto_key] = True
-        if st.session_state[auto_key]:
-            st.session_state["annual_calc_standard_deduction"] = float(standard_deduction_default)
-        annual_calc_standard_deduction = st.number_input(
-            "Standard Deduction",
-            min_value=0.0,
-            value=float(st.session_state.get("annual_calc_standard_deduction", standard_deduction_default)),
-            step=500.0,
-            key="annual_calc_standard_deduction",
-            on_change=mark_annual_std_deduction_custom_from_input,
-        )
-        cstd1, cstd2 = st.columns([1,1])
-        with cstd1:
-            st.button("Use IRS Default", key="annual_std_use_default", use_container_width=True, on_click=set_annual_std_deduction_default_callback)
-        with cstd2:
-            st.button("Keep Custom", key="annual_std_keep_custom", use_container_width=True, on_click=set_annual_std_deduction_custom_callback)
-    with row1[1]:
-        annual_calc_earned_income = st.number_input("Earned Income", min_value=0.0, value=float(st.session_state.get("annual_calc_earned_income", 0.0)), step=1000.0, key="annual_calc_earned_income")
-        annual_calc_other_income = st.number_input("Other Ordinary Income", min_value=0.0, value=float(st.session_state.get("annual_calc_other_income", 0.0)), step=1000.0, key="annual_calc_other_income")
-        annual_calc_ira_withdrawals = st.number_input("IRA Withdrawals Already Taken", min_value=0.0, value=float(st.session_state.get("annual_calc_ira_withdrawals", 0.0)), step=1000.0, key="annual_calc_ira_withdrawals")
-    with row1[2]:
-        annual_calc_conversions_done = st.number_input("Roth Conversions Already Completed", min_value=0.0, value=float(st.session_state.get("annual_calc_conversions_done", 0.0)), step=1000.0, key="annual_calc_conversions_done")
-        annual_calc_total_ss = st.number_input("Social Security Received", min_value=0.0, value=float(st.session_state.get("annual_calc_total_ss", 0.0)), step=1000.0, key="annual_calc_total_ss")
-        annual_calc_ltcg = st.number_input("LTCG Realized", min_value=0.0, value=float(st.session_state.get("annual_calc_ltcg", 0.0)), step=1000.0, key="annual_calc_ltcg")
-
-    row2 = st.columns(3)
-    with row2[0]:
-        annual_calc_qualified_dividends = st.number_input("Qualified Dividends", min_value=0.0, value=float(st.session_state.get("annual_calc_qualified_dividends", 0.0)), step=1000.0, key="annual_calc_qualified_dividends")
-        annual_calc_target_bracket = st.selectbox(
-            "Target Bracket For Additional Conversion",
-            ANNUAL_TARGET_BRACKET_OPTIONS,
-            index=ANNUAL_TARGET_BRACKET_OPTIONS.index(st.session_state.get("annual_calc_target_bracket", "22%")),
-            key="annual_calc_target_bracket",
-        )
-        annual_calc_income_buffer = st.number_input("Income Safety Buffer ($)", min_value=0.0, value=float(st.session_state.get("annual_calc_income_buffer", 1000.0)), step=500.0, key="annual_calc_income_buffer")
-    with row2[1]:
-        filing_status = annual_calc_filing_status
-        max_aca_lives = 2 if filing_status == "MFJ" else 1
-        max_medicare_lives = 2 if filing_status == "MFJ" else 1
-        annual_calc_aca_lives = st.number_input("ACA-Covered Lives", min_value=0, max_value=max_aca_lives, value=int(min(st.session_state.get("annual_calc_aca_lives", max_aca_lives), max_aca_lives)), step=1, key="annual_calc_aca_lives")
-        annual_calc_medicare_lives = st.number_input("Medicare-Covered Lives", min_value=0, max_value=max_medicare_lives, value=int(min(st.session_state.get("annual_calc_medicare_lives", 0), max_medicare_lives)), step=1, key="annual_calc_medicare_lives")
-        annual_calc_state_tax_rate_pct = st.number_input(
-            "NC State Tax Rate (%)",
-            min_value=0.0,
-            max_value=20.0,
-            value=float(st.session_state.get("annual_calc_state_tax_rate", st.session_state.get("state_tax_rate", 0.0399))) * 100.0,
-            step=0.1,
-            format="%.2f",
-            key="annual_calc_state_tax_rate_pct_display",
-        )
-        annual_calc_state_tax_rate = annual_calc_state_tax_rate_pct / 100.0
-        st.session_state["annual_calc_state_tax_rate"] = annual_calc_state_tax_rate
-    with row2[2]:
-        annual_calc_use_bracket_guardrail = st.checkbox("Use Bracket Guardrail", value=bool(st.session_state.get("annual_calc_use_bracket_guardrail", True)), key="annual_calc_use_bracket_guardrail")
-        annual_calc_use_aca_guardrail = st.checkbox("Use ACA Guardrail", value=bool(st.session_state.get("annual_calc_use_aca_guardrail", True)), key="annual_calc_use_aca_guardrail")
-        annual_calc_use_irmaa_guardrail = st.checkbox("Use IRMAA Guardrail", value=bool(st.session_state.get("annual_calc_use_irmaa_guardrail", True)), key="annual_calc_use_irmaa_guardrail")
-
-    with st.expander("Annual Engine Advanced Settings"):
-        adv1, adv2 = st.columns(2)
-        with adv1:
-            annual_calc_max_additional_conversion = st.number_input(
-                "Max Additional Conversion To Test",
-                min_value=0.0,
-                value=float(st.session_state.get("annual_calc_max_additional_conversion", st.session_state.get("max_conversion", 300000.0))),
-                step=5000.0,
-                key="annual_calc_max_additional_conversion",
-            )
-        with adv2:
-            annual_calc_step_size = st.number_input(
-                "Annual Engine Step Size",
-                min_value=100.0,
-                value=float(st.session_state.get("annual_calc_step_size", 1000.0)),
-                step=100.0,
-                key="annual_calc_step_size",
-                help="Used to scan for the maximum additional conversion that stays under the active guardrails.",
-            )
-
-    st.caption("This page solves for additional Roth conversion from now. It applies Social Security taxation and capital-gain/dividend stacking inside the annual tax calculation.")
-
-    annual_inputs = dict(
-            year=int(annual_calc_year),
-            filing_status=annual_calc_filing_status,
-            earned_income=annual_calc_earned_income,
-            other_ordinary_income=annual_calc_other_income,
-            ira_withdrawals=annual_calc_ira_withdrawals,
-            conversions_done=annual_calc_conversions_done,
-            social_security_received=annual_calc_total_ss,
-            realized_ltcg=annual_calc_ltcg,
-            qualified_dividends=annual_calc_qualified_dividends,
-            standard_deduction=annual_calc_standard_deduction,
-            state_tax_rate=annual_calc_state_tax_rate,
-            aca_covered_lives=int(annual_calc_aca_lives),
-            medicare_covered_lives=int(annual_calc_medicare_lives),
-            target_bracket=annual_calc_target_bracket,
-            safety_buffer=annual_calc_income_buffer,
-            max_additional_conversion=annual_calc_max_additional_conversion,
-            step_size=annual_calc_step_size,
-            use_bracket_guardrail=annual_calc_use_bracket_guardrail,
-            use_aca_guardrail=annual_calc_use_aca_guardrail,
-            use_irmaa_guardrail=annual_calc_use_irmaa_guardrail,
+    flat_annual_conversion = st.number_input(
+        "Flat Annual Conversion",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+        step=5000.0,
+        key="annual_conversion",
+        help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
     )
-    if st.button("Run Annual Conversion Calculator"):
-        annual_result = run_standalone_annual_tax_engine(**annual_inputs)
-        st.session_state["annual_last_result"] = annual_result
-        mark_result_state("annual_calc", annual_inputs)
-    if st.session_state.get("annual_last_result") is not None:
-        render_stale_warning("annual_calc", annual_inputs, "Annual calculator results")
-        render_standalone_annual_tax_results(st.session_state["annual_last_result"])
 
+    btn1, btn2 = st.columns(2)
+
+    with btn1:
+        st.subheader("Flat Strategy")
+        if st.button("Run Flat Strategy Test"):
+            flat_inputs = dict(inputs)
+            flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+            result = run_model_fixed(flat_inputs)
+            result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
+            st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
+            mark_result_state("flat_strategy", flat_inputs)
+        flat_result = get_current_result_payload("flat_strategy_last_result")
+        if flat_result is not None:
+            flat_inputs = dict(inputs)
+            flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+            render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
+            render_summary("Flat Strategy Summary", flat_result)
+            st.subheader("Flat Strategy Yearly Results")
+            st.dataframe(flat_result["df"], use_container_width=True)
+
+    with btn2:
+        st.subheader("Break-Even Governor")
+        st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
+        if st.button("Run Break-Even Governor"):
+            result = run_governor_with_validation(
+                inputs=inputs,
+                max_conversion=max_conversion,
+                step_size=step_size,
+                integrity_mode=integrity_mode,
+                tol=validation_tolerance,
+            )
+            st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
+            mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
+        result = get_current_result_payload("break_even_last_result")
+        if result is not None:
+            render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
+            render_summary("Break-Even Governor Summary", result)
+            st.subheader("Chosen Year-by-Year Path")
+            path_display_df = build_chosen_path_display_df(result["df"])
+            st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
+            with st.expander("Debug: First Year Raw Data", expanded=False):
+                try:
+                    if result.get("df") is not None and not result["df"].empty:
+                        first_row_raw = result["df"].iloc[0].to_dict()
+                        st.json(first_row_raw)
+                except Exception as debug_exc:
+                    st.write(f"Debug panel unavailable: {debug_exc}")
+            if path_display_df is not None and not path_display_df.empty:
+                fmt = {}
+                non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
+                for col in path_display_df.columns:
+                    if col in non_currency_cols:
+                        continue
+                    series = path_display_df[col]
+                    if not pd.api.types.is_numeric_dtype(series):
+                        continue
+                    if "Rate" in col:
+                        fmt[col] = "{:.2%}"
+                    else:
+                        fmt[col] = "${:,.0f}"
+                st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+            st.download_button(
+                "Download Chosen Path (CSV)",
+                data=result["df"].to_csv(index=False),
+                file_name="break_even_governor_chosen_path.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.subheader("Year-by-Year Decision Diagnostics")
+            st.dataframe(result["decision_df"], use_container_width=True)
+            st.download_button(
+                "Download Decision Diagnostics (CSV)",
+                data=result["decision_df"].to_csv(index=False),
+                file_name="break_even_governor_decisions.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
 
 def main() -> None:
