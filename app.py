@@ -3564,6 +3564,8 @@ def run_ss_optimizer(
                 "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
                 "Final Net Worth": float(run_result["final_net_worth"]),
                 "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
                 "Ending Roth Balance": float(metrics["ending_roth_balance"]),
                 "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
                 "Ending Cash Balance": float(metrics["ending_cash_balance"]),
@@ -3781,6 +3783,8 @@ def render_ss_optimizer_results(result: dict):
                         "Score": "{:.2f}",
                         "Net Worth": "${:,.0f}",
                         "After-Tax Legacy": "${:,.0f}",
+                        "Effective Legacy Value": "${:,.0f}",
+                        "Heir Tax Drag": "${:,.0f}",
                         "Trad IRA @ End": "${:,.0f}",
                         "Traditional IRA Share @ End": "{:.1%}",
                         "Roth @ End": "${:,.0f}",
@@ -3795,6 +3799,7 @@ def render_ss_optimizer_results(result: dict):
                         "Trad Penalty -": "{:.2f}",
                         "Trad Share Penalty -": "{:.2f}",
                         "Gov Drag Penalty -": "{:.2f}",
+                        "Heir Tax Penalty -": "{:.2f}",
                         "Risk Penalty -": "{:.2f}",
                     }),
                     use_container_width=True,
@@ -5118,12 +5123,12 @@ def render_conversion_page() -> None:
         )
     with ov2:
         target_trad_override_max_rate_pct = st.number_input(
-            "Target Traditional IRA Override Max All-In Rate (%)",
+            "Target Traditional IRA Override Max All-In Rate",
             min_value=0.0,
             max_value=100.0,
             value=float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0,
             step=1.0,
-            format="%.1f",
+            format="%.0f%%",
             help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override.",
             key="target_trad_override_max_rate_pct_display",
         )
