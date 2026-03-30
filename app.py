@@ -277,7 +277,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
     },
     "Legacy Focused": {
-        "weights": {"nw": 0.06, "legacy": 0.34, "trad": 0.40, "stability": 0.08, "risk": 0.04, "drag": 0.10, "trad_share": 0.28},
+        "weights": {"nw": 0.02, "legacy": 0.74, "trad": 0.18, "stability": 0.04, "risk": 0.02, "drag": 0.06, "trad_share": 0.22},
         "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
         "bullets": [
             "favor more tax-efficient assets at death",
@@ -299,6 +299,9 @@ PROFILE_PRESETS = {
 }
 
 QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
+
+HEIR_EFFECTIVE_TRAD_TAX_RATE = 0.40
+TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE = 0.32
 
 
 def normalize_series(values):
@@ -417,12 +420,16 @@ def build_strategy_metrics(run_result: dict) -> dict:
     final_household_ss = float(last.get("Total SS", ending_owner_ss + ending_spouse_ss))
     survivor_ss = max(ending_owner_ss, ending_spouse_ss)
     min_liquid_assets = float((df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).min())
-    after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + 0.65 * ending_trad
+    after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
+    effective_legacy_value = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - HEIR_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
+    heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
     stability_value = final_household_ss + 0.5 * survivor_ss
     risk_value = -min_liquid_assets
     return {
         "final_net_worth": float(run_result["final_net_worth"]),
         "after_tax_legacy": float(after_tax_legacy),
+        "effective_legacy_value": float(effective_legacy_value),
+        "heir_tax_drag": float(heir_tax_drag),
         "ending_traditional_ira_balance": float(ending_trad),
         "ending_roth_balance": float(ending_roth),
         "ending_brokerage_balance": float(ending_brokerage),
@@ -446,6 +453,8 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
             "Spouse SS Age": int(row["Spouse SS Age"]),
             "final_net_worth": float(row.get("Final Net Worth", 0.0)),
             "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
             "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
             "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
             "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
@@ -479,6 +488,8 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Score": float(ranked_row["score_100"]),
                 "Net Worth": float(ranked_row["final_net_worth"]),
                 "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+                "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+                "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
                 "Trad IRA @ End": float(ranked_row["ending_traditional_ira_balance"]),
                 "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
                 "Roth @ End": float(ranked_row["ending_roth_balance"]),
@@ -496,6 +507,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Trad Penalty -": float(ranked_row.get("trad_component", 0.0) * 100.0),
                 "Trad Share Penalty -": float(ranked_row.get("trad_share_component", 0.0) * 100.0),
                 "Gov Drag Penalty -": float(ranked_row.get("drag_component", 0.0) * 100.0),
+                "Heir Tax Penalty -": float(ranked_row.get("heir_tax_component", 0.0) * 100.0),
                 "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
             })
         shortlists[profile_name] = pd.DataFrame(rows)
@@ -506,7 +518,9 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
     weights = get_profile_summary(profile_name)["weights"]
 
     nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
-    legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
+    base_legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
+    effective_legacy_norm = normalize_series([float(m.get("effective_legacy_value", m["after_tax_legacy"])) for m in metrics_list])
+    heir_tax_drag_norm = normalize_series([float(m.get("heir_tax_drag", 0.0)) for m in metrics_list])
     trad_norm = normalize_series([m["ending_traditional_ira_balance"] for m in metrics_list])
     stability_norm = normalize_series([m["stability_value"] for m in metrics_list])
     ss_income_norm = normalize_series([m["final_household_ss_income"] for m in metrics_list])
@@ -528,24 +542,27 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
     scored = []
     for i, metrics in enumerate(metrics_list):
         nw_adjusted = nw_norm[i] ** 0.72
-        legacy_adjusted = legacy_norm[i] ** 1.05
-        trad_penalty = trad_norm[i] ** 1.85
-        drag_penalty = drag_norm[i] ** 1.20
-        trad_share_penalty = trad_share_norm[i] ** 1.65
-        stability_adjusted = 0.50 * (stability_norm[i] ** 1.35) + 0.35 * (ss_income_norm[i] ** 1.35) + 0.15 * (survivor_ss_norm[i] ** 1.20)
-        risk_penalty = risk_norm[i] ** 1.10
-
-        positive_score = (
-            weights["nw"] * nw_adjusted
-            + weights["legacy"] * legacy_adjusted
-            + weights["stability"] * stability_adjusted
-        )
-        negative_score = (
-            weights["trad"] * trad_penalty
-            + weights["risk"] * risk_penalty
-            + weights.get("drag", 0.0) * drag_penalty
-            + weights.get("trad_share", 0.0) * trad_share_penalty
-        )
+        if profile_name == "Legacy Focused":
+            legacy_signal = 0.80 * effective_legacy_norm[i] + 0.20 * base_legacy_norm[i]
+            legacy_adjusted = legacy_signal ** 1.30
+            trad_penalty = trad_norm[i] ** 1.60
+            drag_penalty = drag_norm[i] ** 1.05
+            trad_share_penalty = trad_share_norm[i] ** 2.10
+            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.45
+            stability_adjusted = 0.55 * (stability_norm[i] ** 1.20) + 0.30 * (ss_income_norm[i] ** 1.20) + 0.15 * (survivor_ss_norm[i] ** 1.10)
+            risk_penalty = risk_norm[i] ** 1.05
+            positive_score = (0.10 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
+            negative_score = (weights["trad"] * trad_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty) + (0.60 * weights.get("drag", 0.0) * drag_penalty) + (0.90 * weights["trad"] * heir_tax_penalty) + (weights["risk"] * risk_penalty)
+        else:
+            legacy_adjusted = base_legacy_norm[i] ** 1.05
+            trad_penalty = trad_norm[i] ** 1.85
+            drag_penalty = drag_norm[i] ** 1.20
+            trad_share_penalty = trad_share_norm[i] ** 1.65
+            heir_tax_penalty = 0.0
+            stability_adjusted = 0.50 * (stability_norm[i] ** 1.35) + 0.35 * (ss_income_norm[i] ** 1.35) + 0.15 * (survivor_ss_norm[i] ** 1.20)
+            risk_penalty = risk_norm[i] ** 1.10
+            positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
+            negative_score = (weights["trad"] * trad_penalty) + (weights["risk"] * risk_penalty) + (weights.get("drag", 0.0) * drag_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty)
         score = positive_score - negative_score
 
         scored.append({
@@ -554,13 +571,14 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[
             "score_100": float(score * 100.0),
             "stability_label": qualitative_bucket(stability_adjusted),
             "risk_label": qualitative_bucket(risk_penalty, reverse=True),
-            "nw_component": float(weights["nw"] * nw_adjusted),
+            "nw_component": float((0.10 * weights["nw"] * nw_adjusted) if profile_name == "Legacy Focused" else (weights["nw"] * nw_adjusted)),
             "legacy_component": float(weights["legacy"] * legacy_adjusted),
             "stability_component": float(weights["stability"] * stability_adjusted),
             "trad_component": float(weights["trad"] * trad_penalty),
-            "drag_component": float(weights.get("drag", 0.0) * drag_penalty),
+            "drag_component": float((0.60 * weights.get("drag", 0.0) * drag_penalty) if profile_name == "Legacy Focused" else (weights.get("drag", 0.0) * drag_penalty)),
             "trad_share_component": float(weights.get("trad_share", 0.0) * trad_share_penalty),
             "risk_component": float(weights["risk"] * risk_penalty),
+            "heir_tax_component": float((0.90 * weights["trad"] * heir_tax_penalty) if profile_name == "Legacy Focused" else 0.0),
             "positive_score": float(positive_score),
             "negative_score": float(negative_score),
             "ending_traditional_ira_share": float(trad_share_values[i]),
@@ -679,6 +697,10 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
                 "Spouse SS Age": int(spouse_age),
                 "Final Net Worth": float(metrics["final_net_worth"]),
                 "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
                 "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
                 "Roth @ End": float(metrics["ending_roth_balance"]),
                 "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
