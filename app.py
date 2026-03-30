@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v24-profile-aligned"
+APP_VERSION = "v25-profile-shortlists"
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -432,6 +432,66 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "final_household_ss_income": float(final_household_ss),
         "survivor_ss_income": float(survivor_ss),
     }
+
+
+def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5) -> dict[str, pd.DataFrame]:
+    if not results_rows:
+        return {}
+
+    metric_rows = []
+    for row in results_rows:
+        metric_rows.append({
+            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
+            "Owner SS Age": int(row["Owner SS Age"]),
+            "Spouse SS Age": int(row["Spouse SS Age"]),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+
+    shortlists = {}
+    for profile_name in PROFILE_PRESETS.keys():
+        ranked = score_strategy_metrics(metric_rows, profile_name)
+        rows = []
+        for idx, ranked_row in enumerate(ranked[:top_n], start=1):
+            rows.append({
+                "Rank": idx,
+                "Strategy": ranked_row["Strategy"],
+                "Owner SS Age": int(ranked_row["Owner SS Age"]),
+                "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
+                "Score": float(ranked_row["score_100"]),
+                "Net Worth": float(ranked_row["final_net_worth"]),
+                "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+                "Trad IRA @ End": float(ranked_row["ending_traditional_ira_balance"]),
+                "Roth @ End": float(ranked_row["ending_roth_balance"]),
+                "Brokerage @ End": float(ranked_row["ending_brokerage_balance"]),
+                "Stability": ranked_row["stability_label"],
+                "Risk": ranked_row["risk_label"],
+                "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
+                "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
+                "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
+                "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+                "First IRMAA Year": ranked_row.get("First IRMAA Year"),
+            })
+        shortlists[profile_name] = pd.DataFrame(rows)
+    return shortlists
 
 
 def score_strategy_metrics(metrics_list: list[dict], profile_name: str) -> list[dict]:
@@ -3435,10 +3495,20 @@ def run_ss_optimizer(
                 }, engine="ss_optimizer")
 
             trad_penalty_applied = float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"])
+            metrics = build_strategy_metrics(run_result)
             row = {
                 "Owner SS Age": int(owner_age),
                 "Spouse SS Age": int(spouse_age),
+                "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
                 "Final Net Worth": float(run_result["final_net_worth"]),
+                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+                "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+                "Stability Value": float(metrics["stability_value"]),
+                "Risk Value": float(metrics["risk_value"]),
+                "Final Household SS Income": float(metrics["final_household_ss_income"]),
+                "Survivor SS Income": float(metrics["survivor_ss_income"]),
                 "Total Federal Tax": float(run_result["total_federal_taxes"]),
                 "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
                 "Total ACA Cost": float(run_result["total_aca_cost"]),
@@ -3467,6 +3537,7 @@ def run_ss_optimizer(
 
         top_10_df = results_df.head(10).copy()
         top_3 = results_df.head(3).copy()
+        profile_shortlists = build_profile_shortlists_from_optimizer_rows(results)
 
         compare_metrics = [
             ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
@@ -3527,6 +3598,7 @@ def run_ss_optimizer(
             "all_results_df": results_df,
             "top_10_df": top_10_df,
             "comparison_df": comparison_df,
+            "profile_shortlists": profile_shortlists,
             "best_result": best_result,
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
@@ -3544,6 +3616,7 @@ def run_ss_optimizer(
             "top_10_export_df": top_10_df.copy(),
             "comparison_df": comparison_df,
             "comparison_display_df": comparison_df,
+            "profile_shortlists": profile_shortlists,
             "best_result": best_result,
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
@@ -3627,6 +3700,49 @@ def render_ss_optimizer_results(result: dict):
         mime="text/csv",
         use_container_width=True,
     )
+
+    profile_shortlists = result.get("profile_shortlists", {}) or {}
+    if profile_shortlists:
+        st.subheader("Top 5 combinations by planning profile")
+        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results.")
+        tabs = st.tabs(list(profile_shortlists.keys()))
+        for tab, profile_name in zip(tabs, profile_shortlists.keys()):
+            with tab:
+                shortlist_df = profile_shortlists.get(profile_name, pd.DataFrame())
+                if shortlist_df.empty:
+                    st.info("No shortlist available for this profile yet.")
+                    continue
+                st.dataframe(
+                    shortlist_df.style.format({
+                        "Score": "{:.2f}",
+                        "Net Worth": "${:,.0f}",
+                        "After-Tax Legacy": "${:,.0f}",
+                        "Trad IRA @ End": "${:,.0f}",
+                        "Roth @ End": "${:,.0f}",
+                        "Brokerage @ End": "${:,.0f}",
+                        "Final Household SS Income": "${:,.0f}",
+                        "Survivor SS Income": "${:,.0f}",
+                        "Total Government Drag": "${:,.0f}",
+                        "Total Conversions": "${:,.0f}",
+                    }),
+                    use_container_width=True,
+                )
+                top_row = shortlist_df.iloc[0]
+                st.button(
+                    f"Open Break-Even Governor for {top_row['Strategy']} ({profile_name} winner)",
+                    key=f"profile_shortlist_open_{profile_name}_{top_row['Strategy']}",
+                    on_click=launch_conversion_optimizer_from_strategy,
+                    args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", profile_name),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    f"Download {profile_name} Top 5 (CSV)",
+                    data=shortlist_df.to_csv(index=False),
+                    file_name=f"ss_optimizer_top5_{profile_name.lower().replace(' ', '_').replace('-', '_')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"download_profile_shortlist_{profile_name}",
+                )
 
     with st.expander("All 81 SS combinations"):
         st.dataframe(
