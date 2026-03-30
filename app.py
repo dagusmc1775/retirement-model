@@ -357,6 +357,32 @@ def describe_active_scoring_preferences(preferences: dict) -> str:
     return ", ".join(labels) if labels else "None"
 
 
+def rerank_existing_optimizer_result(result_payload: dict, preferences: dict | None = None) -> dict:
+    """
+    Rebuild profile shortlists from an already-computed 81-row optimizer result set.
+    This does not rerun the engine. It only reapplies profile scoring / modifiers.
+    """
+    if result_payload is None:
+        return result_payload
+    working = copy.deepcopy(result_payload)
+    all_results_df = working.get("all_results_df")
+    if all_results_df is None:
+        return working
+    if isinstance(all_results_df, pd.DataFrame):
+        results_rows = all_results_df.to_dict("records")
+    else:
+        try:
+            results_rows = pd.DataFrame(all_results_df).to_dict("records")
+        except Exception:
+            return working
+    working["profile_shortlists"] = build_profile_shortlists_from_optimizer_rows(
+        results_rows,
+        preferences=preferences or {},
+    )
+    working["scoring_preferences_snapshot"] = copy.deepcopy(preferences or {})
+    return working
+
+
 def estimate_social_security_present_value(final_household_ss_income: float, survivor_ss_income: float) -> float:
     return (
         max(0.0, float(final_household_ss_income)) * SOCIAL_SECURITY_PRESENT_VALUE_MULTIPLIER
@@ -3829,7 +3855,7 @@ def render_ss_optimizer_results(result: dict):
     profile_shortlists = result.get("profile_shortlists", {}) or {}
     if profile_shortlists:
         st.subheader("Top 5 combinations by planning profile")
-        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results.")
+        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results. If you change ranking preferences later, use the rerank button below instead of rerunning the full 81-combination engine.")
         tabs = st.tabs(list(profile_shortlists.keys()))
         for tab, profile_name in zip(tabs, profile_shortlists.keys()):
             with tab:
@@ -5340,12 +5366,19 @@ def render_conversion_page() -> None:
         disabled=not integrity_mode,
     )
 
+    st.header("Social Security Optimizer Workflow")
+    st.info(
+        "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
+        "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
+        "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
+        "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
+    )
     ss_opt1, ss_opt2 = st.columns(2)
     with ss_opt1:
         run_ss_optimizer_toggle = st.checkbox(
             "Run SS Optimizer",
             value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
-            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and ranks them.",
+            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
             key="run_ss_optimizer_toggle",
         )
     with ss_opt2:
@@ -5355,7 +5388,7 @@ def render_conversion_page() -> None:
             value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
             step=0.05,
             format="%.2f",
-            help="Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
+            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
             key="trad_balance_penalty_lambda",
         )
 
@@ -5392,7 +5425,7 @@ def render_conversion_page() -> None:
         optimizer_error = st.session_state.get("ss_optimizer_error")
         if optimizer_error:
             st.error(optimizer_error)
-        b1, b2, b3 = st.columns(3)
+        b1, b2, b3, b4 = st.columns(4)
         with b1:
             if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
                 clear_ss_optimizer_state(clear_last_result=True)
@@ -5406,6 +5439,7 @@ def render_conversion_page() -> None:
                     start_index=0,
                     existing_results=[],
                 )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
                 optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
@@ -5425,12 +5459,24 @@ def render_conversion_page() -> None:
                     existing_results=partial_results,
                     profile_name=planning_profile,
                 )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
                 optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
                     mark_result_state("ss_optimizer", optimizer_hash_inputs)
                 st.rerun()
         with b3:
+            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
+            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
+            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
+                reranked = rerank_existing_optimizer_result(
+                    last_result_for_rerank,
+                    preferences=extract_scoring_preferences(st.session_state),
+                )
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                st.rerun()
+        with b4:
             reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
             if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
                 clear_ss_optimizer_state(clear_last_result=True)
@@ -5442,6 +5488,12 @@ def render_conversion_page() -> None:
                 optimizer_inputs_snapshot = copy.deepcopy(inputs)
                 optimizer_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True})
                 render_stale_warning("ss_optimizer", optimizer_inputs_snapshot, "SS optimizer results")
+                current_preferences = extract_scoring_preferences(st.session_state)
+                prior_preferences = last_result.get("scoring_preferences_snapshot", {})
+                if current_preferences != prior_preferences:
+                    st.warning("Your ranking preferences have changed since the last 81-combination run. Use 'Re-rank Existing 81 Results' to refresh the Top 5 profile tabs without rerunning the engine.")
+                else:
+                    st.caption(f"Profile shortlist preferences currently applied: {describe_active_scoring_preferences(current_preferences)}")
             render_ss_optimizer_results(last_result)
     else:
         st.header("Flat Strategy Inputs")
