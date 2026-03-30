@@ -843,6 +843,7 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     step_size = sanitize_governor_step_size(step_size)
+    preferences = extract_scoring_preferences(inputs)
     base_inputs, preset = build_profile_adjusted_inputs(profile_name, inputs)
     metric_rows = []
     errors = []
@@ -903,7 +904,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
         "data_source": "break_even_governor",
-        "applied_preset_note": "",
+        "applied_preset_note": preset.get("preset_note", ""),
+        "active_preferences_text": describe_active_scoring_preferences(preferences),
     }
 
 
