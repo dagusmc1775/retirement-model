@@ -307,7 +307,7 @@ PROFILE_PRESETS = {
     },
 }
 
-QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
+QUICK_STRATEGY_COMBOS = [(62, 62), (65, 62), (66, 63), (67, 64), (67, 67), (67, 70), (70, 67), (70, 70)]
 
 HEIR_EFFECTIVE_TRAD_TAX_RATE = 0.40
 TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE = 0.32
@@ -691,16 +691,16 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
     for i, metrics in enumerate(metrics_list):
         nw_adjusted = nw_norm[i] ** 0.72
         if profile_name == "Legacy Focused":
-            legacy_signal = 0.80 * effective_legacy_norm[i] + 0.20 * base_legacy_norm[i]
-            legacy_adjusted = legacy_signal ** 1.30
-            trad_penalty = trad_norm[i] ** 1.60
-            drag_penalty = drag_norm[i] ** 1.05
-            trad_share_penalty = trad_share_norm[i] ** 2.10
-            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.45
-            stability_adjusted = 0.55 * (stability_norm[i] ** 1.20) + 0.30 * (ss_income_norm[i] ** 1.20) + 0.15 * (survivor_ss_norm[i] ** 1.10)
-            risk_penalty = risk_norm[i] ** 1.05
-            positive_score = (0.10 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-            negative_score = (weights["trad"] * trad_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty) + (0.60 * weights.get("drag", 0.0) * drag_penalty) + (0.90 * weights["trad"] * heir_tax_penalty) + (weights["risk"] * risk_penalty)
+            legacy_signal = 0.82 * effective_legacy_norm[i] + 0.18 * base_legacy_norm[i]
+            legacy_adjusted = legacy_signal ** 1.34
+            trad_penalty = trad_norm[i] ** 1.72
+            drag_penalty = drag_norm[i] ** 1.02
+            trad_share_penalty = trad_share_norm[i] ** 2.45
+            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.62
+            stability_adjusted = 0.52 * (stability_norm[i] ** 1.18) + 0.28 * (ss_income_norm[i] ** 1.18) + 0.20 * (survivor_ss_norm[i] ** 1.12)
+            risk_penalty = risk_norm[i] ** 1.02
+            positive_score = (0.04 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
+            negative_score = (1.35 * weights["trad"] * trad_penalty) + (1.55 * weights.get("trad_share", 0.0) * trad_share_penalty) + (0.45 * weights.get("drag", 0.0) * drag_penalty) + (1.45 * weights["trad"] * heir_tax_penalty) + (weights["risk"] * risk_penalty)
         else:
             legacy_adjusted = base_legacy_norm[i] ** 1.05
             trad_penalty = trad_norm[i] ** 1.85
@@ -723,7 +723,14 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
             preference_bonus += stability_bonus
         if preferences.get("minimize_trad_ira_for_heirs"):
-            heir_structure_penalty = 0.12 * (trad_share_norm[i] ** 1.80) + 0.12 * (heir_tax_drag_norm[i] ** 1.20)
+            if profile_name == "Legacy Focused":
+                heir_structure_penalty = (
+                    0.22 * (trad_share_norm[i] ** 2.40)
+                    + 0.20 * (heir_tax_drag_norm[i] ** 1.55)
+                    + 0.10 * (trad_norm[i] ** 1.90)
+                )
+            else:
+                heir_structure_penalty = 0.12 * (trad_share_norm[i] ** 1.80) + 0.12 * (heir_tax_drag_norm[i] ** 1.20)
             preference_penalty += heir_structure_penalty
 
         positive_score += preference_bonus
@@ -3994,6 +4001,63 @@ def render_ss_optimizer_results(result: dict):
                     use_container_width=True,
                     key=f"download_profile_shortlist_{profile_name}",
                 )
+
+
+    lowest_trad_df = result["all_results_df"].sort_values("Ending Traditional IRA Balance", ascending=True).head(1).copy()
+    if not lowest_trad_df.empty:
+        lowest_trad_row = lowest_trad_df.iloc[0]
+        st.subheader("Lowest Traditional IRA outcome in all 81 strategies")
+        st.caption("This shows the cleanest Traditional IRA outcome the optimizer actually generated. Use it to judge the cost of pushing harder on Traditional IRA reduction, even if it is not the top-ranked raw strategy.")
+        cost_compare_rows = [
+            {
+                "Metric": "Strategy",
+                "Raw Optimizer Winner": f"{int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}" if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": lowest_trad_row["Strategy"],
+            },
+            {
+                "Metric": "Final Net Worth",
+                "Raw Optimizer Winner": format_dollars(best["Final Net Worth"]) if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Final Net Worth"]),
+            },
+            {
+                "Metric": "After-Tax Legacy",
+                "Raw Optimizer Winner": format_dollars(best["After-Tax Legacy"]) if result.get("best_result") is not None and "After-Tax Legacy" in best else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row["After-Tax Legacy"]),
+            },
+            {
+                "Metric": "Ending Traditional IRA Balance",
+                "Raw Optimizer Winner": format_dollars(best["Ending Traditional IRA Balance"]) if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Ending Traditional IRA Balance"]),
+            },
+            {
+                "Metric": "Heir Tax Drag",
+                "Raw Optimizer Winner": format_dollars(best.get("Heir Tax Drag", 0.0)) if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row.get("Heir Tax Drag", 0.0)),
+            },
+            {
+                "Metric": "Total Government Drag",
+                "Raw Optimizer Winner": format_dollars(best["Total Government Drag"]) if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Total Government Drag"]),
+            },
+            {
+                "Metric": "Total Conversions",
+                "Raw Optimizer Winner": format_dollars(best["Total Conversions"]) if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Total Conversions"]),
+            },
+            {
+                "Metric": "Final Household SS Income",
+                "Raw Optimizer Winner": format_dollars(best["Final Household SS Income"]) if result.get("best_result") is not None else "",
+                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Final Household SS Income"]),
+            },
+        ]
+        st.dataframe(pd.DataFrame(cost_compare_rows), use_container_width=True)
+        st.button(
+            f"Apply lowest Trad outcome {lowest_trad_row['Strategy']} to Governor",
+            key=f"apply_lowest_trad_{lowest_trad_row['Strategy']}",
+            on_click=launch_conversion_optimizer_from_strategy,
+            args=(int(lowest_trad_row["Owner SS Age"]), int(lowest_trad_row["Spouse SS Age"]), "optimizer_lowest_trad", "lowest_trad"),
+            use_container_width=True,
+        )
 
     with st.expander("All 81 SS combinations"):
         st.dataframe(
