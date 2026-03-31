@@ -5229,473 +5229,543 @@ def render_conversion_page() -> None:
     if preset_note:
         st.caption(preset_note)
     render_top_nav("conversion")
+
+workflow_steps = [
+    (1, "Household"),
+    (2, "Governor"),
+    (3, "Preferences"),
+    (4, "Optimizer"),
+    (5, "Results"),
+]
+if "conversion_workflow_step" not in st.session_state:
+    st.session_state["conversion_workflow_step"] = 1
+current_step = int(st.session_state.get("conversion_workflow_step", 1))
+
+st.caption("Use Next / Back to move through the workflow. Earlier completed sections stay visible; later sections unlock as you move forward.")
+nav_cols = st.columns(len(workflow_steps))
+for idx, (step_num, step_label) in enumerate(workflow_steps):
+    disabled = step_num > current_step
+    button_type = "primary" if step_num == current_step else "secondary"
+    if nav_cols[idx].button(step_label, key=f"workflow_nav_{step_num}", disabled=disabled, use_container_width=True, type=button_type):
+        st.session_state["conversion_workflow_step"] = step_num
+        st.rerun()
     
     inputs = render_shared_household_inputs()
 
-    st.header("Break-Even Governor Inputs")
-    current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
-    if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
-        st.session_state["max_conversion"] = float(current_max_conversion_value)
-    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
-    current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
-    if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
-        st.session_state["step_size"] = float(current_step_size_value)
-    step_size = st.number_input(
-        "Break-Even Step Size",
-        min_value=1000.0,
-        value=float(current_step_size_value),
-        step=1000.0,
-        help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
-        key="step_size",
-    )
+    step_nav_cols = st.columns([1, 1, 5])
+    with step_nav_cols[0]:
+        if st.button("Next → Governor", key="workflow_next_household", use_container_width=True):
+            st.session_state["conversion_workflow_step"] = max(int(st.session_state.get("conversion_workflow_step", 1)), 2)
+            st.rerun()
 
-    pol1, pol2 = st.columns(2)
-    with pol1:
-        cash_sweep_threshold = st.number_input(
-            "Cash Sweep Threshold",
-            min_value=0.0,
-            value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
-            step=5000.0,
-            help="End-of-year cash above this amount is swept into brokerage.",
-            key="cash_sweep_threshold",
-        )
-    with pol2:
-        current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
-        existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
-        if not isinstance(existing_state_tax_display, str):
-            existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
-            st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
-        state_tax_display_value = st.text_input(
-            "State Tax Rate",
-            value=f"{current_state_tax_pct:.2f}%",
-            help="Enter the state tax rate as a percent, for example 4.75%.",
-            key="state_tax_rate_pct_display",
-        )
-        cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
-        try:
-            state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
-        except Exception:
-            state_tax_rate_pct = current_state_tax_pct
-        state_tax_rate = state_tax_rate_pct / 100.0
-        st.session_state["state_tax_rate"] = state_tax_rate
-        normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
-        if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
-            st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
-
-    tg1, tg2 = st.columns(2)
-    with tg1:
-        target_trad_balance_enabled = st.checkbox(
-            "Use Target Traditional IRA Balance Goal",
-            value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
-            help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
-            key="target_trad_balance_enabled",
-        )
-    with tg2:
-        target_trad_balance = st.number_input(
-            "Target Traditional IRA Balance By RMD Start",
-            min_value=0.0,
-            value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
-            step=25000.0,
-            help="Planner goal for remaining Traditional IRA balance by household RMD start.",
-            key="target_trad_balance",
+    if current_step >= 2:
+        st.markdown("## Step 2 — Governor Inputs")
+        st.caption("Set conversion-testing limits and planner override settings before ranking or running strategies.")
+        st.header("Break-Even Governor Inputs")
+        current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
+        if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
+            st.session_state["max_conversion"] = float(current_max_conversion_value)
+        max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
+        current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
+        if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
+            st.session_state["step_size"] = float(current_step_size_value)
+        step_size = st.number_input(
+            "Break-Even Step Size",
+            min_value=1000.0,
+            value=float(current_step_size_value),
+            step=1000.0,
+            help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
+            key="step_size",
         )
 
-    ov1, ov2 = st.columns(2)
-    with ov1:
-        target_trad_override_enabled = st.checkbox(
-            "Allow Target Traditional IRA Planner Override",
-            value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
-            help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
-            key="target_trad_override_enabled",
-        )
-    with ov2:
-        current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
-        existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
-        if not isinstance(existing_override_display, str):
-            existing_override_display = f"{float(existing_override_display):.0f}%"
-            st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
-        display_value = st.text_input(
-            "Target Traditional IRA Override Max All-In Rate",
-            value=f"{current_override_pct:.0f}%",
-            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
-            key="target_trad_override_max_rate_pct_display",
-        )
-        cleaned_display_value = str(display_value).strip().replace("%", "")
-        try:
-            target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
-        except Exception:
-            target_trad_override_max_rate_pct = current_override_pct
-        target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
-        st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
-        normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
-        if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
-            st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
-
-    br1, br2 = st.columns(2)
-    with br1:
-        post_aca_target_bracket = st.selectbox(
-            "Post-ACA Target Bracket",
-            ["12%", "22%", "24%"],
-            index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
-            help="Used in non-ACA years before household RMDs begin.",
-            key="post_aca_target_bracket",
-        )
-    with br2:
-        rmd_era_target_bracket = st.selectbox(
-            "RMD-Era Target Bracket",
-            ["12%", "22%", "24%"],
-            index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
-            help="Used once the household reaches the first RMD year.",
-            key="rmd_era_target_bracket",
-        )
-
-    st.header("Recommendation Engine v1")
-    planning_profile = st.selectbox(
-        "Optimize For",
-        list(PROFILE_PRESETS.keys()),
-        index=list(PROFILE_PRESETS.keys()).index(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))),
-        help="Choose the planning lens the recommendation engine should use when ranking quick Social Security strategies.",
-        key="planning_profile",
-    )
-    profile_summary = get_profile_summary(planning_profile)
-    st.info(
-        f"{profile_summary['description']}\n\n"
-        f"This means the model will: \n- {profile_summary['bullets'][0]}\n- {profile_summary['bullets'][1]}\n- {profile_summary['bullets'][2]}\n\n"
-        f"Tradeoff to expect: {profile_summary['tradeoff']}"
-    )
-
-    st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
-    pref1, pref2, pref3 = st.columns(3)
-    with pref1:
-        st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
-    with pref2:
-        st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
-    with pref3:
-        st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
-    current_preferences = extract_scoring_preferences(st.session_state)
-    st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
-    selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
-    with st.container(border=True):
-        st.markdown(f"**{selection_summary['title']}**")
-        st.caption("Base profile tendencies")
-        for item in selection_summary["defaults"]:
-            st.write(f"- {item}")
-        st.caption("Active modifier nudges")
-        for item in selection_summary["modifiers"]:
-            st.write(f"- {item}")
-        st.caption("How this combination behaves")
-        for item in selection_summary["notes"]:
-            st.write(f"- {item}")
-
-    rec_col1, rec_col2 = st.columns([1, 2])
-    with rec_col1:
-        if st.button("Run Quick Strategy Recommendation", use_container_width=True):
-            with st.spinner("Running quick strategy recommendation..."):
-                recommendation_result = run_quick_strategy_recommendation(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    profile_name=planning_profile,
-                )
-            quick_hash_inputs, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-            quick_hash_inputs.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
-            st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
-            mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
-    with rec_col2:
-        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
-
-    quick_result = get_current_result_payload("quick_strategy_recommendation_result")
-    if quick_result is not None:
-        quick_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-        quick_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
-        if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
-            st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
-            st.session_state["suppress_quick_recommendation_stale_once"] = False
-        else:
-            render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
-        st.subheader("Strategy Summary")
-        st.caption("These strategy rows are produced by the same Break-Even Governor engine used below, with the selected planning-profile presets applied before the quick run. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
-        if quick_result.get("applied_preset_note"):
-            st.caption(quick_result["applied_preset_note"])
-        st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
-        st.dataframe(
-            quick_result["summary_df"].style.format({
-                "Score": "{:.1f}",
-                "Net Worth": "${:,.0f}",
-                "After-Tax Legacy": "${:,.0f}",
-                "Trad IRA @ End": "${:,.0f}",
-                "Roth @ End": "${:,.0f}",
-                "Brokerage @ End": "${:,.0f}",
-                "Final Household SS Income": "${:,.0f}",
-                "Survivor SS Income": "${:,.0f}",
-            }),
-            use_container_width=True,
-        )
-        if quick_result.get("close_result"):
-            st.info(
-                "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
+        pol1, pol2 = st.columns(2)
+        with pol1:
+            cash_sweep_threshold = st.number_input(
+                "Cash Sweep Threshold",
+                min_value=0.0,
+                value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
+                step=5000.0,
+                help="End-of-year cash above this amount is swept into brokerage.",
+                key="cash_sweep_threshold",
             )
-        st.download_button(
-            "Download Strategy Summary (CSV)",
-            data=quick_result["summary_df"].to_csv(index=False),
-            file_name="quick_strategy_summary.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        st.subheader("Advisor Interpretation")
-        st.write(quick_result["advisor_text"])
-        guidance = quick_result.get("next_step_guidance", [])
-        if guidance:
-            st.subheader("Recommended Next Steps")
-            for item in guidance:
-                st.write(f"- {item}")
-        top_ranked_rows = quick_result.get("ranked_rows", [])
-        if top_ranked_rows:
-            top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
-            st.caption("Quick Strategy and Optimizer picks can differ because they come from different ranking layers. Use the button below to load this quick recommendation into the Governor.")
-            st.button(
-                f"Apply Quick Strategy Winner {top_strategy['Strategy']} to Governor",
-                on_click=launch_conversion_optimizer_from_strategy,
-                args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
-                use_container_width=True,
+        with pol2:
+            current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
+            existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
+            if not isinstance(existing_state_tax_display, str):
+                existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
+                st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
+            state_tax_display_value = st.text_input(
+                "State Tax Rate",
+                value=f"{current_state_tax_pct:.2f}%",
+                help="Enter the state tax rate as a percent, for example 4.75%.",
+                key="state_tax_rate_pct_display",
+            )
+            cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
+            try:
+                state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
+            except Exception:
+                state_tax_rate_pct = current_state_tax_pct
+            state_tax_rate = state_tax_rate_pct / 100.0
+            st.session_state["state_tax_rate"] = state_tax_rate
+            normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
+            if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
+                st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
+
+        tg1, tg2 = st.columns(2)
+        with tg1:
+            target_trad_balance_enabled = st.checkbox(
+                "Use Target Traditional IRA Balance Goal",
+                value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
+                help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
+                key="target_trad_balance_enabled",
+            )
+        with tg2:
+            target_trad_balance = st.number_input(
+                "Target Traditional IRA Balance By RMD Start",
+                min_value=0.0,
+                value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
+                step=25000.0,
+                help="Planner goal for remaining Traditional IRA balance by household RMD start.",
+                key="target_trad_balance",
             )
 
-    st.header("Integrity / Speed")
-    integrity_mode = st.checkbox(
-        "Enable Integrity Mode",
-        value=bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"])),
-        help="When enabled, the app runs slower but adds repeatability and accounting checks. Leave this off for faster day-to-day use.",
-        key="integrity_mode",
-    )
-    validation_tolerance = st.number_input(
-        "Validation Tolerance ($)",
-        min_value=0.0,
-        value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
-        step=0.01,
-        format="%.2f",
-        help="Used only when Integrity Mode is enabled.",
-        key="validation_tolerance",
-        disabled=not integrity_mode,
-    )
+        ov1, ov2 = st.columns(2)
+        with ov1:
+            target_trad_override_enabled = st.checkbox(
+                "Allow Target Traditional IRA Planner Override",
+                value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
+                help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
+                key="target_trad_override_enabled",
+            )
+        with ov2:
+            current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
+            existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
+            if not isinstance(existing_override_display, str):
+                existing_override_display = f"{float(existing_override_display):.0f}%"
+                st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
+            display_value = st.text_input(
+                "Target Traditional IRA Override Max All-In Rate",
+                value=f"{current_override_pct:.0f}%",
+                help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
+                key="target_trad_override_max_rate_pct_display",
+            )
+            cleaned_display_value = str(display_value).strip().replace("%", "")
+            try:
+                target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
+            except Exception:
+                target_trad_override_max_rate_pct = current_override_pct
+            target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
+            st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
+            normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
+            if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
+                st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
 
-    st.header("Social Security Optimizer Workflow")
-    st.info(
-        "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
-        "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
-        "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
-        "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
-    )
-    ss_opt1, ss_opt2 = st.columns(2)
-    with ss_opt1:
-        run_ss_optimizer_toggle = st.checkbox(
-            "Run SS Optimizer",
-            value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
-            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
-            key="run_ss_optimizer_toggle",
+        br1, br2 = st.columns(2)
+        with br1:
+            post_aca_target_bracket = st.selectbox(
+                "Post-ACA Target Bracket",
+                ["12%", "22%", "24%"],
+                index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
+                help="Used in non-ACA years before household RMDs begin.",
+                key="post_aca_target_bracket",
+            )
+        with br2:
+            rmd_era_target_bracket = st.selectbox(
+                "RMD-Era Target Bracket",
+                ["12%", "22%", "24%"],
+                index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
+                help="Used once the household reaches the first RMD year.",
+                key="rmd_era_target_bracket",
+            )
+
+        nav_cols = st.columns([1, 1, 4])
+        with nav_cols[0]:
+            if st.button("← Back", key="workflow_back_2", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = 1
+                st.rerun()
+        with nav_cols[1]:
+            if st.button("Next → Preferences", key="workflow_next_2", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = max(int(st.session_state.get("conversion_workflow_step", 1)), 3)
+                st.rerun()
+    if current_step >= 3:
+        st.markdown("## Step 3 — Planning Preferences")
+        st.caption("Choose the base profile and any optional modifiers. These affect ranking, not the raw 81-combo fact generation.")
+        st.header("Recommendation Engine v1")
+        planning_profile = st.selectbox(
+            "Optimize For",
+            list(PROFILE_PRESETS.keys()),
+            index=list(PROFILE_PRESETS.keys()).index(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))),
+            help="Choose the planning lens the recommendation engine should use when ranking quick Social Security strategies.",
+            key="planning_profile",
         )
-    with ss_opt2:
-        trad_balance_penalty_lambda = st.number_input(
-            "SS Optimizer Traditional IRA Penalty Lambda",
-            min_value=0.0,
-            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-            step=0.05,
-            format="%.2f",
-            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
-            key="trad_balance_penalty_lambda",
-        )
-
-    inputs.update(
-        {
-            "cash_sweep_threshold": cash_sweep_threshold,
-            "state_tax_rate": state_tax_rate,
-            "target_trad_balance_enabled": target_trad_balance_enabled,
-            "target_trad_balance": target_trad_balance,
-            "target_trad_override_enabled": target_trad_override_enabled,
-            "target_trad_override_max_rate": target_trad_override_max_rate,
-            "post_aca_target_bracket": post_aca_target_bracket,
-            "rmd_era_target_bracket": rmd_era_target_bracket,
-        }
-    )
-
-    if "annual_calc_year" in st.session_state:
+        profile_summary = get_profile_summary(planning_profile)
         st.info(
-            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+            f"{profile_summary['description']}\n\n"
+            f"This means the model will: \n- {profile_summary['bullets'][0]}\n- {profile_summary['bullets'][1]}\n- {profile_summary['bullets'][2]}\n\n"
+            f"Tradeoff to expect: {profile_summary['tradeoff']}"
         )
 
-    if run_ss_optimizer_toggle:
-        total_combos = get_ss_optimizer_combo_count()
-        if st.session_state.get("ss_optimizer_running"):
-            st.session_state["ss_optimizer_running"] = False
-        partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
-        progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
-        last_completed = st.session_state.get("ss_optimizer_last_completed")
-        partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
-        if partial_available:
-            last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
-            st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
-        optimizer_error = st.session_state.get("ss_optimizer_error")
-        if optimizer_error:
-            st.error(optimizer_error)
-        b1, b2, b3, b4 = st.columns(4)
-        with b1:
-            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=0,
-                    existing_results=[],
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b2:
-            resume_disabled = not partial_available
-            if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=progress_index,
-                    existing_results=partial_results,
-                    profile_name=planning_profile,
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b3:
-            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
-            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
-            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
-                reranked = rerank_existing_optimizer_result(
-                    last_result_for_rerank,
-                    preferences=extract_scoring_preferences(st.session_state),
-                )
-                reranked["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                st.rerun()
-        with b4:
-            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
-            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                st.rerun()
+        st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
+        pref1, pref2, pref3 = st.columns(3)
+        with pref1:
+            st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
+        with pref2:
+            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
+        with pref3:
+            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+        current_preferences = extract_scoring_preferences(st.session_state)
+        st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
+        selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
+        with st.container(border=True):
+            st.markdown(f"**{selection_summary['title']}**")
+            st.caption("Base profile tendencies")
+            for item in selection_summary["defaults"]:
+                st.write(f"- {item}")
+            st.caption("Active modifier nudges")
+            for item in selection_summary["modifiers"]:
+                st.write(f"- {item}")
+            st.caption("How this combination behaves")
+            for item in selection_summary["notes"]:
+                st.write(f"- {item}")
 
-        last_result = get_current_result_payload("ss_optimizer_last_result")
-        if last_result is not None:
-            if last_result.get("completed", False):
-                st.caption(
-                    f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
-                    f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
-                )
-            render_ss_optimizer_results(last_result)
-    else:
-        st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
+        rec_col1, rec_col2 = st.columns([1, 2])
+        with rec_col1:
+            if st.button("Run Quick Strategy Recommendation", use_container_width=True):
+                with st.spinner("Running quick strategy recommendation..."):
+                    recommendation_result = run_quick_strategy_recommendation(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        profile_name=planning_profile,
+                    )
+                quick_hash_inputs, _ = build_profile_adjusted_inputs(planning_profile, inputs)
+                quick_hash_inputs.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+                st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
+                mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
+        with rec_col2:
+            st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
 
-    st.header("Strategy Execution")
-    st.caption("These sections stay visible so you can always run or review the Break-Even Governor and Flat Strategy without hiding the optimizer.")
-
-    flat_annual_conversion = st.number_input(
-        "Flat Annual Conversion",
-        min_value=0.0,
-        value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
-        step=5000.0,
-        key="annual_conversion",
-        help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
-    )
-
-    btn1, btn2 = st.columns(2)
-
-    with btn1:
-        st.subheader("Flat Strategy")
-        if st.button("Run Flat Strategy Test"):
-            flat_inputs = dict(inputs)
-            flat_inputs["annual_conversion"] = float(flat_annual_conversion)
-            result = run_model_fixed(flat_inputs)
-            result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
-            st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
-            mark_result_state("flat_strategy", flat_inputs)
-        flat_result = get_current_result_payload("flat_strategy_last_result")
-        if flat_result is not None:
-            flat_inputs = dict(inputs)
-            flat_inputs["annual_conversion"] = float(flat_annual_conversion)
-            render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
-            render_summary("Flat Strategy Summary", flat_result)
-            st.subheader("Flat Strategy Yearly Results")
-            st.dataframe(flat_result["df"], use_container_width=True)
-
-    with btn2:
-        st.subheader("Break-Even Governor")
-        st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
-        if st.button("Run Break-Even Governor"):
-            result = run_governor_with_validation(
-                inputs=inputs,
-                max_conversion=max_conversion,
-                step_size=step_size,
-                integrity_mode=integrity_mode,
-                tol=validation_tolerance,
+        quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+        if quick_result is not None:
+            quick_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
+            quick_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+            if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
+                st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
+                st.session_state["suppress_quick_recommendation_stale_once"] = False
+            else:
+                render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
+            st.subheader("Strategy Summary")
+            st.caption("These strategy rows are produced by the same Break-Even Governor engine used below, with the selected planning-profile presets applied before the quick run. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+            if quick_result.get("applied_preset_note"):
+                st.caption(quick_result["applied_preset_note"])
+            st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
+            st.dataframe(
+                quick_result["summary_df"].style.format({
+                    "Score": "{:.1f}",
+                    "Net Worth": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Trad IRA @ End": "${:,.0f}",
+                    "Roth @ End": "${:,.0f}",
+                    "Brokerage @ End": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Survivor SS Income": "${:,.0f}",
+                }),
+                use_container_width=True,
             )
-            st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
-            mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
-        result = get_current_result_payload("break_even_last_result")
-        if result is not None:
-            render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
-            render_summary("Break-Even Governor Summary", result)
-            st.subheader("Chosen Year-by-Year Path")
-            path_display_df = build_chosen_path_display_df(result["df"])
-            st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
-            with st.expander("Debug: First Year Raw Data", expanded=False):
-                try:
-                    if result.get("df") is not None and not result["df"].empty:
-                        first_row_raw = result["df"].iloc[0].to_dict()
-                        st.json(first_row_raw)
-                except Exception as debug_exc:
-                    st.write(f"Debug panel unavailable: {debug_exc}")
-            if path_display_df is not None and not path_display_df.empty:
-                fmt = {}
-                non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
-                for col in path_display_df.columns:
-                    if col in non_currency_cols:
-                        continue
-                    series = path_display_df[col]
-                    if not pd.api.types.is_numeric_dtype(series):
-                        continue
-                    if "Rate" in col:
-                        fmt[col] = "{:.2%}"
-                    else:
-                        fmt[col] = "${:,.0f}"
-                st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+            if quick_result.get("close_result"):
+                st.info(
+                    "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
+                )
             st.download_button(
-                "Download Chosen Path (CSV)",
-                data=result["df"].to_csv(index=False),
-                file_name="break_even_governor_chosen_path.csv",
+                "Download Strategy Summary (CSV)",
+                data=quick_result["summary_df"].to_csv(index=False),
+                file_name="quick_strategy_summary.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
-            st.subheader("Year-by-Year Decision Diagnostics")
-            st.dataframe(result["decision_df"], use_container_width=True)
-            st.download_button(
-                "Download Decision Diagnostics (CSV)",
-                data=result["decision_df"].to_csv(index=False),
-                file_name="break_even_governor_decisions.csv",
-                mime="text/csv",
-                use_container_width=True,
+            st.subheader("Advisor Interpretation")
+            st.write(quick_result["advisor_text"])
+            guidance = quick_result.get("next_step_guidance", [])
+            if guidance:
+                st.subheader("Recommended Next Steps")
+                for item in guidance:
+                    st.write(f"- {item}")
+            top_ranked_rows = quick_result.get("ranked_rows", [])
+            if top_ranked_rows:
+                top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
+                st.caption("Quick Strategy and Optimizer picks can differ because they come from different ranking layers. Use the button below to load this quick recommendation into the Governor.")
+                st.button(
+                    f"Apply Quick Strategy Winner {top_strategy['Strategy']} to Governor",
+                    on_click=launch_conversion_optimizer_from_strategy,
+                    args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
+                    use_container_width=True,
+                )
+
+        nav_cols = st.columns([1, 1, 4])
+        with nav_cols[0]:
+            if st.button("← Back", key="workflow_back_3", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = 2
+                st.rerun()
+        with nav_cols[1]:
+            if st.button("Next → Optimizer", key="workflow_next_3", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = max(int(st.session_state.get("conversion_workflow_step", 1)), 4)
+                st.rerun()
+    if current_step >= 4:
+        st.markdown("## Step 4 — Social Security Optimizer")
+        st.caption("Run the full 81-combo engine, then rerank the fact set by profile and modifiers as needed.")
+        st.header("Integrity / Speed")
+        integrity_mode = st.checkbox(
+            "Enable Integrity Mode",
+            value=bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"])),
+            help="When enabled, the app runs slower but adds repeatability and accounting checks. Leave this off for faster day-to-day use.",
+            key="integrity_mode",
+        )
+        validation_tolerance = st.number_input(
+            "Validation Tolerance ($)",
+            min_value=0.0,
+            value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
+            step=0.01,
+            format="%.2f",
+            help="Used only when Integrity Mode is enabled.",
+            key="validation_tolerance",
+            disabled=not integrity_mode,
+        )
+
+        st.header("Social Security Optimizer Workflow")
+        st.info(
+            "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
+            "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
+            "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
+            "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
+        )
+        ss_opt1, ss_opt2 = st.columns(2)
+        with ss_opt1:
+            run_ss_optimizer_toggle = st.checkbox(
+                "Run SS Optimizer",
+                value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
+                help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
+                key="run_ss_optimizer_toggle",
             )
+        with ss_opt2:
+            trad_balance_penalty_lambda = st.number_input(
+                "SS Optimizer Traditional IRA Penalty Lambda",
+                min_value=0.0,
+                value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+                step=0.05,
+                format="%.2f",
+                help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
+                key="trad_balance_penalty_lambda",
+            )
+
+        inputs.update(
+            {
+                "cash_sweep_threshold": cash_sweep_threshold,
+                "state_tax_rate": state_tax_rate,
+                "target_trad_balance_enabled": target_trad_balance_enabled,
+                "target_trad_balance": target_trad_balance,
+                "target_trad_override_enabled": target_trad_override_enabled,
+                "target_trad_override_max_rate": target_trad_override_max_rate,
+                "post_aca_target_bracket": post_aca_target_bracket,
+                "rmd_era_target_bracket": rmd_era_target_bracket,
+            }
+        )
+
+        if "annual_calc_year" in st.session_state:
+            st.info(
+                f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+            )
+
+        if run_ss_optimizer_toggle:
+            total_combos = get_ss_optimizer_combo_count()
+            if st.session_state.get("ss_optimizer_running"):
+                st.session_state["ss_optimizer_running"] = False
+            partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
+            progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
+            last_completed = st.session_state.get("ss_optimizer_last_completed")
+            partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
+            if partial_available:
+                last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
+                st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
+            optimizer_error = st.session_state.get("ss_optimizer_error")
+            if optimizer_error:
+                st.error(optimizer_error)
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
+                    clear_ss_optimizer_state(clear_last_result=True)
+                    optimizer_result = run_ss_optimizer(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                        integrity_mode=integrity_mode,
+                        validation_tolerance=validation_tolerance,
+                        start_index=0,
+                        existing_results=[],
+                    )
+                    optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                    optimizer_result["planning_profile_snapshot"] = planning_profile
+                    optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                    st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                    if optimizer_result.get("completed", False):
+                        mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                    st.rerun()
+            with b2:
+                resume_disabled = not partial_available
+                if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
+                    optimizer_result = run_ss_optimizer(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                        integrity_mode=integrity_mode,
+                        validation_tolerance=validation_tolerance,
+                        start_index=progress_index,
+                        existing_results=partial_results,
+                        profile_name=planning_profile,
+                    )
+                    optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                    optimizer_result["planning_profile_snapshot"] = planning_profile
+                    optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                    st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                    if optimizer_result.get("completed", False):
+                        mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                    st.rerun()
+            with b3:
+                last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
+                rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
+                if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
+                    reranked = rerank_existing_optimizer_result(
+                        last_result_for_rerank,
+                        preferences=extract_scoring_preferences(st.session_state),
+                    )
+                    reranked["planning_profile_snapshot"] = planning_profile
+                    optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                    st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                    st.rerun()
+            with b4:
+                reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
+                if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
+                    clear_ss_optimizer_state(clear_last_result=True)
+                    st.rerun()
+
+            last_result = get_current_result_payload("ss_optimizer_last_result")
+            if last_result is not None:
+                if last_result.get("completed", False):
+                    st.caption(
+                        f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
+                        f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
+                    )
+                render_ss_optimizer_results(last_result)
+        else:
+            st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
+
+        nav_cols = st.columns([1, 1, 4])
+        with nav_cols[0]:
+            if st.button("← Back", key="workflow_back_4", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = 3
+                st.rerun()
+        with nav_cols[1]:
+            if st.button("Next → Results", key="workflow_next_4", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = max(int(st.session_state.get("conversion_workflow_step", 1)), 5)
+                st.rerun()
+    if current_step >= 5:
+        st.markdown("## Step 5 — Results and Strategy Execution")
+        st.caption("Review optimizer output, compare strategies, and apply a selected strategy to the Break-Even Governor or flat strategy runner.")
+        st.subheader("Strategy Execution")
+        nav_cols = st.columns([1, 5])
+        with nav_cols[0]:
+            if st.button("← Back", key="workflow_back_5", use_container_width=True):
+                st.session_state["conversion_workflow_step"] = 4
+                st.rerun()
+        st.caption("These sections stay visible so you can always run or review the Break-Even Governor and Flat Strategy without hiding the optimizer.")
+
+        flat_annual_conversion = st.number_input(
+            "Flat Annual Conversion",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+            step=5000.0,
+            key="annual_conversion",
+            help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
+        )
+
+        btn1, btn2 = st.columns(2)
+
+        with btn1:
+            st.subheader("Flat Strategy")
+            if st.button("Run Flat Strategy Test"):
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                result = run_model_fixed(flat_inputs)
+                result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
+                st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
+                mark_result_state("flat_strategy", flat_inputs)
+            flat_result = get_current_result_payload("flat_strategy_last_result")
+            if flat_result is not None:
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
+                render_summary("Flat Strategy Summary", flat_result)
+                st.subheader("Flat Strategy Yearly Results")
+                st.dataframe(flat_result["df"], use_container_width=True)
+
+        with btn2:
+            st.subheader("Break-Even Governor")
+            st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
+            if st.button("Run Break-Even Governor"):
+                result = run_governor_with_validation(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    integrity_mode=integrity_mode,
+                    tol=validation_tolerance,
+                )
+                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
+                mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
+            result = get_current_result_payload("break_even_last_result")
+            if result is not None:
+                render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
+                render_summary("Break-Even Governor Summary", result)
+                st.subheader("Chosen Year-by-Year Path")
+                path_display_df = build_chosen_path_display_df(result["df"])
+                st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
+                with st.expander("Debug: First Year Raw Data", expanded=False):
+                    try:
+                        if result.get("df") is not None and not result["df"].empty:
+                            first_row_raw = result["df"].iloc[0].to_dict()
+                            st.json(first_row_raw)
+                    except Exception as debug_exc:
+                        st.write(f"Debug panel unavailable: {debug_exc}")
+                if path_display_df is not None and not path_display_df.empty:
+                    fmt = {}
+                    non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
+                    for col in path_display_df.columns:
+                        if col in non_currency_cols:
+                            continue
+                        series = path_display_df[col]
+                        if not pd.api.types.is_numeric_dtype(series):
+                            continue
+                        if "Rate" in col:
+                            fmt[col] = "{:.2%}"
+                        else:
+                            fmt[col] = "${:,.0f}"
+                    st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+                st.download_button(
+                    "Download Chosen Path (CSV)",
+                    data=result["df"].to_csv(index=False),
+                    file_name="break_even_governor_chosen_path.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.subheader("Year-by-Year Decision Diagnostics")
+                st.dataframe(result["decision_df"], use_container_width=True)
+                st.download_button(
+                    "Download Decision Diagnostics (CSV)",
+                    data=result["decision_df"].to_csv(index=False),
+                    file_name="break_even_governor_decisions.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
 
 def main() -> None:
