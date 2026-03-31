@@ -432,11 +432,7 @@ def render_optimizer_status_panel(inputs: dict, max_conversion: float, step_size
     if facts_changed:
         st.error("Scenario facts changed since the last 81-combination run. Re-run the optimizer to regenerate the strategy universe before trusting the rankings below.")
     elif ranking_changed:
-        stale_reason = build_optimizer_stale_reason(last_result, planning_profile, current_preferences)
-        msg = "Your ranking lens changed since the last optimizer scoring snapshot. Use 'Re-rank Existing 81 Results' to refresh the Top 5 profile shortlists without rerunning the 81-combination engine."
-        if stale_reason:
-            msg += f" {stale_reason}"
-        st.warning(msg)
+        st.warning("Your ranking lens changed since the last optimizer scoring snapshot. Use 'Re-rank Existing 81 Results' to refresh the Top 5 profile shortlists without rerunning the 81-combination engine.")
     else:
         st.success("Scenario facts and ranking preferences match the last 81-combination result. You can review the current rankings without rerunning anything.")
 
@@ -445,68 +441,6 @@ def render_optimizer_status_panel(inputs: dict, max_conversion: float, step_size
     cols[1].metric("Ranking lens", "Changed" if ranking_changed else "Up to date")
     cols[2].metric("Last scoring profile", str(prior_profile or planning_profile))
 
-
-
-
-def get_conversion_workflow_stage() -> int:
-    ensure_default_state()
-    return int(st.session_state.get("conversion_workflow_stage", 1))
-
-
-def set_conversion_workflow_stage(stage: int) -> None:
-    st.session_state["conversion_workflow_stage"] = max(1, min(6, int(stage)))
-
-
-def household_inputs_complete(inputs: dict) -> bool:
-    try:
-        total_assets = float(inputs.get("trad", 0.0)) + float(inputs.get("roth", 0.0)) + float(inputs.get("brokerage", 0.0)) + float(inputs.get("cash", 0.0))
-        return int(inputs.get("owner_current_age", 0)) > 0 and int(inputs.get("spouse_current_age", 0)) > 0 and total_assets > 0 and float(inputs.get("owner_ss_base", 0.0)) >= 0.0 and float(inputs.get("spouse_ss_base", 0.0)) >= 0.0
-    except Exception:
-        return False
-
-
-def governor_inputs_complete(max_conversion: float, step_size: float) -> bool:
-    try:
-        return float(max_conversion) > 0.0 and float(step_size) >= 1000.0
-    except Exception:
-        return False
-
-
-def render_conversion_workflow_nav(active_stage: int, unlocked_stage: int) -> None:
-    labels = [
-        "1. Scenario",
-        "2. Household",
-        "3. Governor",
-        "4. Preferences",
-        "5. Optimizer",
-        "6. Results",
-    ]
-    cols = st.columns(len(labels))
-    for idx, label in enumerate(labels, start=1):
-        with cols[idx-1]:
-            st.button(label, key=f"workflow_nav_{idx}", use_container_width=True, disabled=idx > unlocked_stage or idx == active_stage, on_click=set_conversion_workflow_stage, args=(idx,))
-    st.caption("Use Next / Back to move through the workflow. You can jump to any unlocked step above. Results stay visible even when a rerun is required.")
-
-
-def render_next_back(stage: int, unlocked_stage: int) -> None:
-    c1, c2, c3 = st.columns([1,1,4])
-    with c1:
-        st.button("Back", key=f"back_stage_{stage}", use_container_width=True, disabled=stage <= 1, on_click=set_conversion_workflow_stage, args=(stage - 1,))
-    with c2:
-        st.button("Next", key=f"next_stage_{stage}", use_container_width=True, disabled=stage >= 6 or stage >= unlocked_stage, on_click=set_conversion_workflow_stage, args=(min(6, max(stage + 1, unlocked_stage)),))
-
-
-def build_optimizer_stale_reason(last_result: dict | None, current_profile: str, current_preferences: dict) -> str:
-    if not last_result:
-        return ""
-    prior_profile = last_result.get("planning_profile_snapshot")
-    prior_preferences = last_result.get("scoring_preferences_snapshot", {})
-    if scoring_preferences_match(current_profile, current_preferences, prior_profile, prior_preferences):
-        return ""
-    return (
-        f"Based on: {prior_profile or current_profile} + {describe_active_scoring_preferences(prior_preferences)}. "
-        f"Current: {current_profile} + {describe_active_scoring_preferences(current_preferences)}."
-    )
 
 def rerank_existing_optimizer_result(result_payload: dict, preferences: dict | None = None) -> dict:
     """
@@ -5284,7 +5218,6 @@ def render_shared_household_inputs() -> dict:
 def render_conversion_page() -> None:
     ensure_default_state()
     st.title("Break-Even Governor")
-    active_stage = get_conversion_workflow_stage()
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
@@ -5295,30 +5228,11 @@ def render_conversion_page() -> None:
         st.info(f"Using Social Security claim ages {selected_strategy}{source_text}{profile_text}. You can adjust them below before running the Break-Even Governor.")
     if preset_note:
         st.caption(preset_note)
-    with st.container(border=True):
-        st.subheader("Step 1: Scenario")
-        st.caption("Start here to load, save, or reset the scenario before changing planning assumptions.")
-        render_top_nav("conversion")
-        render_next_back(1, 2)
+    render_top_nav("conversion")
+    
+    inputs = render_shared_household_inputs()
 
-    with st.container(border=True):
-        st.subheader("Step 2: Household Setup")
-        st.caption("Enter household facts, retirement smile assumptions, ACA timing, earned income, and tax funding policy.")
-        inputs = render_shared_household_inputs()
-        household_ready = household_inputs_complete(inputs)
-        if not household_ready:
-            st.warning("Complete basic ages, starting balances, and Social Security inputs to unlock the next step.")
-        render_next_back(2, 3 if household_ready else 2)
-
-    unlocked_stage = 2
-    if household_ready:
-        unlocked_stage = 3
-    render_conversion_workflow_nav(active_stage, unlocked_stage if unlocked_stage >= active_stage else active_stage)
-
-    with st.container(border=True):
-        st.subheader("Step 3: Break-Even Governor Inputs")
-        st.caption("These controls affect the conversion engine and therefore the underlying scenario facts. Changing them requires a rerun of the optimizer.")
-
+    st.header("Break-Even Governor Inputs")
     current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
     if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
         st.session_state["max_conversion"] = float(current_max_conversion_value)
@@ -5434,14 +5348,6 @@ def render_conversion_page() -> None:
             help="Used once the household reaches the first RMD year.",
             key="rmd_era_target_bracket",
         )
-    governor_ready = governor_inputs_complete(max_conversion, step_size)
-    if not governor_ready:
-        st.warning("Set a positive max conversion and a valid step size to unlock planning preferences and optimizer actions.")
-    render_next_back(3, 4 if governor_ready else 3)
-
-    with st.container(border=True):
-        st.subheader("Step 4: Planning Preferences")
-        st.caption("Profiles set the base ranking philosophy. Modifiers nudge that philosophy without changing the underlying 81-combination fact set.")
 
     st.header("Recommendation Engine v1")
     planning_profile = st.selectbox(
@@ -5480,7 +5386,6 @@ def render_conversion_page() -> None:
         st.caption("How this combination behaves")
         for item in selection_summary["notes"]:
             st.write(f"- {item}")
-    render_next_back(4, 5 if governor_ready else 4)
 
     rec_col1, rec_col2 = st.columns([1, 2])
     with rec_col1:
@@ -5580,13 +5485,14 @@ def render_conversion_page() -> None:
         "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
         "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
     )
-    with st.container(border=True):
-        st.subheader("Step 5: Social Security Optimizer")
-        st.caption("Run the 81-combination strategy universe once, then rerank it as needed when only the profile or modifiers change.")
-
     ss_opt1, ss_opt2 = st.columns(2)
     with ss_opt1:
-        st.caption("The optimizer engine is always profile-neutral. Profiles and modifiers only affect ranking after the 81 combinations are generated.")
+        run_ss_optimizer_toggle = st.checkbox(
+            "Run SS Optimizer",
+            value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
+            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
+            key="run_ss_optimizer_toggle",
+        )
     with ss_opt2:
         trad_balance_penalty_lambda = st.number_input(
             "SS Optimizer Traditional IRA Penalty Lambda",
@@ -5616,94 +5522,90 @@ def render_conversion_page() -> None:
             f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
         )
 
-    render_optimizer_status_panel(inputs, max_conversion, step_size, trad_balance_penalty_lambda, planning_profile, current_preferences)
+    if run_ss_optimizer_toggle:
+        total_combos = get_ss_optimizer_combo_count()
+        if st.session_state.get("ss_optimizer_running"):
+            st.session_state["ss_optimizer_running"] = False
+        partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
+        progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
+        last_completed = st.session_state.get("ss_optimizer_last_completed")
+        partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
+        if partial_available:
+            last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
+            st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
+        optimizer_error = st.session_state.get("ss_optimizer_error")
+        if optimizer_error:
+            st.error(optimizer_error)
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
+                clear_ss_optimizer_state(clear_last_result=True)
+                optimizer_result = run_ss_optimizer(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                    integrity_mode=integrity_mode,
+                    validation_tolerance=validation_tolerance,
+                    start_index=0,
+                    existing_results=[],
+                )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                st.rerun()
+        with b2:
+            resume_disabled = not partial_available
+            if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
+                optimizer_result = run_ss_optimizer(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                    integrity_mode=integrity_mode,
+                    validation_tolerance=validation_tolerance,
+                    start_index=progress_index,
+                    existing_results=partial_results,
+                    profile_name=planning_profile,
+                )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                st.rerun()
+        with b3:
+            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
+            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
+            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
+                reranked = rerank_existing_optimizer_result(
+                    last_result_for_rerank,
+                    preferences=extract_scoring_preferences(st.session_state),
+                )
+                reranked["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                st.rerun()
+        with b4:
+            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
+            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
+                clear_ss_optimizer_state(clear_last_result=True)
+                st.rerun()
 
-    total_combos = get_ss_optimizer_combo_count()
-    if st.session_state.get("ss_optimizer_running"):
-        st.session_state["ss_optimizer_running"] = False
-    partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
-    progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
-    last_completed = st.session_state.get("ss_optimizer_last_completed")
-    partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
-    if partial_available:
-        last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
-        st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
-    optimizer_error = st.session_state.get("ss_optimizer_error")
-    if optimizer_error:
-        st.error(optimizer_error)
-    b1, b2, b3, b4 = st.columns(4)
-    with b1:
-        if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
-            clear_ss_optimizer_state(clear_last_result=True)
-            optimizer_result = run_ss_optimizer(
-                inputs=inputs,
-                max_conversion=max_conversion,
-                step_size=step_size,
-                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                integrity_mode=integrity_mode,
-                validation_tolerance=validation_tolerance,
-                start_index=0,
-                existing_results=[],
-            )
-            optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-            optimizer_result["planning_profile_snapshot"] = planning_profile
-            optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-            st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-            if optimizer_result.get("completed", False):
-                mark_result_state("ss_optimizer", optimizer_hash_inputs)
-            st.rerun()
-    with b2:
-        resume_disabled = not partial_available
-        if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
-            optimizer_result = run_ss_optimizer(
-                inputs=inputs,
-                max_conversion=max_conversion,
-                step_size=step_size,
-                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                integrity_mode=integrity_mode,
-                validation_tolerance=validation_tolerance,
-                start_index=progress_index,
-                existing_results=partial_results,
-                profile_name=planning_profile,
-            )
-            optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-            optimizer_result["planning_profile_snapshot"] = planning_profile
-            optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-            st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-            if optimizer_result.get("completed", False):
-                mark_result_state("ss_optimizer", optimizer_hash_inputs)
-            st.rerun()
-    with b3:
-        last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
-        rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
-        if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
-            reranked = rerank_existing_optimizer_result(
-                last_result_for_rerank,
-                preferences=extract_scoring_preferences(st.session_state),
-            )
-            reranked["planning_profile_snapshot"] = planning_profile
-            optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-            st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-            st.rerun()
-    with b4:
-        reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
-        if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
-            clear_ss_optimizer_state(clear_last_result=True)
-            st.rerun()
-
-    last_result = get_current_result_payload("ss_optimizer_last_result")
-    if last_result is not None:
-        if last_result.get("completed", False):
-            st.caption(
-                f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
-                f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
-            )
-        render_ss_optimizer_results(last_result)
-    render_next_back(5, 6 if get_current_result_payload("ss_optimizer_last_result") is not None else 5)
-
-    with st.container(border=True):
-        st.subheader("Step 6: Strategy Execution and Results")
-        st.caption("Use the Break-Even Governor or Flat Strategy below to inspect any chosen strategy in detail. These sections remain visible even when results are stale.")
+        last_result = get_current_result_payload("ss_optimizer_last_result")
+        if last_result is not None:
+            if last_result.get("completed", False):
+                st.caption(
+                    f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
+                    f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
+                )
+            render_ss_optimizer_results(last_result)
+    else:
+        st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
 
     st.header("Strategy Execution")
     st.caption("These sections stay visible so you can always run or review the Break-Even Governor and Flat Strategy without hiding the optimizer.")
