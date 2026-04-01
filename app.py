@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 85000.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v33-ss-preference-checkbox"
+APP_VERSION = "v45-spending-optimizer"
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -126,6 +126,8 @@ DEFAULT_APP_STATE = {
     "target_trad_balance_enabled": False,
     "target_trad_override_enabled": False,
     "target_trad_override_max_rate": 0.0,
+    "target_after_tax_legacy_mode": "Maximize",
+    "target_after_tax_legacy_custom": 10000000.0,
     "trad": 0.0,
     "trad_balance_penalty_lambda": 1.00,
     "validation_tolerance": 0.01,
@@ -140,7 +142,7 @@ PAGE_STATE_KEY_PREFIXES = {
         "no_go_", "optimizer_", "owner_", "post_aca_", "primary_aca_end_year", "retirement_smile_",
         "rmd_era_", "roth", "run_ss_optimizer_toggle", "slow_go_", "spending_inflation_rate_pct",
         "spouse_", "state_tax_rate", "step_size", "integrity_mode", "strict_repeatability_check", "target_trad_",
-        "trad", "validation_tolerance", "preference_"
+        "trad", "validation_tolerance", "preference_", "target_after_tax_legacy"
     ],
 }
 
@@ -307,7 +309,7 @@ PROFILE_PRESETS = {
     },
 }
 
-QUICK_STRATEGY_COMBOS = [(62, 62), (65, 62), (66, 63), (67, 64), (67, 67), (67, 70), (70, 67), (70, 70)]
+QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
 
 HEIR_EFFECTIVE_TRAD_TAX_RATE = 0.40
 TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE = 0.32
@@ -586,6 +588,97 @@ def build_strategy_metrics(run_result: dict) -> dict:
     }
 
 
+def resolve_target_after_tax_legacy(mode: str, custom_value: float) -> float | None:
+    mapping = {
+        "Maximize": None,
+        "$5M": 5_000_000.0,
+        "$10M": 10_000_000.0,
+        "$20M": 20_000_000.0,
+    }
+    if mode in mapping:
+        return mapping[mode]
+    try:
+        return max(0.0, float(custom_value))
+    except Exception:
+        return None
+
+
+def optimize_spending_for_target_legacy(inputs: dict, max_conversion: float, step_size: float, target_legacy: float) -> dict:
+    """
+    Find the highest base annual spending that still meets the requested after-tax legacy target,
+    using the current SS ages and Break-Even Governor settings.
+    """
+    max_conversion = sanitize_governor_max_conversion(max_conversion)
+    step_size = sanitize_governor_step_size(step_size)
+    target_legacy = float(target_legacy)
+    base_inputs = copy.deepcopy(inputs)
+    current_spending = float(base_inputs.get("annual_spending", 0.0))
+    cache: dict[float, dict] = {}
+
+    def evaluate(spending: float) -> dict:
+        rounded_spending = float(max(0.0, round(spending / 1000.0) * 1000.0))
+        if rounded_spending in cache:
+            return cache[rounded_spending]
+        scenario_inputs = copy.deepcopy(base_inputs)
+        scenario_inputs["annual_spending"] = rounded_spending
+        run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+        metrics = build_strategy_metrics(run_result)
+        payload = {
+            "annual_spending": rounded_spending,
+            "run_result": run_result,
+            "metrics": metrics,
+        }
+        cache[rounded_spending] = payload
+        return payload
+
+    baseline = evaluate(current_spending)
+    if float(baseline["metrics"]["after_tax_legacy"]) < target_legacy:
+        return {
+            "target_legacy": target_legacy,
+            "status": "not_achievable_from_current_plan",
+            "baseline": baseline,
+            "optimized": baseline,
+            "search_runs": len(cache),
+        }
+
+    low = current_spending
+    high = max(current_spending * 3.0, current_spending + 50_000.0, 120_000.0)
+    high_eval = evaluate(high)
+    upper_cap = max(500_000.0, current_spending + 250_000.0)
+    while float(high_eval["metrics"]["after_tax_legacy"]) >= target_legacy and high < upper_cap:
+        low = high
+        high = min(upper_cap, high * 1.5)
+        if high <= low:
+            break
+        high_eval = evaluate(high)
+
+    best = baseline if float(baseline["metrics"]["after_tax_legacy"]) >= target_legacy else None
+    low_bound = current_spending
+    high_bound = high
+
+    for _ in range(16):
+        if high_bound - low_bound <= 1000.0:
+            break
+        mid = (low_bound + high_bound) / 2.0
+        mid_eval = evaluate(mid)
+        if float(mid_eval["metrics"]["after_tax_legacy"]) >= target_legacy:
+            best = mid_eval
+            low_bound = float(mid_eval["annual_spending"])
+        else:
+            high_bound = float(mid_eval["annual_spending"])
+
+    if best is None:
+        best = baseline
+
+    return {
+        "target_legacy": target_legacy,
+        "status": "ok",
+        "baseline": baseline,
+        "optimized": best,
+        "search_runs": len(cache),
+    }
+
+
 def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None) -> dict[str, pd.DataFrame]:
     if not results_rows:
         return {}
@@ -691,16 +784,16 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
     for i, metrics in enumerate(metrics_list):
         nw_adjusted = nw_norm[i] ** 0.72
         if profile_name == "Legacy Focused":
-            legacy_signal = 0.82 * effective_legacy_norm[i] + 0.18 * base_legacy_norm[i]
-            legacy_adjusted = legacy_signal ** 1.34
-            trad_penalty = trad_norm[i] ** 1.72
-            drag_penalty = drag_norm[i] ** 1.02
-            trad_share_penalty = trad_share_norm[i] ** 2.45
-            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.62
-            stability_adjusted = 0.52 * (stability_norm[i] ** 1.18) + 0.28 * (ss_income_norm[i] ** 1.18) + 0.20 * (survivor_ss_norm[i] ** 1.12)
-            risk_penalty = risk_norm[i] ** 1.02
-            positive_score = (0.04 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-            negative_score = (1.35 * weights["trad"] * trad_penalty) + (1.55 * weights.get("trad_share", 0.0) * trad_share_penalty) + (0.45 * weights.get("drag", 0.0) * drag_penalty) + (1.45 * weights["trad"] * heir_tax_penalty) + (weights["risk"] * risk_penalty)
+            legacy_signal = 0.80 * effective_legacy_norm[i] + 0.20 * base_legacy_norm[i]
+            legacy_adjusted = legacy_signal ** 1.30
+            trad_penalty = trad_norm[i] ** 1.60
+            drag_penalty = drag_norm[i] ** 1.05
+            trad_share_penalty = trad_share_norm[i] ** 2.10
+            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.45
+            stability_adjusted = 0.55 * (stability_norm[i] ** 1.20) + 0.30 * (ss_income_norm[i] ** 1.20) + 0.15 * (survivor_ss_norm[i] ** 1.10)
+            risk_penalty = risk_norm[i] ** 1.05
+            positive_score = (0.10 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
+            negative_score = (weights["trad"] * trad_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty) + (0.60 * weights.get("drag", 0.0) * drag_penalty) + (0.90 * weights["trad"] * heir_tax_penalty) + (weights["risk"] * risk_penalty)
         else:
             legacy_adjusted = base_legacy_norm[i] ** 1.05
             trad_penalty = trad_norm[i] ** 1.85
@@ -723,14 +816,7 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
             preference_bonus += stability_bonus
         if preferences.get("minimize_trad_ira_for_heirs"):
-            if profile_name == "Legacy Focused":
-                heir_structure_penalty = (
-                    0.22 * (trad_share_norm[i] ** 2.40)
-                    + 0.20 * (heir_tax_drag_norm[i] ** 1.55)
-                    + 0.10 * (trad_norm[i] ** 1.90)
-                )
-            else:
-                heir_structure_penalty = 0.12 * (trad_share_norm[i] ** 1.80) + 0.12 * (heir_tax_drag_norm[i] ** 1.20)
+            heir_structure_penalty = 0.12 * (trad_share_norm[i] ** 1.80) + 0.12 * (heir_tax_drag_norm[i] ** 1.20)
             preference_penalty += heir_structure_penalty
 
         positive_score += preference_bonus
@@ -4002,63 +4088,6 @@ def render_ss_optimizer_results(result: dict):
                     key=f"download_profile_shortlist_{profile_name}",
                 )
 
-
-    lowest_trad_df = result["all_results_df"].sort_values("Ending Traditional IRA Balance", ascending=True).head(1).copy()
-    if not lowest_trad_df.empty:
-        lowest_trad_row = lowest_trad_df.iloc[0]
-        st.subheader("Lowest Traditional IRA outcome in all 81 strategies")
-        st.caption("This shows the cleanest Traditional IRA outcome the optimizer actually generated. Use it to judge the cost of pushing harder on Traditional IRA reduction, even if it is not the top-ranked raw strategy.")
-        cost_compare_rows = [
-            {
-                "Metric": "Strategy",
-                "Raw Optimizer Winner": f"{int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}" if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": lowest_trad_row["Strategy"],
-            },
-            {
-                "Metric": "Final Net Worth",
-                "Raw Optimizer Winner": format_dollars(best["Final Net Worth"]) if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Final Net Worth"]),
-            },
-            {
-                "Metric": "After-Tax Legacy",
-                "Raw Optimizer Winner": format_dollars(best["After-Tax Legacy"]) if result.get("best_result") is not None and "After-Tax Legacy" in best else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row["After-Tax Legacy"]),
-            },
-            {
-                "Metric": "Ending Traditional IRA Balance",
-                "Raw Optimizer Winner": format_dollars(best["Ending Traditional IRA Balance"]) if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Ending Traditional IRA Balance"]),
-            },
-            {
-                "Metric": "Heir Tax Drag",
-                "Raw Optimizer Winner": format_dollars(best.get("Heir Tax Drag", 0.0)) if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row.get("Heir Tax Drag", 0.0)),
-            },
-            {
-                "Metric": "Total Government Drag",
-                "Raw Optimizer Winner": format_dollars(best["Total Government Drag"]) if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Total Government Drag"]),
-            },
-            {
-                "Metric": "Total Conversions",
-                "Raw Optimizer Winner": format_dollars(best["Total Conversions"]) if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Total Conversions"]),
-            },
-            {
-                "Metric": "Final Household SS Income",
-                "Raw Optimizer Winner": format_dollars(best["Final Household SS Income"]) if result.get("best_result") is not None else "",
-                "Lowest Trad Outcome": format_dollars(lowest_trad_row["Final Household SS Income"]),
-            },
-        ]
-        st.dataframe(pd.DataFrame(cost_compare_rows), use_container_width=True)
-        st.button(
-            f"Apply lowest Trad outcome {lowest_trad_row['Strategy']} to Governor",
-            key=f"apply_lowest_trad_{lowest_trad_row['Strategy']}",
-            on_click=launch_conversion_optimizer_from_strategy,
-            args=(int(lowest_trad_row["Owner SS Age"]), int(lowest_trad_row["Spouse SS Age"]), "optimizer_lowest_trad", "lowest_trad"),
-            use_container_width=True,
-        )
-
     with st.expander("All 81 SS combinations"):
         st.dataframe(
             result["all_results_df"].style.format({
@@ -5522,6 +5551,115 @@ def render_conversion_page() -> None:
                 on_click=launch_conversion_optimizer_from_strategy,
                 args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
                 use_container_width=True,
+            )
+
+
+    st.header("Spending Optimization (Target Legacy)")
+    st.caption("Use this to estimate how much more you could spend each year while still meeting an after-tax legacy goal, using your current Social Security ages and Break-Even Governor settings.")
+    spend1, spend2 = st.columns([1, 1])
+    with spend1:
+        target_legacy_mode = st.selectbox(
+            "Target After-Tax Legacy",
+            ["Maximize", "$5M", "$10M", "$20M", "Custom"],
+            index=["Maximize", "$5M", "$10M", "$20M", "Custom"].index(st.session_state.get("target_after_tax_legacy_mode", DEFAULT_APP_STATE["target_after_tax_legacy_mode"])),
+            help="Set a legacy target and the tool will search for the highest base annual spending that still reaches it.",
+            key="target_after_tax_legacy_mode",
+        )
+    with spend2:
+        target_after_tax_legacy_custom = st.number_input(
+            "Custom Legacy Target",
+            min_value=0.0,
+            value=float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"])),
+            step=500000.0,
+            help="Used only when Target After-Tax Legacy is set to Custom.",
+            key="target_after_tax_legacy_custom",
+        )
+    resolved_target_legacy = resolve_target_after_tax_legacy(target_legacy_mode, target_after_tax_legacy_custom)
+    if resolved_target_legacy is None:
+        st.info("Set Target After-Tax Legacy to a dollar goal to use spending optimization. Leaving it on Maximize keeps the current maximize-legacy behavior.")
+    else:
+        st.caption(
+            f"Current search will use your active SS ages ({int(inputs['owner_claim_age'])}/{int(inputs['spouse_claim_age'])}), "
+            f"current Governor settings, and a target after-tax legacy of {format_dollars(resolved_target_legacy)}."
+        )
+        if st.button("Optimize Spending for Target Legacy", use_container_width=True):
+            with st.spinner("Searching for the highest spending level that still reaches your target legacy..."):
+                spending_result = optimize_spending_for_target_legacy(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    target_legacy=resolved_target_legacy,
+                )
+            st.session_state["spending_target_result"] = spending_result
+
+    spending_target_result = st.session_state.get("spending_target_result")
+    if spending_target_result and resolved_target_legacy is not None and float(spending_target_result.get("target_legacy", 0.0)) == float(resolved_target_legacy):
+        baseline = spending_target_result["baseline"]
+        optimized = spending_target_result["optimized"]
+        baseline_metrics = baseline["metrics"]
+        optimized_metrics = optimized["metrics"]
+        status = spending_target_result.get("status", "ok")
+        st.subheader("Target Legacy Spending Result")
+        if status == "not_achievable_from_current_plan":
+            st.warning(
+                f"Your current plan at base spending {format_dollars(baseline['annual_spending'])} already finishes below the selected target after-tax legacy of {format_dollars(resolved_target_legacy)}. "
+                "Raise the target less, lower spending, or change assumptions before using this tool."
+            )
+        else:
+            st.success(
+                f"You can raise base annual spending to about {format_dollars(optimized['annual_spending'])} and still keep after-tax legacy at or above {format_dollars(resolved_target_legacy)}."
+            )
+            delta_spending = optimized["annual_spending"] - baseline["annual_spending"]
+            delta_net_worth = optimized_metrics["final_net_worth"] - baseline_metrics["final_net_worth"]
+            delta_legacy = optimized_metrics["after_tax_legacy"] - baseline_metrics["after_tax_legacy"]
+            delta_trad = optimized_metrics["ending_traditional_ira_balance"] - baseline_metrics["ending_traditional_ira_balance"]
+            delta_drag = float(optimized["run_result"].get("total_government_drag", 0.0)) - float(baseline["run_result"].get("total_government_drag", 0.0))
+            delta_ss = optimized_metrics["final_household_ss_income"] - baseline_metrics["final_household_ss_income"]
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Current Base Spending", format_dollars(baseline["annual_spending"]))
+            c2.metric("Max Base Spending to Hit Target", format_dollars(optimized["annual_spending"]), delta=format_dollars(delta_spending))
+            c3.metric("Search Runs", str(int(spending_target_result.get("search_runs", 0))))
+
+            comparison_df = pd.DataFrame([
+                {
+                    "Plan": "Current",
+                    "Base Annual Spending": baseline["annual_spending"],
+                    "After-Tax Legacy": baseline_metrics["after_tax_legacy"],
+                    "Final Net Worth": baseline_metrics["final_net_worth"],
+                    "Ending Traditional IRA": baseline_metrics["ending_traditional_ira_balance"],
+                    "Heir Tax Drag": baseline_metrics.get("heir_tax_drag", 0.0),
+                    "Final Household SS Income": baseline_metrics["final_household_ss_income"],
+                    "Total Government Drag": float(baseline["run_result"].get("total_government_drag", 0.0)),
+                },
+                {
+                    "Plan": "Target Legacy Spending",
+                    "Base Annual Spending": optimized["annual_spending"],
+                    "After-Tax Legacy": optimized_metrics["after_tax_legacy"],
+                    "Final Net Worth": optimized_metrics["final_net_worth"],
+                    "Ending Traditional IRA": optimized_metrics["ending_traditional_ira_balance"],
+                    "Heir Tax Drag": optimized_metrics.get("heir_tax_drag", 0.0),
+                    "Final Household SS Income": optimized_metrics["final_household_ss_income"],
+                    "Total Government Drag": float(optimized["run_result"].get("total_government_drag", 0.0)),
+                },
+            ])
+            st.dataframe(
+                comparison_df.style.format({
+                    "Base Annual Spending": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Final Net Worth": "${:,.0f}",
+                    "Ending Traditional IRA": "${:,.0f}",
+                    "Heir Tax Drag": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Total Government Drag": "${:,.0f}",
+                }),
+                use_container_width=True,
+            )
+            st.caption(
+                "Compared with your current plan, this target-legacy spending level changes: "
+                f"net worth by {format_dollars(delta_net_worth)}, after-tax legacy by {format_dollars(delta_legacy)}, "
+                f"ending Traditional IRA by {format_dollars(delta_trad)}, government drag by {format_dollars(delta_drag)}, "
+                f"and final household Social Security income by {format_dollars(delta_ss)}."
             )
 
     st.header("Integrity / Speed")
