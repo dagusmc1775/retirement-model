@@ -5565,15 +5565,18 @@ def render_conversion_page() -> None:
             help="Set a legacy target and the tool will search for the highest base annual spending that still reaches it.",
             key="target_after_tax_legacy_mode",
         )
-    with spend2:
-        target_after_tax_legacy_custom = st.number_input(
-            "Custom Legacy Target",
-            min_value=0.0,
-            value=float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"])),
-            step=500000.0,
-            help="Used only when Target After-Tax Legacy is set to Custom.",
-            key="target_after_tax_legacy_custom",
-        )
+    if target_legacy_mode == "Custom":
+        with spend2:
+            target_after_tax_legacy_custom = st.number_input(
+                "Custom Legacy Target",
+                min_value=0.0,
+                value=float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"])),
+                step=500000.0,
+                help="Used only when Target After-Tax Legacy is set to Custom.",
+                key="target_after_tax_legacy_custom",
+            )
+    else:
+        target_after_tax_legacy_custom = float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"]))
     resolved_target_legacy = resolve_target_after_tax_legacy(target_legacy_mode, target_after_tax_legacy_custom)
     if resolved_target_legacy is None:
         st.info("Set Target After-Tax Legacy to a dollar goal to use spending optimization. Leaving it on Maximize keeps the current maximize-legacy behavior.")
@@ -5582,7 +5585,7 @@ def render_conversion_page() -> None:
             f"Current search will use your active SS ages ({int(inputs['owner_claim_age'])}/{int(inputs['spouse_claim_age'])}), "
             f"current Governor settings, and a target after-tax legacy of {format_dollars(resolved_target_legacy)}."
         )
-        if st.button("Optimize Spending for Target Legacy", use_container_width=True):
+        if st.button("Find Maximum Annual Spending for Legacy Target", use_container_width=True):
             with st.spinner("Searching for the highest spending level that still reaches your target legacy..."):
                 spending_result = optimize_spending_for_target_legacy(
                     inputs=inputs,
@@ -5599,15 +5602,18 @@ def render_conversion_page() -> None:
         baseline_metrics = baseline["metrics"]
         optimized_metrics = optimized["metrics"]
         status = spending_target_result.get("status", "ok")
-        st.subheader("Target Legacy Spending Result")
+        st.subheader("Maximum Annual Spending for Legacy Target")
         if status == "not_achievable_from_current_plan":
             st.warning(
-                f"Your current plan at base spending {format_dollars(baseline['annual_spending'])} already finishes below the selected target after-tax legacy of {format_dollars(resolved_target_legacy)}. "
-                "Raise the target less, lower spending, or change assumptions before using this tool."
+                f"At your current base spending of {format_dollars(baseline['annual_spending'])}, your projected after-tax legacy is {format_dollars(baseline_metrics['after_tax_legacy'])}, which is below the selected target of {format_dollars(resolved_target_legacy)}. "
+                "Lower spending, reduce the target, or change assumptions before using this tool."
             )
         else:
             st.success(
-                f"You can raise base annual spending to about {format_dollars(optimized['annual_spending'])} and still keep after-tax legacy at or above {format_dollars(resolved_target_legacy)}."
+                f"You can spend up to about {format_dollars(optimized['annual_spending'])} per year and still keep after-tax legacy at or above {format_dollars(resolved_target_legacy)}."
+            )
+            st.caption(
+                "This tool finds the highest sustainable base annual spending that still satisfies your selected after-tax legacy target, using your current SS ages and Governor settings."
             )
             delta_spending = optimized["annual_spending"] - baseline["annual_spending"]
             delta_net_worth = optimized_metrics["final_net_worth"] - baseline_metrics["final_net_worth"]
@@ -5633,7 +5639,7 @@ def render_conversion_page() -> None:
                     "Total Government Drag": float(baseline["run_result"].get("total_government_drag", 0.0)),
                 },
                 {
-                    "Plan": "Target Legacy Spending",
+                    "Plan": "Maximum Spending Plan",
                     "Base Annual Spending": optimized["annual_spending"],
                     "After-Tax Legacy": optimized_metrics["after_tax_legacy"],
                     "Final Net Worth": optimized_metrics["final_net_worth"],
