@@ -256,6 +256,59 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_funding_debug_view_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    preferred_cols = [
+        "Year",
+        "Annual Spending Need",
+        "Spending Funded From Cash",
+        "Spending Funded From Brokerage",
+        "Spending Brokerage Basis Used",
+        "Brokerage Realized LTCG",
+        "Spending Trad Withdrawal Component",
+        "Spending Funded From Roth",
+        "RMD Income Component",
+        "Chosen Conversion",
+        "Earned Income",
+        "Total SS",
+        "AGI",
+        "MAGI",
+        "Taxable Income",
+        "Federal Tax",
+        "State Tax",
+        "ACA Cost",
+        "IRMAA Cost",
+        "Tax Funding Source",
+    ]
+    cols = [c for c in preferred_cols if c in df.columns]
+    out = df[cols].copy()
+    rename_map = {
+        "Annual Spending Need": "Annual Spending Need",
+        "Spending Funded From Cash": "Cash Used For Spending",
+        "Spending Funded From Brokerage": "Brokerage Used For Spending",
+        "Spending Brokerage Basis Used": "Brokerage Basis Used",
+        "Brokerage Realized LTCG": "Realized LTCG",
+        "Spending Trad Withdrawal Component": "Traditional IRA Used For Spending",
+        "Spending Funded From Roth": "Roth Used For Spending",
+        "RMD Income Component": "RMD Income",
+        "Chosen Conversion": "Roth Conversion",
+        "Earned Income": "Earned Income",
+        "Total SS": "Total Social Security",
+        "AGI": "AGI",
+        "MAGI": "MAGI",
+        "Taxable Income": "Taxable Income",
+        "Federal Tax": "Federal Tax",
+        "State Tax": "State Tax",
+        "ACA Cost": "ACA Cost",
+        "IRMAA Cost": "IRMAA Cost",
+        "Tax Funding Source": "Tax Funding Source",
+    }
+    out = out.rename(columns=rename_map)
+    return out
+
+
 PROFILE_PRESETS = {
     "Balanced": {
         "weights": {"nw": 0.24, "legacy": 0.14, "trad": 0.18, "stability": 0.18, "risk": 0.10, "drag": 0.08, "trad_share": 0.08},
@@ -2658,6 +2711,10 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "RMD Income Component": float(rmd_for_year),
         "Trad Withdrawal Income Component": total_trad_withdrawal_income,
         "Spending Trad Withdrawal Component": spending_trad_withdrawal,
+        "Spending Funded From Cash": float(spend_result["from_cash"]),
+        "Spending Funded From Brokerage": float(spend_result["from_brokerage"]),
+        "Spending Brokerage Basis Used": float(max(0.0, spend_result["from_brokerage"] - spending_realized_ltcg)),
+        "Spending Funded From Roth": float(spend_result["from_roth"]),
         "Annual Spending Need": annual_spending,
         "Household Reference Age": get_household_reference_age(year, params),
         "Other Ordinary Income": other_ordinary_income,
@@ -5888,6 +5945,21 @@ def render_conversion_page() -> None:
                     else:
                         fmt[col] = "${:,.0f}"
                 st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+
+            funding_debug_df = build_funding_debug_view_df(result["df"])
+            if funding_debug_df is not None and not funding_debug_df.empty:
+                st.subheader("Annual Funding + Income View")
+                st.caption("Use this to see how annual spending was funded and why MAGI can stay low even when spending is high. Brokerage Used For Spending shows total taxable-account dollars spent, while Brokerage Basis Used is the non-taxable portion and Realized LTCG is the portion that hits income.")
+                funding_fmt = {}
+                funding_non_currency = {"Year", "Tax Funding Source"}
+                for col in funding_debug_df.columns:
+                    if col in funding_non_currency:
+                        continue
+                    series = funding_debug_df[col]
+                    if pd.api.types.is_numeric_dtype(series):
+                        funding_fmt[col] = "${:,.0f}"
+                st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
+
             st.download_button(
                 "Download Chosen Path (CSV)",
                 data=result["df"].to_csv(index=False),
