@@ -154,6 +154,15 @@ def format_dollars(value: float) -> str:
         return str(value)
 
 
+def format_signed_dollars(value: float) -> str:
+    try:
+        numeric = float(value)
+        sign = "-" if numeric < 0 else "+"
+        return f"{sign}${abs(numeric):,.0f}"
+    except Exception:
+        return str(value)
+
+
 def format_percent(value: float) -> str:
     try:
         return f"{float(value):.2%}"
@@ -5992,4 +6001,68 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
+    if not ranked_rows:
+        return "No recommendation is available yet."
+    winner = ranked_rows[0]
+    baseline = next((r for r in ranked_rows if r["Strategy"] == "62/62"), ranked_rows[0])
+
+    winner_nw = float(winner.get("Final Net Worth", 0.0))
+    baseline_nw = float(baseline.get("Final Net Worth", 0.0))
+    winner_trad = float(winner.get("Ending Traditional IRA Balance", 0.0))
+    baseline_trad = float(baseline.get("Ending Traditional IRA Balance", 0.0))
+    winner_legacy = float(winner.get("After-Tax Legacy", 0.0))
+    baseline_legacy = float(baseline.get("After-Tax Legacy", 0.0))
+    winner_ss = float(winner.get("Final Household SS Income", 0.0))
+    baseline_ss = float(baseline.get("Final Household SS Income", 0.0))
+    winner_gov_drag = float(winner.get("Total Government Drag", 0.0))
+    baseline_gov_drag = float(baseline.get("Total Government Drag", 0.0))
+
+    nw_delta = winner_nw - baseline_nw
+    trad_delta = winner_trad - baseline_trad
+    legacy_delta = winner_legacy - baseline_legacy
+    ss_delta = winner_ss - baseline_ss
+    gov_drag_delta = winner_gov_drag - baseline_gov_drag
+
+    pieces = [
+        f"Based on your selected priorities ({profile_name}), the model recommends {winner['Strategy']} as the strongest overall quick strategy.",
+    ]
+
+    if winner["Strategy"] != baseline["Strategy"]:
+        pieces.append(
+            f"Compared with 62/62, the recommended strategy changes ending Traditional IRA by {format_signed_dollars(trad_delta)}, after-tax legacy by {format_signed_dollars(legacy_delta)}, and projected final net worth by {format_signed_dollars(nw_delta)}."
+        )
+
+        both_after_tax_like = winner_trad <= 1000 and baseline_trad <= 1000 and abs(legacy_delta - nw_delta) < 1
+        if both_after_tax_like:
+            pieces.append(
+                "Because both strategies finish with little or no Traditional IRA remaining, after-tax legacy and total net worth move together."
+            )
+
+        if nw_delta < 0:
+            pieces.append("This is not a strictly higher net worth outcome.")
+        elif nw_delta > 0:
+            pieces.append("This recommendation also improves projected final net worth versus 62/62.")
+
+        if ss_delta > 0 and nw_delta <= 0:
+            pieces.append(
+                f"It favors higher guaranteed income later in life through delayed Social Security, increasing final household Social Security income by {format_signed_dollars(ss_delta)} per year."
+            )
+        elif trad_delta < 0:
+            pieces.append(
+                f"It reduces future tax exposure by lowering ending Traditional IRA balance and heir tax drag, while changing total government drag by {format_signed_dollars(gov_drag_delta)}."
+            )
+        else:
+            pieces.append(
+                "It balances long-term tax efficiency, income timing, and total wealth rather than strictly maximizing one metric."
+            )
+    else:
+        pieces.append(
+            "In this quick comparison, the same strategy that wins on net worth also best fits your selected planning profile."
+        )
+
+    pieces.append(
+        "Use this as a fast recommendation layer. If you want a tighter check, test a few nearby claim-age combinations around the winner before deciding whether a full 81-strategy run is worth it."
+    )
+    return " ".join(pieces)
+
