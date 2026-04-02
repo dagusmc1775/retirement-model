@@ -1012,7 +1012,7 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
 
         if ss_delta > 0 and nw_delta <= 0:
             pieces.append(
-                f"It favors higher guaranteed income later in life through delayed Social Security, increasing final household Social Security income by {format_signed_dollars(ss_delta)} per year."
+                f"It favors higher guaranteed income later in life through delayed Social Security, increasing final household Social Security income by ${abs(float(ss_delta)):,.0f} per year."
             )
         elif trad_delta < 0:
             pieces.append(
