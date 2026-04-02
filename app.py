@@ -4864,14 +4864,15 @@ def render_annual_conversion_calculator_results(result: dict):
         st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
     st.write(f"Why this conversion: {summary['Why This Conversion']}")
 
-    metric_cols = st.columns(6)
-    metric_cols[0].metric('Recommended Conversion', f"${float(summary['Recommended Conversion']):,.0f}")
-    metric_cols[1].metric('Recommended MAGI', f"${float(recommended['MAGI']):,.0f}")
-    metric_cols[2].metric('Incremental Total Drag', f"${float(recommended['Total Government Drag'] - baseline['Total Government Drag']):,.0f}")
-    metric_cols[3].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
-    metric_cols[4].metric('Estimated Future Marginal Rate', f"{float(summary['Estimated Future Marginal Rate']):.2%}")
-    metric_cols[5].metric(
-        'Spread vs Future Rate',
+    metric_row_1 = st.columns(3)
+    metric_row_2 = st.columns(3)
+    metric_row_1[0].metric('Recommended Conversion', f"${float(summary['Recommended Conversion']):,.0f}")
+    metric_row_1[1].metric('Recommended MAGI', f"${float(recommended['MAGI']):,.0f}")
+    metric_row_1[2].metric('Incremental Total Drag', f"${float(recommended['Total Government Drag'] - baseline['Total Government Drag']):,.0f}")
+    metric_row_2[0].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
+    metric_row_2[1].metric('Future Marginal Rate', f"{float(summary['Estimated Future Marginal Rate']):.2%}")
+    metric_row_2[2].metric(
+        'Spread vs Future',
         '' if summary.get('Recommended Spread vs Future Rate') is None else f"{float(summary['Recommended Spread vs Future Rate']):.2%}"
     )
     st.write(f"Estimated future marginal rate used: {float(summary['Estimated Future Marginal Rate']):.2%}")
