@@ -84,6 +84,7 @@ DEFAULT_APP_STATE = {
     "annual_calc_year": START_YEAR,
     "annual_total_ss_for_year": 0.0,
     "annual_external_other_ordinary_income": 0.0,
+    "annual_other_ordinary_income": 0.0,
     "annual_realized_ltcg_so_far": 0.0,
     "annual_target_bracket": "22%",
     "annual_income_safety_buffer": 0.0,
@@ -1317,6 +1318,15 @@ def sync_shared_income_from_annual_widget() -> None:
     value = float(st.session_state.get("annual_earned_income_shared_input", 0.0))
     st.session_state["annual_external_other_ordinary_income"] = value
     st.session_state["earned_income_annual"] = value
+
+
+def get_annual_earned_income_resolved_for_year(year: int) -> float:
+    amount = float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))
+    start_year = int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))
+    end_year = int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))
+    if start_year <= int(year) <= end_year:
+        return amount
+    return 0.0
 
 
 def get_page_specific_state_keys(page: str) -> list[str]:
@@ -6656,6 +6666,7 @@ def render_annual_page() -> None:
             )
 
     st.subheader("Annual Conversion Calculator Inputs")
+    st.caption("Conversion page earned income schedule is the source of truth. This page shows the resolved earned income for the selected year and lets you add separate other ordinary income for that year.")
 
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
@@ -6675,29 +6686,40 @@ def render_annual_page() -> None:
             step=1000.0,
             key="annual_total_ss_for_year",
         )
-
-    sync_annual_other_income_widget_from_shared_schedule()
+    earned_income_for_selected_year = float(get_annual_earned_income_resolved_for_year(calc_year))
 
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
-        external_other_ordinary_income = st.number_input(
-            "Annual Wage / Other Ordinary Income",
+        st.number_input(
+            "Earned Income for Selected Year",
             min_value=0.0,
-            value=float(st.session_state.get("annual_earned_income_shared_input", st.session_state.get("annual_external_other_ordinary_income", 0.0))),
+            value=float(earned_income_for_selected_year),
             step=1000.0,
-            key="annual_earned_income_shared_input",
-            on_change=sync_shared_income_from_annual_widget,
-            help="This field follows the Conversion page earned-income schedule for the selected year. Editing it here also updates the shared annual earned-income amount.",
+            key="annual_earned_income_display",
+            disabled=True,
+            help="This comes from the Conversion page earned-income schedule using the selected year. Change the amount or year range on the Conversion page if you want this value to change.",
         )
-        st.session_state["annual_external_other_ordinary_income"] = float(external_other_ordinary_income)
     with row2_col2:
-        realized_ltcg_so_far = st.number_input(
-            "Realized LTCG for Year",
+        other_ordinary_income_for_year = st.number_input(
+            "Other Ordinary Income for Year",
             min_value=0.0,
-            value=float(st.session_state.get("annual_realized_ltcg_so_far", 0.0)),
+            value=float(st.session_state.get("annual_other_ordinary_income", st.session_state.get("annual_external_other_ordinary_income", 0.0))),
             step=1000.0,
-            key="annual_realized_ltcg_so_far",
+            key="annual_other_ordinary_income",
+            help="Include taxable ordinary income for this year that is not already captured elsewhere. Examples: pension income, non-qualified annuity income, taxable interest, short-term capital gains, non-qualified dividends, rental or business ordinary income, and ordinary IRA withdrawals if you want to model them manually here. Exclude earned wages already coming from the Conversion page schedule, Social Security, and realized long-term capital gains, which has its own input below.",
         )
+        st.session_state["annual_external_other_ordinary_income"] = float(other_ordinary_income_for_year)
+
+    realized_ltcg_so_far = st.number_input(
+        "Realized LTCG for Year",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_realized_ltcg_so_far", 0.0)),
+        step=1000.0,
+        key="annual_realized_ltcg_so_far",
+        help="Use this for realized long-term capital gains already expected for the selected year. Keep ordinary income items in the Other Ordinary Income field instead.",
+    )
+
+    annual_calculator_other_ordinary_income = float(earned_income_for_selected_year + other_ordinary_income_for_year)
 
     bracket_tops = get_bracket_tops(int(calc_year))
     bracket_options = [str(k) for k in bracket_tops.keys()]
@@ -6764,7 +6786,7 @@ def render_annual_page() -> None:
         result = run_annual_conversion_calculator(
             inputs=inputs,
             calc_year=int(calc_year),
-            external_other_ordinary_income=float(external_other_ordinary_income),
+            external_other_ordinary_income=float(annual_calculator_other_ordinary_income),
             realized_ltcg_so_far=float(realized_ltcg_so_far),
             total_ss_for_year=float(total_ss_for_year),
             target_bracket=str(target_bracket),
