@@ -82,6 +82,16 @@ DEFAULT_APP_STATE = {
     "annual_calc_use_bracket_guardrail": True,
     "annual_calc_use_irmaa_guardrail": True,
     "annual_calc_year": START_YEAR,
+    "annual_total_ss_for_year": 0.0,
+    "annual_external_other_ordinary_income": 0.0,
+    "annual_realized_ltcg_so_far": 0.0,
+    "annual_target_bracket": "22%",
+    "annual_income_safety_buffer": 0.0,
+    "annual_step_size": 1000.0,
+    "annual_max_conversion": 200000.0,
+    "annual_apply_bracket_guardrail": True,
+    "annual_apply_aca_guardrail": True,
+    "annual_apply_irmaa_guardrail": True,
     "annual_conversion": 0.0,
     "annual_spending": 0.0,
     "brokerage": 0.0,
@@ -135,7 +145,7 @@ DEFAULT_APP_STATE = {
 
 SCENARIO_STATE_KEYS = [k for k in DEFAULT_APP_STATE.keys() if k != "app_page"]
 PAGE_STATE_KEY_PREFIXES = {
-    "annual": ["annual_calc_"],
+    "annual": ["annual_calc_", "annual_"],
     "conversion": [
         "annual_", "brokerage", "cash", "conversion_tax_funding_policy", "earned_income_annual",
         "earned_income_end_year", "earned_income_start_year", "go_go_", "growth_pct", "max_conversion",
