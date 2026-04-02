@@ -793,6 +793,8 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
     shortlists = {}
     for profile_name in PROFILE_PRESETS.keys():
         ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
+    winner = ranked[0] if ranked else None
+    best_legacy = max(ranked, key=lambda r: r.get("after_tax_legacy", float("-inf"))) if ranked else None
         rows = []
         for idx, ranked_row in enumerate(ranked[:top_n], start=1):
             rows.append({
