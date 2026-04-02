@@ -6127,6 +6127,121 @@ def render_conversion_page() -> None:
             )
 
 
+
+def render_annual_page() -> None:
+    ensure_default_state()
+    st.title("Annual Conversion Calculator")
+    render_top_nav("annual")
+    st.write("Use this page for current-year conversion analysis and annual tax checks without running the full lifetime optimizer.")
+
+    inputs = render_shared_household_inputs()
+
+    st.subheader("Annual Conversion Calculator Inputs")
+    calc_year = st.number_input(
+        "Year to Analyze",
+        min_value=2025,
+        max_value=2100,
+        value=int(st.session_state.get("annual_calc_year", 2026)),
+        step=1,
+        key="annual_calc_year",
+    )
+    external_other_ordinary_income = st.number_input(
+        "Other Ordinary Income for Year",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_external_other_ordinary_income", 0.0)),
+        step=1000.0,
+        key="annual_external_other_ordinary_income",
+    )
+    realized_ltcg_so_far = st.number_input(
+        "Realized LTCG for Year",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_realized_ltcg_so_far", 0.0)),
+        step=1000.0,
+        key="annual_realized_ltcg_so_far",
+    )
+    total_ss_for_year = st.number_input(
+        "Social Security for Year",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_total_ss_for_year", 0.0)),
+        step=1000.0,
+        key="annual_total_ss_for_year",
+    )
+
+    bracket_tops = get_bracket_tops(int(calc_year))
+    bracket_options = [str(k) for k in bracket_tops.keys()]
+    default_target = str(st.session_state.get("annual_target_bracket", "22%"))
+    if default_target not in bracket_options:
+        default_target = bracket_options[min(2, len(bracket_options)-1)] if bracket_options else "22%"
+    target_bracket = st.selectbox(
+        "Target Bracket",
+        bracket_options,
+        index=bracket_options.index(default_target) if bracket_options else 0,
+        key="annual_target_bracket",
+    )
+    income_safety_buffer = st.number_input(
+        "Income Safety Buffer",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_income_safety_buffer", 0.0)),
+        step=1000.0,
+        key="annual_income_safety_buffer",
+    )
+    max_conversion = st.number_input(
+        "Maximum Additional Conversion to Test",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_max_conversion", 200000.0)),
+        step=1000.0,
+        key="annual_max_conversion",
+    )
+    step_size = st.number_input(
+        "Step Size",
+        min_value=100.0,
+        value=float(st.session_state.get("annual_step_size", 1000.0)),
+        step=100.0,
+        key="annual_step_size",
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        apply_bracket_guardrail = st.checkbox(
+            "Use Bracket Guardrail",
+            value=bool(st.session_state.get("annual_apply_bracket_guardrail", True)),
+            key="annual_apply_bracket_guardrail",
+        )
+    with c2:
+        apply_aca_guardrail = st.checkbox(
+            "Use ACA Guardrail",
+            value=bool(st.session_state.get("annual_apply_aca_guardrail", True)),
+            key="annual_apply_aca_guardrail",
+        )
+    with c3:
+        apply_irmaa_guardrail = st.checkbox(
+            "Use IRMAA Guardrail",
+            value=bool(st.session_state.get("annual_apply_irmaa_guardrail", True)),
+            key="annual_apply_irmaa_guardrail",
+        )
+
+    if st.button("Run Annual Conversion Calculator", use_container_width=True):
+        result = run_annual_conversion_calculator(
+            inputs=inputs,
+            calc_year=int(calc_year),
+            external_other_ordinary_income=float(external_other_ordinary_income),
+            realized_ltcg_so_far=float(realized_ltcg_so_far),
+            total_ss_for_year=float(total_ss_for_year),
+            target_bracket=str(target_bracket),
+            income_safety_buffer=float(income_safety_buffer),
+            max_conversion=float(max_conversion),
+            step_size=float(step_size),
+            apply_bracket_guardrail=bool(apply_bracket_guardrail),
+            apply_aca_guardrail=bool(apply_aca_guardrail),
+            apply_irmaa_guardrail=bool(apply_irmaa_guardrail),
+        )
+        st.session_state["annual_conversion_calculator_result"] = result
+
+    annual_result = st.session_state.get("annual_conversion_calculator_result")
+    if annual_result:
+        render_annual_conversion_calculator_results(annual_result)
+
+
+
 def main() -> None:
     ensure_default_state()
     current_page = get_app_page()
