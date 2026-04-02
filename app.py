@@ -364,7 +364,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
     },
     "Legacy Focused": {
-        "weights": {"nw": 0.02, "legacy": 0.74, "trad": 0.18, "stability": 0.04, "risk": 0.02, "drag": 0.06, "trad_share": 0.22},
+        "weights": {"nw": 0.01, "legacy": 0.76, "trad": 0.24, "stability": 0.05, "risk": 0.02, "drag": 0.08, "trad_share": 0.28},
         "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
         "bullets": [
             "favor more tax-efficient assets at death",
@@ -374,7 +374,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may reduce maximum projected wealth somewhat, but it can improve after-tax inheritance value.",
     },
     "Spend With Confidence": {
-        "weights": {"nw": 0.10, "legacy": 0.08, "trad": 0.14, "stability": 0.34, "risk": 0.20, "drag": 0.06, "trad_share": 0.06},
+        "weights": {"nw": 0.08, "legacy": 0.06, "trad": 0.12, "stability": 0.40, "risk": 0.20, "drag": 0.04, "trad_share": 0.04},
         "description": "You are prioritizing confidence, flexibility, and the ability to enjoy retirement spending safely.",
         "bullets": [
             "place more value on reliable income and stability",
@@ -860,16 +860,32 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
     for i, metrics in enumerate(metrics_list):
         nw_adjusted = nw_norm[i] ** 0.72
         if profile_name == "Legacy Focused":
-            legacy_signal = 0.80 * effective_legacy_norm[i] + 0.20 * base_legacy_norm[i]
-            legacy_adjusted = legacy_signal ** 1.30
-            trad_penalty = trad_norm[i] ** 1.60
-            drag_penalty = drag_norm[i] ** 1.05
-            trad_share_penalty = trad_share_norm[i] ** 2.10
-            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.45
-            stability_adjusted = 0.55 * (stability_norm[i] ** 1.20) + 0.30 * (ss_income_norm[i] ** 1.20) + 0.15 * (survivor_ss_norm[i] ** 1.10)
-            risk_penalty = risk_norm[i] ** 1.05
-            positive_score = (0.10 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-            negative_score = (weights["trad"] * trad_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty) + (0.60 * weights.get("drag", 0.0) * drag_penalty) + (0.90 * weights["trad"] * heir_tax_penalty) + (weights["risk"] * risk_penalty)
+            legacy_signal = 0.76 * effective_legacy_norm[i] + 0.24 * base_legacy_norm[i]
+            legacy_adjusted = legacy_signal ** 1.34
+            trad_penalty = trad_norm[i] ** 1.75
+            drag_penalty = drag_norm[i] ** 1.08
+            trad_share_penalty = trad_share_norm[i] ** 2.45
+            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.72
+            stability_adjusted = 0.45 * (stability_norm[i] ** 1.12) + 0.30 * (ss_income_norm[i] ** 1.16) + 0.25 * (survivor_ss_norm[i] ** 1.16)
+            risk_penalty = risk_norm[i] ** 1.02
+            positive_score = (0.05 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
+            negative_score = (
+                (weights["trad"] * trad_penalty)
+                + (1.05 * weights.get("trad_share", 0.0) * trad_share_penalty)
+                + (0.75 * weights.get("drag", 0.0) * drag_penalty)
+                + (1.25 * weights["trad"] * heir_tax_penalty)
+                + (weights["risk"] * risk_penalty)
+            )
+        elif profile_name == "Spend With Confidence":
+            legacy_adjusted = base_legacy_norm[i] ** 1.00
+            trad_penalty = trad_norm[i] ** 1.35
+            drag_penalty = drag_norm[i] ** 1.00
+            trad_share_penalty = trad_share_norm[i] ** 1.20
+            heir_tax_penalty = 0.0
+            stability_adjusted = 0.35 * (stability_norm[i] ** 1.25) + 0.40 * (ss_income_norm[i] ** 1.55) + 0.25 * (survivor_ss_norm[i] ** 1.40)
+            risk_penalty = risk_norm[i] ** 1.15
+            positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
+            negative_score = (weights["trad"] * trad_penalty) + (weights["risk"] * risk_penalty) + (weights.get("drag", 0.0) * drag_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty)
         else:
             legacy_adjusted = base_legacy_norm[i] ** 1.05
             trad_penalty = trad_norm[i] ** 1.85
@@ -892,7 +908,9 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
             preference_bonus += stability_bonus
         if preferences.get("minimize_trad_ira_for_heirs"):
-            heir_structure_penalty = 0.12 * (trad_share_norm[i] ** 1.80) + 0.12 * (heir_tax_drag_norm[i] ** 1.20)
+            heir_structure_penalty = 0.16 * (trad_share_norm[i] ** 2.00) + 0.16 * (heir_tax_drag_norm[i] ** 1.35) + 0.06 * (trad_norm[i] ** 1.25)
+            if profile_name == "Legacy Focused":
+                heir_structure_penalty *= 1.20
             preference_penalty += heir_structure_penalty
 
         positive_score += preference_bonus
@@ -6024,9 +6042,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-
-def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
+    main()def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
     if not ranked_rows:
         return "No recommendation is available yet."
     winner = ranked_rows[0]
