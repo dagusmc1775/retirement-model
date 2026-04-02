@@ -1365,11 +1365,6 @@ def ensure_default_state() -> None:
 
 def collect_scenario_state() -> dict:
     ensure_default_state()
-    if "annual_external_other_ordinary_income" in st.session_state:
-        try:
-            st.session_state["earned_income_annual"] = float(st.session_state.get("annual_external_other_ordinary_income", st.session_state.get("earned_income_annual", 0.0)))
-        except Exception:
-            pass
     return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in SCENARIO_STATE_KEYS}
 
 
@@ -1384,12 +1379,12 @@ def apply_scenario_state(state: dict) -> None:
     ensure_default_state()
     for key in SCENARIO_STATE_KEYS:
         st.session_state[key] = copy.deepcopy(state.get(key, DEFAULT_APP_STATE[key]))
-    if "annual_external_other_ordinary_income" in state and "earned_income_annual" not in state:
+    if "annual_external_other_ordinary_income" in state and "annual_other_ordinary_income" not in state:
         try:
-            st.session_state["earned_income_annual"] = float(state.get("annual_external_other_ordinary_income", 0.0))
+            st.session_state["annual_other_ordinary_income"] = float(state.get("annual_external_other_ordinary_income", 0.0))
         except Exception:
             pass
-    st.session_state["annual_external_other_ordinary_income"] = copy.deepcopy(st.session_state.get("earned_income_annual", 0.0))
+    st.session_state["annual_external_other_ordinary_income"] = copy.deepcopy(st.session_state.get("annual_other_ordinary_income", 0.0))
     sync_widget_state_from_canonical_state()
 
 
@@ -6697,7 +6692,7 @@ def render_annual_page() -> None:
             step=1000.0,
             key="annual_earned_income_display",
             disabled=True,
-            help="This comes from the Conversion page earned-income schedule using the selected year. Change the amount or year range on the Conversion page if you want this value to change.",
+            help="This is derived from the Conversion page earned-income schedule for the selected year. The Conversion page Annual Wage Income plus its start/end years is the source of truth for earned income.",
         )
     with row2_col2:
         other_ordinary_income_for_year = st.number_input(
