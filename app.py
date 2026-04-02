@@ -23,7 +23,7 @@ START_YEAR = 2026
 END_YEAR = 2056
 UNIFORM_LIFETIME_DIVISOR_73 = 26.5
 
-ACA_CLIFF_MFJ = 85000.0
+ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
@@ -4535,7 +4535,7 @@ def run_annual_conversion_calculator(
     else:
         threshold_rows.append({
             'Rule': 'First IRMAA cliff',
-            'Enabled For Recommendation': False,
+            'Enabled For Recommendation': 'N/A (pre-Medicare)',
             'Threshold Value': '',
             'Buffered Threshold': '',
             'Max Conversion': '',
@@ -4616,7 +4616,9 @@ def run_annual_conversion_calculator(
         'ACA Lives': int(aca_lives),
         'Medicare Lives': int(medicare_lives),
         'ACA Limit': aca_limit,
+        'ACA Headroom Remaining': max(0.0, float(aca_limit) - float(recommended['MAGI'])) if aca_limit is not None else None,
         'First IRMAA Cliff': first_irmaa_cliff,
+        'IRMAA Guardrail Status': 'N/A (pre-Medicare)' if medicare_lives <= 0 else ('Enabled' if apply_irmaa_guardrail else 'Disabled'),
         'Scenario Fingerprint': calc_fingerprint,
     }
 
@@ -4644,9 +4646,12 @@ def render_annual_conversion_calculator_results(result: dict):
     st.write(f"Current-year other ordinary income used: ${float(summary['Current-Year Other Ordinary Income Used']):,.0f}")
     st.write(f"Current-year realized LTCG used: ${float(summary['Current-Year LTCG Used']):,.0f}")
     if summary['ACA Limit'] is not None:
-        st.write(f"ACA MAGI limit used: ${float(summary['ACA Limit']):,.0f}")
+        st.write(f"ACA Cliff: ${float(summary['ACA Limit']):,.0f}")
+        st.write(f"Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
     if summary['First IRMAA Cliff'] is not None:
         st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
+    else:
+        st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
 
     metric_cols = st.columns(4)
     metric_cols[0].metric('Recommended Conversion', f"${float(summary['Recommended Conversion']):,.0f}")
@@ -5116,6 +5121,23 @@ def run_standalone_annual_tax_engine(
         })
         if use_irmaa_guardrail:
             active_caps.append(irmaa_max)
+    else:
+        threshold_rows.append({
+            "Rule": "First IRMAA cliff",
+            "Enabled": "N/A (pre-Medicare)",
+            "Threshold": "",
+            "Buffered Threshold": "",
+            "Max Additional Conversion": "",
+            "MAGI At Max": "",
+            "Taxable Income At Max": "",
+            "Federal Tax At Max": "",
+            "NC Tax At Max": "",
+            "ACA Cost At Max": "",
+            "Total Drag At Max": "",
+            "Effective Tax Rate At Max": "",
+            "All-In Effective Rate At Max": "",
+            "Binding Metric": "MAGI",
+        })
 
     recommended_additional_conversion = min(active_caps) if active_caps else max_additional_conversion
     recommended_additional_conversion = floor_to_step(recommended_additional_conversion, step_size)
@@ -5178,6 +5200,10 @@ def run_standalone_annual_tax_engine(
         "Standard Deduction": float(standard_deduction),
         "ACA Covered Lives": int(aca_covered_lives),
         "Medicare Covered Lives": int(medicare_covered_lives),
+        "ACA Cliff": float(aca_limit) if aca_limit is not None else None,
+        "ACA Headroom Remaining": max(0.0, float(aca_limit) - float(recommended["MAGI"])) if aca_limit is not None else None,
+        "First IRMAA Cliff": float(irmaa_first_cliff) if irmaa_first_cliff is not None else None,
+        "IRMAA Guardrail Status": "N/A (pre-Medicare)" if medicare_covered_lives <= 0 else ("Enabled" if use_irmaa_guardrail else "Disabled"),
     }
 
     return {
@@ -5196,11 +5222,12 @@ def render_standalone_annual_tax_results(result: dict) -> None:
 
     st.subheader("Annual Tax Engine Summary")
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Recommended Additional Conversion", f"${float(summary['Recommended Additional Conversion']):,.0f}")
     m2.metric("Current MAGI", f"${float(current['MAGI']):,.0f}")
     m3.metric("Recommended MAGI", f"${float(recommended['MAGI']):,.0f}")
-    m4.metric("Incremental Total Drag", f"${float(recommended['Total Government Drag'] - current['Total Government Drag']):,.0f}")
+    m4.metric("ACA Cliff", f"${float(summary['ACA Cliff']):,.0f}" if summary['ACA Cliff'] is not None else "N/A")
+    m5.metric("Headroom Remaining", f"${float(summary['ACA Headroom Remaining']):,.0f}" if summary['ACA Headroom Remaining'] is not None else "N/A")
 
     st.subheader("Current-Year Snapshot")
     snapshot_rows = [
@@ -5233,6 +5260,14 @@ def render_standalone_annual_tax_results(result: dict) -> None:
         axis=1,
     )
     st.dataframe(snapshot_df[["Metric", "Display"]], use_container_width=True)
+
+    if summary['ACA Cliff'] is not None:
+        st.write(f"ACA Cliff: ${float(summary['ACA Cliff']):,.0f}")
+        st.write(f"Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
+    if summary['First IRMAA Cliff'] is not None:
+        st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
+    else:
+        st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
 
     st.subheader("Current Snapshot")
     snapshot_cols = st.columns(3)
