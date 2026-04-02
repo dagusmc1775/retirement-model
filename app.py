@@ -4513,6 +4513,17 @@ def run_annual_conversion_calculator(
     apply_aca_guardrail: bool,
     apply_irmaa_guardrail: bool,
 ) -> dict:
+    params = build_common_params(inputs)
+    annual_state = {
+        'trad': float(inputs.get('trad', 0.0)),
+        'roth': float(inputs.get('roth', 0.0)),
+        'brokerage': float(inputs.get('brokerage', 0.0)),
+        'brokerage_basis': float(inputs.get('brokerage_basis', inputs.get('brokerage', 0.0))),
+        'cash': float(inputs.get('cash', 0.0)),
+    }
+    future_rate_info = estimate_future_marginal_rate(calc_year, annual_state, params)
+    estimated_future_marginal_rate = float(future_rate_info.get('estimated_future_marginal_rate', 0.0))
+
     coverage = get_coverage_status(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']))
     aca_lives = int(coverage['aca_lives'])
     medicare_lives = int(coverage['medicare_lives'])
@@ -4809,6 +4820,11 @@ def run_annual_conversion_calculator(
         'IRMAA Guardrail Status': 'N/A (pre-Medicare)' if medicare_lives <= 0 else ('Enabled' if apply_irmaa_guardrail else 'Disabled'),
         'Binding Constraints': binding_constraints,
         'Why This Conversion': why_conversion,
+        'Estimated Future Marginal Rate': float(estimated_future_marginal_rate),
+        'Recommended Spread vs Future Rate': (
+            float(estimated_future_marginal_rate) - float(recommended['Total Government Drag'] - baseline['Total Government Drag']) / float(recommended['Conversion'])
+            if float(recommended['Conversion']) > 0 else None
+        ),
         'Scenario Fingerprint': calc_fingerprint,
     }
 
@@ -4850,6 +4866,9 @@ def render_annual_conversion_calculator_results(result: dict):
     metric_cols[1].metric('Recommended MAGI', f"${float(recommended['MAGI']):,.0f}")
     metric_cols[2].metric('Incremental Total Drag', f"${float(recommended['Total Government Drag'] - baseline['Total Government Drag']):,.0f}")
     metric_cols[3].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
+    st.write(f"Estimated future marginal rate used: {float(summary['Estimated Future Marginal Rate']):.2%}")
+    if summary.get('Recommended Spread vs Future Rate') is not None:
+        st.write(f"Recommended spread vs future rate: {float(summary['Recommended Spread vs Future Rate']):.2%}")
 
     st.subheader('Guardrail Thresholds')
     threshold_df = result['threshold_df'].copy()
@@ -4873,7 +4892,7 @@ def render_annual_conversion_calculator_results(result: dict):
     )
 
     st.subheader('Annual Conversion Options Comparison')
-    st.caption('Added safe diagnostics: marginal federal rate, incremental tax dollars, and incremental all-in rate versus no conversion. These are display-only and do not change the recommendation engine.')
+    st.caption('Added safe diagnostics: marginal federal rate, estimated future marginal rate, spread versus future rate, incremental tax dollars, and incremental all-in rate versus no conversion. These are display-only and do not change the recommendation engine.')
     compare_df = result['compare_df'].copy()
     compare_formatters = {
         'Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
@@ -4890,6 +4909,8 @@ def render_annual_conversion_calculator_results(result: dict):
         'Incremental Tax vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
         'Incremental All-In vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
         'Marginal Federal Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Estimated Future Marginal Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Spread vs Future Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
         'Effective Tax Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
         'All-In Effective Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
         'Incremental All-In Rate vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
