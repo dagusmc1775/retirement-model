@@ -1291,33 +1291,29 @@ def mark_annual_std_deduction_custom_from_input() -> None:
 
 
 def get_annual_other_income_default_for_year(calc_year: int) -> float:
-    annual_amount = float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))
-    start_year = int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))
-    end_year = int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))
-    return annual_amount if start_year <= int(calc_year) <= end_year else 0.0
+    """
+    Legacy compatibility helper.
+    Other ordinary income is now its own annual-page input and should not default
+    from the earned-income schedule.
+    """
+    _ = calc_year
+    return float(st.session_state.get("annual_other_ordinary_income", DEFAULT_APP_STATE["annual_other_ordinary_income"]))
 
 
 def sync_annual_other_income_widget_from_shared_schedule(force: bool = False) -> None:
-    calc_year = int(st.session_state.get("annual_calc_year", START_YEAR))
-    derived_value = float(get_annual_other_income_default_for_year(calc_year))
-    source_signature = json.dumps({
-        "calc_year": int(calc_year),
-        "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
-        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
-        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
-    }, sort_keys=True)
-
-    prior_signature = st.session_state.get("annual_earned_income_source_signature")
-    if force or ("annual_earned_income_shared_input" not in st.session_state) or (prior_signature != source_signature):
-        st.session_state["annual_earned_income_shared_input"] = float(derived_value)
-        st.session_state["annual_external_other_ordinary_income"] = float(derived_value)
-        st.session_state["annual_earned_income_source_signature"] = source_signature
+    """
+    Legacy no-op. Kept only so older references do not break.
+    The Conversion page earned-income schedule is the sole source of truth for earned income.
+    """
+    _ = force
+    return None
 
 
 def sync_shared_income_from_annual_widget() -> None:
-    value = float(st.session_state.get("annual_earned_income_shared_input", 0.0))
-    st.session_state["annual_external_other_ordinary_income"] = value
-    st.session_state["earned_income_annual"] = value
+    """
+    Legacy no-op. The annual page must never overwrite the shared earned-income schedule.
+    """
+    return None
 
 
 def get_annual_earned_income_resolved_for_year(year: int) -> float:
@@ -1384,7 +1380,10 @@ def apply_scenario_state(state: dict) -> None:
             st.session_state["annual_other_ordinary_income"] = float(state.get("annual_external_other_ordinary_income", 0.0))
         except Exception:
             pass
-    st.session_state["annual_external_other_ordinary_income"] = copy.deepcopy(st.session_state.get("annual_other_ordinary_income", 0.0))
+    # Keep the legacy field as a passive mirror for backward compatibility only.
+    st.session_state["annual_external_other_ordinary_income"] = copy.deepcopy(
+        st.session_state.get("annual_other_ordinary_income", DEFAULT_APP_STATE["annual_other_ordinary_income"])
+    )
     sync_widget_state_from_canonical_state()
 
 
@@ -6663,6 +6662,10 @@ def render_annual_page() -> None:
     st.subheader("Annual Conversion Calculator Inputs")
     st.caption("Conversion page earned income schedule is the source of truth. This page shows the resolved earned income for the selected year and lets you add separate other ordinary income for that year.")
 
+    # Clean up legacy annual-page earned-income widget state from prior revisions.
+    st.session_state.pop("annual_earned_income_shared_input", None)
+    st.session_state.pop("annual_earned_income_source_signature", None)
+
     row1_col1, row1_col2 = st.columns(2)
     with row1_col1:
         calc_year = st.number_input(
@@ -6698,11 +6701,12 @@ def render_annual_page() -> None:
         other_ordinary_income_for_year = st.number_input(
             "Other Ordinary Income for Year",
             min_value=0.0,
-            value=float(st.session_state.get("annual_other_ordinary_income", st.session_state.get("annual_external_other_ordinary_income", 0.0))),
+            value=float(st.session_state.get("annual_other_ordinary_income", DEFAULT_APP_STATE["annual_other_ordinary_income"])),
             step=1000.0,
             key="annual_other_ordinary_income",
             help="Include taxable ordinary income for this year that is not already captured elsewhere. Examples: pension income, non-qualified annuity income, taxable interest, short-term capital gains, non-qualified dividends, rental or business ordinary income, and ordinary IRA withdrawals if you want to model them manually here. Exclude earned wages already coming from the Conversion page schedule, Social Security, and realized long-term capital gains, which has its own input below.",
         )
+        # Passive legacy mirror only. This must never feed back into earned income.
         st.session_state["annual_external_other_ordinary_income"] = float(other_ordinary_income_for_year)
 
     realized_ltcg_so_far = st.number_input(
