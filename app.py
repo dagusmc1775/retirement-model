@@ -4308,6 +4308,10 @@ def evaluate_annual_conversion_candidate(
     aca_cost = calculate_aca_cost(magi, year, aca_lives)
     irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
     total_drag = float(tax_info['federal_tax'] + state_tax + aca_cost + irmaa_cost)
+    agi = float(tax_info['agi'])
+    total_tax = float(tax_info['federal_tax'] + state_tax)
+    effective_tax_rate = (total_tax / agi) if agi > 0 else 0.0
+    all_in_effective_rate = (total_drag / agi) if agi > 0 else 0.0
 
     return {
         'Conversion': conversion,
@@ -4315,7 +4319,7 @@ def evaluate_annual_conversion_candidate(
         'Total SS': total_ss,
         'Realized LTCG': realized_ltcg,
         'Taxable SS': float(tax_info['taxable_ss']),
-        'AGI': float(tax_info['agi']),
+        'AGI': agi,
         'MAGI': float(magi),
         'Ordinary Taxable Income': float(tax_info['ordinary_taxable_income']),
         'LTCG Taxable Income': float(tax_info['ltcg_taxable_income']),
@@ -4324,7 +4328,10 @@ def evaluate_annual_conversion_candidate(
         'State Tax': float(state_tax),
         'ACA Cost': float(aca_cost),
         'IRMAA Cost': float(irmaa_cost),
+        'Total Tax': total_tax,
         'Total Government Drag': total_drag,
+        'Effective Tax Rate': float(effective_tax_rate),
+        'All-In Effective Rate': float(all_in_effective_rate),
         'Marginal Rate': float(tax_info['marginal_rate']),
     }
 
