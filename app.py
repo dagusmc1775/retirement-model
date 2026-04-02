@@ -4573,6 +4573,8 @@ def run_annual_conversion_calculator(
             'ACA Cost': float(baseline['ACA Cost']),
             'IRMAA Cost': float(baseline['IRMAA Cost']),
             'Total Government Drag': float(baseline['Total Government Drag']),
+            'Effective Tax Rate': float(baseline['Effective Tax Rate']),
+            'All-In Effective Rate': float(baseline['All-In Effective Rate']),
         },
         {
             'Scenario': 'Recommended conversion',
@@ -4584,6 +4586,8 @@ def run_annual_conversion_calculator(
             'ACA Cost': float(recommended['ACA Cost']),
             'IRMAA Cost': float(recommended['IRMAA Cost']),
             'Total Government Drag': float(recommended['Total Government Drag']),
+            'Effective Tax Rate': float(recommended['Effective Tax Rate']),
+            'All-In Effective Rate': float(recommended['All-In Effective Rate']),
         },
     ])
     baseline_vs_recommended['Incremental vs No Conversion'] = baseline_vs_recommended['Total Government Drag'] - float(baseline['Total Government Drag'])
@@ -4663,7 +4667,22 @@ def render_annual_conversion_calculator_results(result: dict):
     st.dataframe(result['threshold_df'], use_container_width=True)
 
     st.subheader('No Conversion vs Recommended Conversion')
-    st.dataframe(result['compare_df'], use_container_width=True)
+    st.dataframe(
+        result['compare_df'].style.format({
+            'Conversion': '${:,.0f}',
+            'MAGI': '${:,.0f}',
+            'Ordinary Taxable Income': '${:,.0f}',
+            'Federal Tax': '${:,.0f}',
+            'State Tax': '${:,.0f}',
+            'ACA Cost': '${:,.0f}',
+            'IRMAA Cost': '${:,.0f}',
+            'Total Government Drag': '${:,.0f}',
+            'Incremental vs No Conversion': '${:,.0f}',
+            'Effective Tax Rate': '{:.2%}',
+            'All-In Effective Rate': '{:.2%}',
+        }),
+        use_container_width=True,
+    )
 
 
 # -----------------------------
