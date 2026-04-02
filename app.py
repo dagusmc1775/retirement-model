@@ -1325,6 +1325,32 @@ def get_annual_earned_income_resolved_for_year(year: int) -> float:
     return 0.0
 
 
+def sync_conversion_earned_income_widget_state() -> None:
+    """Keep conversion-page widget keys aligned with canonical earned-income schedule state."""
+    current_signature = (
+        float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+        int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
+        int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
+    )
+    prior_signature = st.session_state.get("conversion_earned_income_source_signature")
+    if prior_signature != current_signature:
+        st.session_state["conversion_earned_income_annual_input"] = float(current_signature[0])
+        st.session_state["conversion_earned_income_start_year_input"] = int(current_signature[1])
+        st.session_state["conversion_earned_income_end_year_input"] = int(current_signature[2])
+        st.session_state["conversion_earned_income_source_signature"] = current_signature
+
+
+def on_conversion_earned_income_change() -> None:
+    """Write conversion-page earned-income widget values back to canonical state."""
+    annual = float(st.session_state.get("conversion_earned_income_annual_input", DEFAULT_APP_STATE["earned_income_annual"]))
+    start_year = int(st.session_state.get("conversion_earned_income_start_year_input", DEFAULT_APP_STATE["earned_income_start_year"]))
+    end_year = int(st.session_state.get("conversion_earned_income_end_year_input", DEFAULT_APP_STATE["earned_income_end_year"]))
+    st.session_state["earned_income_annual"] = annual
+    st.session_state["earned_income_start_year"] = start_year
+    st.session_state["earned_income_end_year"] = end_year
+    st.session_state["conversion_earned_income_source_signature"] = (annual, start_year, end_year)
+
+
 def get_page_specific_state_keys(page: str) -> list[str]:
     prefixes = PAGE_STATE_KEY_PREFIXES.get(page, [])
     keys = []
@@ -1369,6 +1395,7 @@ def sync_widget_state_from_canonical_state() -> None:
     if "target_trad_override_max_rate" in st.session_state:
         pct = float(st.session_state.get("target_trad_override_max_rate", 0.0)) * 100.0
         st.session_state["target_trad_override_max_rate_pct_display"] = f"{pct:.0f}%"
+    sync_conversion_earned_income_widget_state()
 
 
 def apply_scenario_state(state: dict) -> None:
@@ -5852,13 +5879,35 @@ def render_shared_household_inputs() -> dict:
         spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
 
     st.header("Earned Income")
+    sync_conversion_earned_income_widget_state()
     earn1, earn2, earn3 = st.columns(3)
     with earn1:
-        earned_income_annual = st.number_input("Annual Wage Income", min_value=0.0, value=float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])), step=1000.0, key="earned_income_annual")
+        earned_income_annual = st.number_input(
+            "Annual Wage Income",
+            min_value=0.0,
+            value=float(st.session_state.get("conversion_earned_income_annual_input", st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))),
+            step=1000.0,
+            key="conversion_earned_income_annual_input",
+            on_change=on_conversion_earned_income_change,
+        )
     with earn2:
-        earned_income_start_year = st.number_input("Wage Income Start Year", min_value=START_YEAR, value=int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])), step=1, key="earned_income_start_year")
+        earned_income_start_year = st.number_input(
+            "Wage Income Start Year",
+            min_value=START_YEAR,
+            value=int(st.session_state.get("conversion_earned_income_start_year_input", st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))),
+            step=1,
+            key="conversion_earned_income_start_year_input",
+            on_change=on_conversion_earned_income_change,
+        )
     with earn3:
-        earned_income_end_year = st.number_input("Wage Income End Year", min_value=START_YEAR, value=int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])), step=1, key="earned_income_end_year")
+        earned_income_end_year = st.number_input(
+            "Wage Income End Year",
+            min_value=START_YEAR,
+            value=int(st.session_state.get("conversion_earned_income_end_year_input", st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))),
+            step=1,
+            key="conversion_earned_income_end_year_input",
+            on_change=on_conversion_earned_income_change,
+        )
 
     st.header("Tax Funding Policy")
     conversion_tax_funding_policy = st.selectbox(
@@ -5897,9 +5946,9 @@ def render_shared_household_inputs() -> dict:
         "spouse_claim_age": spouse_claim_age,
         "owner_ss_base": owner_ss_base,
         "spouse_ss_base": spouse_ss_base,
-        "earned_income_annual": earned_income_annual,
-        "earned_income_start_year": earned_income_start_year,
-        "earned_income_end_year": earned_income_end_year,
+        "earned_income_annual": float(st.session_state.get("earned_income_annual", earned_income_annual)),
+        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", earned_income_start_year)),
+        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", earned_income_end_year)),
         "primary_aca_end_year": primary_aca_end_year,
         "spouse_aca_end_year": spouse_aca_end_year,
         "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
