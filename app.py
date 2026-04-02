@@ -793,8 +793,6 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
     shortlists = {}
     for profile_name in PROFILE_PRESETS.keys():
         ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
-    winner = ranked[0] if ranked else None
-    best_legacy = max(ranked, key=lambda r: r.get("after_tax_legacy", float("-inf"))) if ranked else None
         rows = []
         for idx, ranked_row in enumerate(ranked[:top_n], start=1):
             rows.append({
@@ -5707,6 +5705,44 @@ def render_conversion_page() -> None:
         st.subheader("Advisor Interpretation")
         advisor_text = str(quick_result.get("advisor_text", "")).replace("$", r"\$")
         st.markdown(advisor_text)
+
+        ranked_rows_for_tradeoff = quick_result.get("ranked_rows", [])
+        if ranked_rows_for_tradeoff:
+            recommended_row = ranked_rows_for_tradeoff[0]
+            best_legacy_row = max(
+                ranked_rows_for_tradeoff,
+                key=lambda r: float(r.get("After-Tax Legacy", r.get("after_tax_legacy", 0.0)))
+            )
+
+            st.subheader("Tradeoff Summary")
+            tc1, tc2 = st.columns(2)
+
+            with tc1:
+                st.markdown("**Recommended Strategy**")
+                st.write(recommended_row.get("Strategy", ""))
+                st.write(f"After-Tax Legacy: ${float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))):,.0f}")
+                st.write(f"Ending Trad IRA: ${float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
+                st.write(f"Final Net Worth: ${float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))):,.0f}")
+                st.write(f"Household SS Income: ${float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))):,.0f}")
+
+            with tc2:
+                st.markdown("**Best Legacy Strategy**")
+                st.write(best_legacy_row.get("Strategy", ""))
+                st.write(f"After-Tax Legacy: ${float(best_legacy_row.get('After-Tax Legacy', best_legacy_row.get('after_tax_legacy', 0.0))):,.0f}")
+                st.write(f"Ending Trad IRA: ${float(best_legacy_row.get('Ending Traditional IRA Balance', best_legacy_row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
+                st.write(f"Final Net Worth: ${float(best_legacy_row.get('Final Net Worth', best_legacy_row.get('final_net_worth', 0.0))):,.0f}")
+                st.write(f"Household SS Income: ${float(best_legacy_row.get('Final Household SS Income', best_legacy_row.get('final_household_ss_income', 0.0))):,.0f}")
+
+            trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(best_legacy_row.get('Ending Traditional IRA Balance', best_legacy_row.get('ending_traditional_ira_balance', 0.0)))
+            legacy_delta = float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))) - float(best_legacy_row.get('After-Tax Legacy', best_legacy_row.get('after_tax_legacy', 0.0)))
+            nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(best_legacy_row.get('Final Net Worth', best_legacy_row.get('final_net_worth', 0.0)))
+            ss_delta = float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))) - float(best_legacy_row.get('Final Household SS Income', best_legacy_row.get('final_household_ss_income', 0.0)))
+
+            st.caption(
+                f"Versus the best pure legacy row, the recommended strategy changes Traditional IRA by ${abs(trad_delta):,.0f}, "
+                f"after-tax legacy by ${abs(legacy_delta):,.0f}, final net worth by ${abs(nw_delta):,.0f}, "
+                f"and household Social Security income by ${abs(ss_delta):,.0f}."
+            )
         guidance = quick_result.get("next_step_guidance", [])
         if guidance:
             st.subheader("Recommended Next Steps")
