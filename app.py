@@ -360,20 +360,23 @@ def summarize_funding_debug_view(df: pd.DataFrame) -> dict:
         "brokerage": float(working.get("Brokerage Used For Spending", pd.Series(dtype=float)).sum()),
         "basis": float(working.get("Brokerage Basis Used", pd.Series(dtype=float)).sum()),
         "ltcg": float(working.get("Realized LTCG", pd.Series(dtype=float)).sum()),
-        "trad": float(working.get("Traditional IRA Used For Spending", pd.Series(dtype=float)).sum()),
+        "trad_spending": float(working.get("Traditional IRA Used For Spending", pd.Series(dtype=float)).sum()),
         "roth": float(working.get("Roth Used For Spending", pd.Series(dtype=float)).sum()),
+        "rmd": float(working.get("RMD Income", pd.Series(dtype=float)).sum()),
         "ss": float(working.get("Total Social Security", pd.Series(dtype=float)).sum()),
         "earned": float(working.get("Earned Income", pd.Series(dtype=float)).sum()),
         "spending": float(working.get("Annual Spending Need", pd.Series(dtype=float)).sum()),
     }
+    totals["trad_total"] = totals["trad_spending"] + totals["rmd"]
 
-    funding_totals = {
-        "Cash": totals["cash"],
+    refill_totals = {
+        "Social Security": totals["ss"],
+        "Earned Income": totals["earned"],
         "Brokerage": totals["brokerage"],
-        "Traditional IRA": totals["trad"],
+        "Traditional IRA": totals["trad_total"],
         "Roth": totals["roth"],
     }
-    primary_source = max(funding_totals.items(), key=lambda item: item[1])[0] if any(v > 0 for v in funding_totals.values()) else "None"
+    primary_refill_source = max(refill_totals.items(), key=lambda item: item[1])[0] if any(v > 0 for v in refill_totals.values()) else "None"
 
     basis_share = 0.0
     if totals["brokerage"] > 0:
@@ -386,7 +389,9 @@ def summarize_funding_debug_view(df: pd.DataFrame) -> dict:
     roth_spending_years = int((working.get("Roth Used For Spending", pd.Series(dtype=float)) > 0).sum()) if "Roth Used For Spending" in working.columns else 0
     brokerage_years = int((working.get("Brokerage Used For Spending", pd.Series(dtype=float)) > 0).sum()) if "Brokerage Used For Spending" in working.columns else 0
 
-    insights = []
+    insights = [
+        "Cash is a staging account in this model, so the key question is what source refilled cash before spending was paid."
+    ]
     if totals["brokerage"] > 0:
         insights.append(
             f"Brokerage funded {format_dollars(totals['brokerage'])} of spending, and about {basis_share:.0%} of that came from basis rather than gains."
@@ -405,7 +410,7 @@ def summarize_funding_debug_view(df: pd.DataFrame) -> dict:
         )
 
     return {
-        "Primary Funding Source": primary_source,
+        "Primary Cash Refill Source": primary_refill_source,
         "Total Spending": totals["spending"],
         "Brokerage Basis Share": basis_share,
         "Low MAGI Support Years": low_magi_support_years,
@@ -6365,11 +6370,13 @@ def render_conversion_page() -> None:
                 funding_summary = summarize_funding_debug_view(funding_debug_df)
                 st.subheader("Funding Trace + Income View")
                 st.caption("Use this to see how annual spending was funded and why MAGI can stay low even when spending is high. Brokerage Used For Spending shows total taxable-account dollars spent, while Brokerage Basis Used is the non-taxable portion and Realized LTCG is the portion that hits income.")
-                funding_metric_cols = st.columns(4)
-                funding_metric_cols[0].metric("Primary funding source", str(funding_summary.get("Primary Funding Source", "None")))
-                funding_metric_cols[1].metric("Brokerage basis share", f"{float(funding_summary.get('Brokerage Basis Share', 0.0)):.0%}")
-                funding_metric_cols[2].metric("Low-MAGI support years", f"{int(funding_summary.get('Low MAGI Support Years', 0))}")
-                funding_metric_cols[3].metric("Roth spending years", f"{int(funding_summary.get('Roth Spending Years', 0))}")
+                summary_display_df = pd.DataFrame([
+                    {"Metric": "Primary cash refill source", "Value": str(funding_summary.get("Primary Cash Refill Source", "None"))},
+                    {"Metric": "Brokerage basis share", "Value": f"{float(funding_summary.get('Brokerage Basis Share', 0.0)):.0%}"},
+                    {"Metric": "Low-MAGI support years", "Value": f"{int(funding_summary.get('Low MAGI Support Years', 0))}"},
+                    {"Metric": "Roth spending years", "Value": f"{int(funding_summary.get('Roth Spending Years', 0))}"},
+                ])
+                st.dataframe(summary_display_df, hide_index=True, use_container_width=True)
                 for insight in funding_summary.get("Insights", []):
                     st.write(f"- {insight}")
                 funding_fmt = {}
