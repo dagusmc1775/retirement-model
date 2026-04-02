@@ -4701,6 +4701,24 @@ def run_annual_conversion_calculator(
         medicare_lives,
     )
 
+    def _comparison_stop_reason(scenario_label: str, candidate: dict) -> str:
+        candidate_conversion_amount = float(candidate.get('Conversion', 0.0) or 0.0)
+        if scenario_label == 'No conversion':
+            return 'Baseline'
+        if scenario_label.startswith('Top of '):
+            return scenario_label.replace('Top of ', '')
+        if scenario_label == 'ACA MAGI limit':
+            return 'ACA MAGI limit'
+        if scenario_label == 'First IRMAA cliff':
+            return 'First IRMAA cliff'
+        if scenario_label == 'Recommended conversion':
+            if candidate_conversion_amount <= 0.0:
+                return 'No additional conversion fits'
+            if not active_caps:
+                return 'No active guardrails'
+            return 'Within active guardrails'
+        return scenario_label
+
     def _build_comparison_row(scenario_label: str, candidate: dict) -> dict:
         candidate_incremental_drag = float(candidate['Total Government Drag']) - float(baseline['Total Government Drag'])
         candidate_incremental_tax = float(candidate['Total Tax']) - float(baseline['Total Tax'])
@@ -4709,6 +4727,7 @@ def run_annual_conversion_calculator(
         candidate_spread_vs_future = (estimated_future_marginal_rate - candidate_incremental_rate) if candidate_conversion_amount > 0 else None
         return {
             'Scenario': scenario_label,
+            'Stop Reason': _comparison_stop_reason(scenario_label, candidate),
             'Conversion': float(candidate['Conversion']),
             'MAGI': float(candidate['MAGI']),
             'Ordinary Taxable Income': float(candidate['Ordinary Taxable Income']),
@@ -4762,6 +4781,7 @@ def run_annual_conversion_calculator(
         if abs(float(row['Conversion']) - float(recommended['Conversion'])) < 0.01:
             recommended_row_label = str(row['Scenario'])
             row['Scenario'] = f"{row['Scenario']} (Recommended conversion)"
+            row['Stop Reason'] = stop_reason
             break
 
     if recommended_row_label is None:
@@ -4935,7 +4955,7 @@ def render_annual_conversion_calculator_results(result: dict):
     )
 
     st.subheader('Annual Conversion Options Comparison')
-    st.caption('Added safe diagnostics: marginal federal rate, estimated future marginal rate, spread versus future rate, incremental tax dollars, and incremental all-in rate versus no conversion. These are display-only and do not change the recommendation engine.')
+    st.caption('Added safe diagnostics: stop reason, marginal federal rate, estimated future marginal rate, spread versus future rate, incremental tax dollars, and incremental all-in rate versus no conversion. These are display-only and do not change the recommendation engine.')
     compare_df = result['compare_df'].copy()
     compare_formatters = {
         'Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
