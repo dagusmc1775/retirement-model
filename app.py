@@ -6128,63 +6128,163 @@ def render_conversion_page() -> None:
 
 
 
+
+def get_shared_household_inputs_from_state() -> dict:
+    """Read the same household/planning inputs from session state without rendering the full UI."""
+    return {
+        "trad": float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])),
+        "roth": float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])),
+        "brokerage": float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+        "brokerage_basis": min(
+            float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+            float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+        ),
+        "cash": float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])),
+        "growth": float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])) / 100.0,
+        "annual_spending": float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])),
+        "spending_inflation_rate": float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])) / 100.0,
+        "retirement_smile_enabled": bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+        "go_go_end_age": int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+        "slow_go_end_age": int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+        "go_go_multiplier": float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
+        "slow_go_multiplier": float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
+        "no_go_multiplier": float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
+        "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+        "conversion_tax_funding_policy": st.session_state.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"]),
+        "owner_current_age": int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])),
+        "spouse_current_age": int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])),
+        "owner_claim_age": int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])),
+        "spouse_claim_age": int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])),
+        "owner_ss_base": float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])),
+        "spouse_ss_base": float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])),
+        "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
+        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
+        "primary_aca_end_year": int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])),
+        "spouse_aca_end_year": int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])),
+        "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
+        "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
+        "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+    }
+
 def render_annual_page() -> None:
     ensure_default_state()
     st.title("Annual Conversion Calculator")
     render_top_nav("annual")
     st.write("Use this page for current-year conversion analysis and annual tax checks without running the full lifetime optimizer.")
 
-    inputs = render_shared_household_inputs()
+    st.info("This page is focused on the current-year tax picture. Broader planning assumptions are used from your saved/session values unless you choose to edit them below.")
+
+    summary_col1, summary_col2, summary_col3 = st.columns(3)
+    with summary_col1:
+        st.metric("Base Annual Spending", f"${float(st.session_state.get('annual_spending', DEFAULT_APP_STATE['annual_spending'])):,.0f}")
+        st.metric("Growth Rate", f"{float(st.session_state.get('growth_pct', DEFAULT_APP_STATE['growth_pct'])):.1f}%")
+    with summary_col2:
+        st.metric("Owner / Spouse Ages", f"{int(st.session_state.get('owner_current_age', DEFAULT_APP_STATE['owner_current_age']))} / {int(st.session_state.get('spouse_current_age', DEFAULT_APP_STATE['spouse_current_age']))}")
+        st.metric("SS Claim Ages", f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))} / {int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}")
+    with summary_col3:
+        st.metric("Traditional IRA", f"${float(st.session_state.get('trad', DEFAULT_APP_STATE['trad'])):,.0f}")
+        st.metric(
+            "Roth + Brokerage",
+            f"${(float(st.session_state.get('roth', DEFAULT_APP_STATE['roth'])) + float(st.session_state.get('brokerage', DEFAULT_APP_STATE['brokerage']))):,.0f}",
+        )
+
+    edit_planning_assumptions = st.checkbox(
+        "Edit long-range planning assumptions for this page",
+        value=False,
+        help="Only expand this if you need to change broader household/planning assumptions from the annual calculator.",
+        key="annual_edit_long_range_assumptions",
+    )
+
+    if edit_planning_assumptions:
+        with st.expander("Long-Range Household / Planning Assumptions", expanded=True):
+            inputs = render_shared_household_inputs()
+    else:
+        inputs = get_shared_household_inputs_from_state()
+        with st.expander("Long-Range Household / Planning Assumptions", expanded=False):
+            st.write("Using current saved/session assumptions.")
+            st.write(
+                f"Balances: Trad ${float(st.session_state.get('trad', DEFAULT_APP_STATE['trad'])):,.0f}, "
+                f"Roth ${float(st.session_state.get('roth', DEFAULT_APP_STATE['roth'])):,.0f}, "
+                f"Brokerage ${float(st.session_state.get('brokerage', DEFAULT_APP_STATE['brokerage'])):,.0f}, "
+                f"Cash ${float(st.session_state.get('cash', DEFAULT_APP_STATE['cash'])):,.0f}"
+            )
+            st.write(
+                f"Retirement smile: {'On' if bool(st.session_state.get('retirement_smile_enabled', DEFAULT_APP_STATE['retirement_smile_enabled'])) else 'Off'} | "
+                f"Earned income ${float(st.session_state.get('earned_income_annual', DEFAULT_APP_STATE['earned_income_annual'])):,.0f} "
+                f"({int(st.session_state.get('earned_income_start_year', DEFAULT_APP_STATE['earned_income_start_year']))}–{int(st.session_state.get('earned_income_end_year', DEFAULT_APP_STATE['earned_income_end_year']))})"
+            )
 
     st.subheader("Annual Conversion Calculator Inputs")
-    calc_year = st.number_input(
-        "Year to Analyze",
-        min_value=2025,
-        max_value=2100,
-        value=int(st.session_state.get("annual_calc_year", 2026)),
-        step=1,
-        key="annual_calc_year",
-    )
-    external_other_ordinary_income = st.number_input(
-        "Other Ordinary Income for Year",
-        min_value=0.0,
-        value=float(st.session_state.get("annual_external_other_ordinary_income", 0.0)),
-        step=1000.0,
-        key="annual_external_other_ordinary_income",
-    )
-    realized_ltcg_so_far = st.number_input(
-        "Realized LTCG for Year",
-        min_value=0.0,
-        value=float(st.session_state.get("annual_realized_ltcg_so_far", 0.0)),
-        step=1000.0,
-        key="annual_realized_ltcg_so_far",
-    )
-    total_ss_for_year = st.number_input(
-        "Social Security for Year",
-        min_value=0.0,
-        value=float(st.session_state.get("annual_total_ss_for_year", 0.0)),
-        step=1000.0,
-        key="annual_total_ss_for_year",
-    )
+
+    row1_col1, row1_col2 = st.columns(2)
+    with row1_col1:
+        calc_year = st.number_input(
+            "Year to Analyze",
+            min_value=2025,
+            max_value=2100,
+            value=int(st.session_state.get("annual_calc_year", 2026)),
+            step=1,
+            key="annual_calc_year",
+        )
+    with row1_col2:
+        total_ss_for_year = st.number_input(
+            "Social Security for Year",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_total_ss_for_year", 0.0)),
+            step=1000.0,
+            key="annual_total_ss_for_year",
+        )
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
+        external_other_ordinary_income = st.number_input(
+            "Other Ordinary Income for Year",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_external_other_ordinary_income", 0.0)),
+            step=1000.0,
+            key="annual_external_other_ordinary_income",
+        )
+    with row2_col2:
+        realized_ltcg_so_far = st.number_input(
+            "Realized LTCG for Year",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_realized_ltcg_so_far", 0.0)),
+            step=1000.0,
+            key="annual_realized_ltcg_so_far",
+        )
 
     bracket_tops = get_bracket_tops(int(calc_year))
     bracket_options = [str(k) for k in bracket_tops.keys()]
     default_target = str(st.session_state.get("annual_target_bracket", "22%"))
     if default_target not in bracket_options:
         default_target = bracket_options[min(2, len(bracket_options)-1)] if bracket_options else "22%"
-    target_bracket = st.selectbox(
-        "Target Bracket",
-        bracket_options,
-        index=bracket_options.index(default_target) if bracket_options else 0,
-        key="annual_target_bracket",
-    )
-    income_safety_buffer = st.number_input(
-        "Income Safety Buffer",
-        min_value=0.0,
-        value=float(st.session_state.get("annual_income_safety_buffer", 0.0)),
-        step=1000.0,
-        key="annual_income_safety_buffer",
-    )
+
+    row3_col1, row3_col2, row3_col3 = st.columns(3)
+    with row3_col1:
+        target_bracket = st.selectbox(
+            "Target Bracket",
+            bracket_options,
+            index=bracket_options.index(default_target) if bracket_options else 0,
+            key="annual_target_bracket",
+        )
+    with row3_col2:
+        income_safety_buffer = st.number_input(
+            "Income Safety Buffer",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_income_safety_buffer", 0.0)),
+            step=1000.0,
+            key="annual_income_safety_buffer",
+        )
+    with row3_col3:
+        step_size = st.number_input(
+            "Step Size",
+            min_value=100.0,
+            value=float(st.session_state.get("annual_step_size", 1000.0)),
+            step=100.0,
+            key="annual_step_size",
+        )
+
     max_conversion = st.number_input(
         "Maximum Additional Conversion to Test",
         min_value=0.0,
@@ -6192,13 +6292,9 @@ def render_annual_page() -> None:
         step=1000.0,
         key="annual_max_conversion",
     )
-    step_size = st.number_input(
-        "Step Size",
-        min_value=100.0,
-        value=float(st.session_state.get("annual_step_size", 1000.0)),
-        step=100.0,
-        key="annual_step_size",
-    )
+
+    st.caption("Guardrails determine whether the calculator stops at a bracket target, ACA limit, IRMAA limit, or a combination of those constraints.")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         apply_bracket_guardrail = st.checkbox(
@@ -6239,8 +6335,6 @@ def render_annual_page() -> None:
     annual_result = st.session_state.get("annual_conversion_calculator_result")
     if annual_result:
         render_annual_conversion_calculator_results(annual_result)
-
-
 
 def main() -> None:
     ensure_default_state()
