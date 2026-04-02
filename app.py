@@ -4797,15 +4797,49 @@ def run_annual_conversion_calculator(
     if medicare_lives > 0 and first_irmaa_cliff is not None and bool(apply_irmaa_guardrail) and abs(float(recommended_conversion) - float(irmaa_max_conversion)) < 0.01:
         binding_constraints.append("First IRMAA cliff")
 
+    recommended_incremental_rate = (
+        float(recommended['Total Government Drag'] - baseline['Total Government Drag']) / float(recommended['Conversion'])
+        if float(recommended['Conversion']) > 0 else None
+    )
+    recommended_spread_vs_future = (
+        float(estimated_future_marginal_rate) - float(recommended_incremental_rate)
+        if recommended_incremental_rate is not None else None
+    )
+    bracket_room_remaining = max(0.0, float(bracket_limit) - float(recommended['Ordinary Taxable Income']))
+    aca_headroom_remaining = max(0.0, float(aca_limit) - float(recommended['MAGI'])) if aca_limit is not None else None
+    irmaa_headroom_remaining = max(0.0, float(first_irmaa_cliff) - float(recommended['MAGI'])) if first_irmaa_cliff is not None else None
+
     if not binding_constraints:
         if recommended_conversion <= 0.0:
             why_conversion = "No additional conversion fits within the active guardrails for the selected year."
+            stop_reason = "No additional conversion fits"
         elif not active_caps:
             why_conversion = "No guardrails were active, so the calculator used the maximum additional conversion tested."
+            stop_reason = "No active guardrails"
         else:
-            why_conversion = "The recommendation stayed within the active guardrails without a single binding limit."
+            if recommended_spread_vs_future is not None:
+                why_conversion = (
+                    f"No single guardrail bound first. Recommendation stayed inside the active guardrails, "
+                    f"and the spread versus future rate finished at {recommended_spread_vs_future:.2%}."
+                )
+            else:
+                why_conversion = "The recommendation stayed within the active guardrails without a single binding limit."
+            stop_reason = "Within active guardrails"
     else:
-        why_conversion = "Recommendation stopped at: " + ", ".join(binding_constraints) + "."
+        reason_parts = []
+        if f"Top of {target_bracket} bracket" in binding_constraints:
+            reason_parts.append(f"{target_bracket} bracket with ${bracket_room_remaining:,.0f} remaining room")
+        if "ACA MAGI limit" in binding_constraints and aca_headroom_remaining is not None:
+            reason_parts.append(f"ACA limit with ${aca_headroom_remaining:,.0f} remaining headroom")
+        if "First IRMAA cliff" in binding_constraints:
+            if irmaa_headroom_remaining is None:
+                reason_parts.append("first IRMAA cliff")
+            else:
+                reason_parts.append(f"first IRMAA cliff with ${irmaa_headroom_remaining:,.0f} remaining headroom")
+        why_conversion = "Recommendation stopped at " + "; ".join(reason_parts) + "."
+        if recommended_spread_vs_future is not None:
+            why_conversion += f" Spread versus future rate: {recommended_spread_vs_future:.2%}."
+        stop_reason = ", ".join(binding_constraints)
 
     summary = {
         'Year': int(calc_year),
@@ -4817,17 +4851,16 @@ def run_annual_conversion_calculator(
         'ACA Lives': int(aca_lives),
         'Medicare Lives': int(medicare_lives),
         'ACA Limit': aca_limit,
-        'ACA Headroom Remaining': max(0.0, float(aca_limit) - float(recommended['MAGI'])) if aca_limit is not None else None,
-        'IRMAA Headroom Remaining': max(0.0, float(first_irmaa_cliff) - float(recommended['MAGI'])) if first_irmaa_cliff is not None else None,
+        'ACA Headroom Remaining': aca_headroom_remaining,
+        'IRMAA Headroom Remaining': irmaa_headroom_remaining,
+        'Bracket Room Remaining': bracket_room_remaining,
         'First IRMAA Cliff': first_irmaa_cliff,
         'IRMAA Guardrail Status': 'N/A (pre-Medicare)' if medicare_lives <= 0 else ('Enabled' if apply_irmaa_guardrail else 'Disabled'),
         'Binding Constraints': binding_constraints,
+        'Stop Reason': stop_reason,
         'Why This Conversion': why_conversion,
         'Estimated Future Marginal Rate': float(estimated_future_marginal_rate),
-        'Recommended Spread vs Future Rate': (
-            float(estimated_future_marginal_rate) - float(recommended['Total Government Drag'] - baseline['Total Government Drag']) / float(recommended['Conversion'])
-            if float(recommended['Conversion']) > 0 else None
-        ),
+        'Recommended Spread vs Future Rate': recommended_spread_vs_future,
         'Scenario Fingerprint': calc_fingerprint,
     }
 
@@ -4857,6 +4890,7 @@ def render_annual_conversion_calculator_results(result: dict):
     if summary['ACA Limit'] is not None:
         st.write(f"ACA Cliff: ${float(summary['ACA Limit']):,.0f}")
         st.write(f"Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
+    st.write(f"Stop reason: {summary['Stop Reason']}")
     if summary['First IRMAA Cliff'] is not None:
         st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
         st.write(f"IRMAA Headroom Remaining: ${float(summary['IRMAA Headroom Remaining']):,.0f}")
