@@ -1289,6 +1289,36 @@ def mark_annual_std_deduction_custom_from_input() -> None:
     st.session_state["annual_calc_standard_deduction_auto"] = False
 
 
+def get_annual_other_income_default_for_year(calc_year: int) -> float:
+    annual_amount = float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))
+    start_year = int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))
+    end_year = int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))
+    return annual_amount if start_year <= int(calc_year) <= end_year else 0.0
+
+
+def sync_annual_other_income_widget_from_shared_schedule(force: bool = False) -> None:
+    calc_year = int(st.session_state.get("annual_calc_year", START_YEAR))
+    derived_value = float(get_annual_other_income_default_for_year(calc_year))
+    source_signature = json.dumps({
+        "calc_year": int(calc_year),
+        "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
+        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
+    }, sort_keys=True)
+
+    prior_signature = st.session_state.get("annual_earned_income_source_signature")
+    if force or ("annual_earned_income_shared_input" not in st.session_state) or (prior_signature != source_signature):
+        st.session_state["annual_earned_income_shared_input"] = float(derived_value)
+        st.session_state["annual_external_other_ordinary_income"] = float(derived_value)
+        st.session_state["annual_earned_income_source_signature"] = source_signature
+
+
+def sync_shared_income_from_annual_widget() -> None:
+    value = float(st.session_state.get("annual_earned_income_shared_input", 0.0))
+    st.session_state["annual_external_other_ordinary_income"] = value
+    st.session_state["earned_income_annual"] = value
+
+
 def get_page_specific_state_keys(page: str) -> list[str]:
     prefixes = PAGE_STATE_KEY_PREFIXES.get(page, [])
     keys = []
@@ -6646,17 +6676,19 @@ def render_annual_page() -> None:
             key="annual_total_ss_for_year",
         )
 
+    sync_annual_other_income_widget_from_shared_schedule()
+
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
         external_other_ordinary_income = st.number_input(
             "Annual Wage / Other Ordinary Income",
             min_value=0.0,
-            value=float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+            value=float(st.session_state.get("annual_earned_income_shared_input", st.session_state.get("annual_external_other_ordinary_income", 0.0))),
             step=1000.0,
             key="annual_earned_income_shared_input",
-            help="This is shared with the Conversion page Annual Wage Income field so both pages stay aligned.",
+            on_change=sync_shared_income_from_annual_widget,
+            help="This field follows the Conversion page earned-income schedule for the selected year. Editing it here also updates the shared annual earned-income amount.",
         )
-        st.session_state["earned_income_annual"] = float(external_other_ordinary_income)
         st.session_state["annual_external_other_ordinary_income"] = float(external_other_ordinary_income)
     with row2_col2:
         realized_ltcg_so_far = st.number_input(
