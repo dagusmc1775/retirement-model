@@ -6025,7 +6025,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
+
+def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
     if not ranked_rows:
         return "No recommendation is available yet."
     winner = ranked_rows[0]
