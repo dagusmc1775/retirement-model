@@ -4673,33 +4673,40 @@ def run_annual_conversion_calculator(
         medicare_lives,
     )
 
-    comparison_rows = [
-        {
-            'Scenario': 'No conversion',
-            'Conversion': float(baseline['Conversion']),
-            'MAGI': float(baseline['MAGI']),
-            'Ordinary Taxable Income': float(baseline['Ordinary Taxable Income']),
-            'Federal Tax': float(baseline['Federal Tax']),
-            'State Tax': float(baseline['State Tax']),
-            'ACA Cost': float(baseline['ACA Cost']),
-            'IRMAA Cost': float(baseline['IRMAA Cost']),
-            'Total Government Drag': float(baseline['Total Government Drag']),
-            'ACA Headroom Remaining': baseline.get('ACA Headroom Remaining'),
-            'IRMAA Headroom Remaining': baseline.get('IRMAA Headroom Remaining'),
-            'Marginal Federal Rate': float(baseline['Marginal Rate']),
-            'Effective Tax Rate': float(baseline['Effective Tax Rate']),
-            'All-In Effective Rate': float(baseline['All-In Effective Rate']),
-            'Incremental Tax vs No Conversion': 0.0,
-            'Incremental All-In vs No Conversion': 0.0,
-            'Incremental All-In Rate vs No Conversion': 0.0,
+    def _build_comparison_row(scenario_label: str, candidate: dict) -> dict:
+        candidate_incremental_drag = float(candidate['Total Government Drag']) - float(baseline['Total Government Drag'])
+        candidate_incremental_tax = float(candidate['Total Tax']) - float(baseline['Total Tax'])
+        candidate_conversion_amount = float(candidate['Conversion'])
+        candidate_incremental_rate = (candidate_incremental_drag / candidate_conversion_amount) if candidate_conversion_amount > 0 else 0.0
+        return {
+            'Scenario': scenario_label,
+            'Conversion': float(candidate['Conversion']),
+            'MAGI': float(candidate['MAGI']),
+            'Ordinary Taxable Income': float(candidate['Ordinary Taxable Income']),
+            'Federal Tax': float(candidate['Federal Tax']),
+            'State Tax': float(candidate['State Tax']),
+            'ACA Cost': float(candidate['ACA Cost']),
+            'IRMAA Cost': float(candidate['IRMAA Cost']),
+            'Total Government Drag': float(candidate['Total Government Drag']),
+            'ACA Headroom Remaining': candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom Remaining': candidate.get('IRMAA Headroom Remaining'),
+            'Marginal Federal Rate': float(candidate['Marginal Rate']),
+            'Effective Tax Rate': float(candidate['Effective Tax Rate']),
+            'All-In Effective Rate': float(candidate['All-In Effective Rate']),
+            'Incremental Tax vs No Conversion': float(candidate_incremental_tax),
+            'Incremental All-In vs No Conversion': float(candidate_incremental_drag),
+            'Incremental All-In Rate vs No Conversion': float(candidate_incremental_rate),
         }
+
+    comparison_rows = [
+        _build_comparison_row('No conversion', baseline)
     ]
 
     compare_brackets = ['10%', '12%', '22%', '24%']
     for compare_bracket in compare_brackets:
         bracket_top_for_compare = float(bracket_tops[compare_bracket])
         compare_bracket_limit = max(0.0, bracket_top_for_compare - safety_buffer)
-        compare_conversion, compare_candidate = find_max_conversion_under_rule(
+        _, compare_candidate = find_max_conversion_under_rule(
             calc_year,
             external_other_ordinary_income,
             total_ss_for_year,
@@ -4711,53 +4718,23 @@ def run_annual_conversion_calculator(
             step_size,
             lambda c, limit=compare_bracket_limit: float(c['Ordinary Taxable Income']) <= limit,
         )
-        compare_incremental_drag = float(compare_candidate['Total Government Drag']) - float(baseline['Total Government Drag'])
-        compare_incremental_tax = float(compare_candidate['Total Tax']) - float(baseline['Total Tax'])
-        compare_conversion_amount = float(compare_candidate['Conversion'])
-        compare_incremental_rate = (compare_incremental_drag / compare_conversion_amount) if compare_conversion_amount > 0 else 0.0
-        comparison_rows.append({
-            'Scenario': f'Top of {compare_bracket} bracket',
-            'Conversion': float(compare_candidate['Conversion']),
-            'MAGI': float(compare_candidate['MAGI']),
-            'Ordinary Taxable Income': float(compare_candidate['Ordinary Taxable Income']),
-            'Federal Tax': float(compare_candidate['Federal Tax']),
-            'State Tax': float(compare_candidate['State Tax']),
-            'ACA Cost': float(compare_candidate['ACA Cost']),
-            'IRMAA Cost': float(compare_candidate['IRMAA Cost']),
-            'Total Government Drag': float(compare_candidate['Total Government Drag']),
-            'ACA Headroom Remaining': compare_candidate.get('ACA Headroom Remaining'),
-            'IRMAA Headroom Remaining': compare_candidate.get('IRMAA Headroom Remaining'),
-            'Marginal Federal Rate': float(compare_candidate['Marginal Rate']),
-            'Effective Tax Rate': float(compare_candidate['Effective Tax Rate']),
-            'All-In Effective Rate': float(compare_candidate['All-In Effective Rate']),
-            'Incremental Tax vs No Conversion': float(compare_incremental_tax),
-            'Incremental All-In vs No Conversion': float(compare_incremental_drag),
-            'Incremental All-In Rate vs No Conversion': float(compare_incremental_rate),
-        })
+        comparison_rows.append(_build_comparison_row(f'Top of {compare_bracket} bracket', compare_candidate))
 
-    recommended_incremental_drag = float(recommended['Total Government Drag']) - float(baseline['Total Government Drag'])
-    recommended_incremental_tax = float(recommended['Total Tax']) - float(baseline['Total Tax'])
-    recommended_conversion_amount = float(recommended['Conversion'])
-    recommended_incremental_rate = (recommended_incremental_drag / recommended_conversion_amount) if recommended_conversion_amount > 0 else 0.0
-    comparison_rows.append({
-        'Scenario': 'Recommended conversion',
-        'Conversion': float(recommended['Conversion']),
-        'MAGI': float(recommended['MAGI']),
-        'Ordinary Taxable Income': float(recommended['Ordinary Taxable Income']),
-        'Federal Tax': float(recommended['Federal Tax']),
-        'State Tax': float(recommended['State Tax']),
-        'ACA Cost': float(recommended['ACA Cost']),
-        'IRMAA Cost': float(recommended['IRMAA Cost']),
-        'Total Government Drag': float(recommended['Total Government Drag']),
-        'ACA Headroom Remaining': recommended.get('ACA Headroom Remaining'),
-        'IRMAA Headroom Remaining': recommended.get('IRMAA Headroom Remaining'),
-        'Marginal Federal Rate': float(recommended['Marginal Rate']),
-        'Effective Tax Rate': float(recommended['Effective Tax Rate']),
-        'All-In Effective Rate': float(recommended['All-In Effective Rate']),
-        'Incremental Tax vs No Conversion': float(recommended_incremental_tax),
-        'Incremental All-In vs No Conversion': float(recommended_incremental_drag),
-        'Incremental All-In Rate vs No Conversion': float(recommended_incremental_rate),
-    })
+    if aca_lives > 0:
+        comparison_rows.append(_build_comparison_row('ACA MAGI limit', aca_candidate))
+
+    if medicare_lives > 0:
+        comparison_rows.append(_build_comparison_row('First IRMAA cliff', irmaa_candidate))
+
+    recommended_row_label = None
+    for row in comparison_rows:
+        if abs(float(row['Conversion']) - float(recommended['Conversion'])) < 0.01:
+            recommended_row_label = str(row['Scenario'])
+            row['Scenario'] = f"{row['Scenario']} (Recommended conversion)"
+            break
+
+    if recommended_row_label is None:
+        comparison_rows.append(_build_comparison_row('Recommended conversion', recommended))
 
     baseline_vs_recommended = pd.DataFrame(comparison_rows)
     baseline_vs_recommended['Incremental vs No Conversion'] = baseline_vs_recommended['Total Government Drag'] - float(baseline['Total Government Drag'])
