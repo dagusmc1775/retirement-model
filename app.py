@@ -169,10 +169,10 @@ def describe_delta(label: str, value: float) -> str:
     except Exception:
         return f"changes {label} by {value}"
     if abs(numeric) < 1:
-        return f"does not change {label} ({format_signed_dollars(0)})"
+        return f"does not change {label} (${0:,.0f})"
     if numeric > 0:
-        return f"increases {label} by {format_signed_dollars(numeric)}"
-    return f"decreases {label} by {format_signed_dollars(numeric)}"
+        return f"increases {label} by ${abs(numeric):,.0f}"
+    return f"decreases {label} by ${abs(numeric):,.0f}"
 
 
 def format_percent(value: float) -> str:
