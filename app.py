@@ -163,6 +163,18 @@ def format_signed_dollars(value: float) -> str:
         return str(value)
 
 
+def describe_delta(label: str, value: float) -> str:
+    try:
+        numeric = float(value)
+    except Exception:
+        return f"changes {label} by {value}"
+    if abs(numeric) < 1:
+        return f"does not change {label} ({format_signed_dollars(0)})"
+    if numeric > 0:
+        return f"increases {label} by {format_signed_dollars(numeric)}"
+    return f"decreases {label} by {format_signed_dollars(numeric)}"
+
+
 def format_percent(value: float) -> str:
     try:
         return f"{float(value):.2%}"
@@ -4582,7 +4594,18 @@ def render_summary(title: str, result: dict):
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
     st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
     st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
-    st.write(f"Ending Traditional IRA Balance: ${result['ending_trad_balance']:,.0f}")
+    st.write(f"Ending Traditional IRA Balance at RMD Start Age: ${result['ending_trad_balance']:,.0f}")
+    total_lifetime_rmds = result.get("total_lifetime_rmds")
+    if total_lifetime_rmds is None:
+        try:
+            df_for_rmd = result.get("df")
+            if df_for_rmd is not None and not df_for_rmd.empty and "RMD Income" in df_for_rmd.columns:
+                total_lifetime_rmds = float(df_for_rmd["RMD Income"].fillna(0.0).sum())
+            else:
+                total_lifetime_rmds = 0.0
+        except Exception:
+            total_lifetime_rmds = 0.0
+    st.write(f"Total Lifetime RMDs: ${float(total_lifetime_rmds):,.0f}")
     st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
     st.write(f"Total State Taxes: ${result.get('total_state_taxes', 0.0):,.0f}")
     st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
@@ -6001,9 +6024,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-
-def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
+    main()def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
     if not ranked_rows:
         return "No recommendation is available yet."
     winner = ranked_rows[0]
@@ -6032,7 +6053,13 @@ def advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
 
     if winner["Strategy"] != baseline["Strategy"]:
         pieces.append(
-            f"Compared with 62/62, the recommended strategy changes ending Traditional IRA by {format_signed_dollars(trad_delta)}, after-tax legacy by {format_signed_dollars(legacy_delta)}, and projected final net worth by {format_signed_dollars(nw_delta)}."
+            "Compared with 62/62, the recommended strategy "
+            + describe_delta("ending Traditional IRA", trad_delta)
+            + ", "
+            + describe_delta("after-tax legacy value", legacy_delta)
+            + ", and "
+            + describe_delta("projected final net worth", nw_delta)
+            + "."
         )
 
         both_after_tax_like = winner_trad <= 1000 and baseline_trad <= 1000 and abs(legacy_delta - nw_delta) < 1
