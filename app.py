@@ -1325,6 +1325,11 @@ def ensure_default_state() -> None:
 
 def collect_scenario_state() -> dict:
     ensure_default_state()
+    if "annual_external_other_ordinary_income" in st.session_state:
+        try:
+            st.session_state["earned_income_annual"] = float(st.session_state.get("annual_external_other_ordinary_income", st.session_state.get("earned_income_annual", 0.0)))
+        except Exception:
+            pass
     return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in SCENARIO_STATE_KEYS}
 
 
@@ -1339,6 +1344,12 @@ def apply_scenario_state(state: dict) -> None:
     ensure_default_state()
     for key in SCENARIO_STATE_KEYS:
         st.session_state[key] = copy.deepcopy(state.get(key, DEFAULT_APP_STATE[key]))
+    if "annual_external_other_ordinary_income" in state and "earned_income_annual" not in state:
+        try:
+            st.session_state["earned_income_annual"] = float(state.get("annual_external_other_ordinary_income", 0.0))
+        except Exception:
+            pass
+    st.session_state["annual_external_other_ordinary_income"] = copy.deepcopy(st.session_state.get("earned_income_annual", 0.0))
     sync_widget_state_from_canonical_state()
 
 
@@ -1425,25 +1436,14 @@ def build_scenario_export_payload(scope: str = "full") -> str:
 
 def render_scenario_manager(current_page: str) -> None:
     with st.expander("Scenario Save / Load / Reset", expanded=False):
-        st.caption("Download a full scenario or a page-specific snapshot, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
-        d1, d2 = st.columns(2)
-        with d1:
-            st.download_button(
-                "Download Full Scenario",
-                data=build_scenario_export_payload("full"),
-                file_name=f"retirement_model_full_{current_page}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-        with d2:
-            st.download_button(
-                f"Download {current_page.title()} Page Inputs",
-                data=build_scenario_export_payload(current_page),
-                file_name=f"retirement_model_{current_page}_inputs.json",
-                mime="application/json",
-                use_container_width=True,
-                disabled=current_page == "home",
-            )
+        st.caption("Download one full scenario file that carries inputs across both pages, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
+        st.download_button(
+            "Download Full Scenario",
+            data=build_scenario_export_payload("full"),
+            file_name="retirement_model_scenario.json",
+            mime="application/json",
+            use_container_width=True,
+        )
         upload_key = f"scenario_upload_{current_page}"
         uploaded_file = st.file_uploader("Upload Saved Scenario", type=["json"], key=upload_key)
         c1, c2 = st.columns(2)
@@ -6649,12 +6649,14 @@ def render_annual_page() -> None:
     row2_col1, row2_col2 = st.columns(2)
     with row2_col1:
         external_other_ordinary_income = st.number_input(
-            "Other Ordinary Income for Year",
+            "Annual Wage / Other Ordinary Income",
             min_value=0.0,
-            value=float(st.session_state.get("annual_external_other_ordinary_income", 0.0)),
+            value=float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
             step=1000.0,
-            key="annual_external_other_ordinary_income",
+            key="earned_income_annual",
+            help="This is shared with the Conversion page Annual Wage Income field so both pages stay aligned.",
         )
+        st.session_state["annual_external_other_ordinary_income"] = float(external_other_ordinary_income)
     with row2_col2:
         realized_ltcg_so_far = st.number_input(
             "Realized LTCG for Year",
