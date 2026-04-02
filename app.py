@@ -4913,6 +4913,9 @@ def evaluate_annual_tax_scenario(
                     break
             irmaa_cost = annual_surcharge * max(1, medicare_covered_lives)
 
+    aca_headroom_remaining = max(0.0, float(aca_limit) - float(magi)) if aca_limit is not None else None
+    irmaa_headroom_remaining = max(0.0, float(irmaa_first_cliff) - float(magi)) if irmaa_first_cliff is not None else None
+
     total_tax = federal_tax + state_tax
     total_government_drag = total_tax + aca_cost + irmaa_cost
     effective_tax_rate = total_tax / agi if agi > 0 else 0.0
@@ -4954,7 +4957,9 @@ def evaluate_annual_tax_scenario(
         "All-In Effective Rate": all_in_effective_rate,
         "Marginal Federal Rate": marginal_rate,
         "ACA Limit": aca_limit,
+        "ACA Headroom Remaining": aca_headroom_remaining,
         "First IRMAA Cliff": irmaa_first_cliff,
+        "IRMAA Headroom Remaining": irmaa_headroom_remaining,
         "ACA Covered Lives": int(aca_covered_lives),
         "Medicare Covered Lives": int(medicare_covered_lives),
     }
@@ -5081,6 +5086,8 @@ def run_standalone_annual_tax_engine(
             "Buffered Threshold": float(aca_limit_buffered),
             "Max Additional Conversion": aca_max,
             "MAGI At Max": float(aca_candidate["MAGI"]),
+            "ACA Headroom At Max": float(aca_candidate["ACA Headroom Remaining"]) if aca_candidate.get("ACA Headroom Remaining") is not None else "",
+            "IRMAA Headroom At Max": float(aca_candidate["IRMAA Headroom Remaining"]) if aca_candidate.get("IRMAA Headroom Remaining") is not None else "",
             "Taxable Income At Max": float(aca_candidate["Taxable Income"]),
             "Federal Tax At Max": float(aca_candidate["Federal Tax"]),
             "NC Tax At Max": float(aca_candidate["NC State Tax"]),
@@ -5110,6 +5117,8 @@ def run_standalone_annual_tax_engine(
             "Buffered Threshold": float(irmaa_limit_buffered),
             "Max Additional Conversion": irmaa_max,
             "MAGI At Max": float(irmaa_candidate["MAGI"]),
+            "ACA Headroom At Max": float(irmaa_candidate["ACA Headroom Remaining"]) if irmaa_candidate.get("ACA Headroom Remaining") is not None else "",
+            "IRMAA Headroom At Max": float(irmaa_candidate["IRMAA Headroom Remaining"]) if irmaa_candidate.get("IRMAA Headroom Remaining") is not None else "",
             "Taxable Income At Max": float(irmaa_candidate["Taxable Income"]),
             "Federal Tax At Max": float(irmaa_candidate["Federal Tax"]),
             "NC Tax At Max": float(irmaa_candidate["NC State Tax"]),
@@ -5129,6 +5138,8 @@ def run_standalone_annual_tax_engine(
             "Buffered Threshold": "",
             "Max Additional Conversion": "",
             "MAGI At Max": "",
+            "ACA Headroom At Max": "",
+            "IRMAA Headroom At Max": "",
             "Taxable Income At Max": "",
             "Federal Tax At Max": "",
             "NC Tax At Max": "",
@@ -5180,6 +5191,8 @@ def run_standalone_annual_tax_engine(
             "Taxable SS": float(candidate["Taxable SS"]),
             "AGI": float(candidate["AGI"]),
             "MAGI": float(candidate["MAGI"]),
+            "ACA Headroom Remaining": float(candidate["ACA Headroom Remaining"]) if candidate.get("ACA Headroom Remaining") is not None else None,
+            "IRMAA Headroom Remaining": float(candidate["IRMAA Headroom Remaining"]) if candidate.get("IRMAA Headroom Remaining") is not None else None,
             "Taxable Income": float(candidate["Taxable Income"]),
             "Federal Tax": float(candidate["Federal Tax"]),
             "NC State Tax": float(candidate["NC State Tax"]),
@@ -5201,8 +5214,9 @@ def run_standalone_annual_tax_engine(
         "ACA Covered Lives": int(aca_covered_lives),
         "Medicare Covered Lives": int(medicare_covered_lives),
         "ACA Cliff": float(aca_limit) if aca_limit is not None else None,
-        "ACA Headroom Remaining": max(0.0, float(aca_limit) - float(recommended["MAGI"])) if aca_limit is not None else None,
+        "ACA Headroom Remaining": float(recommended["ACA Headroom Remaining"]) if recommended.get("ACA Headroom Remaining") is not None else None,
         "First IRMAA Cliff": float(irmaa_first_cliff) if irmaa_first_cliff is not None else None,
+        "IRMAA Headroom Remaining": float(recommended["IRMAA Headroom Remaining"]) if recommended.get("IRMAA Headroom Remaining") is not None else None,
         "IRMAA Guardrail Status": "N/A (pre-Medicare)" if medicare_covered_lives <= 0 else ("Enabled" if use_irmaa_guardrail else "Disabled"),
     }
 
@@ -5222,12 +5236,13 @@ def render_standalone_annual_tax_results(result: dict) -> None:
 
     st.subheader("Annual Tax Engine Summary")
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Recommended Additional Conversion", f"${float(summary['Recommended Additional Conversion']):,.0f}")
     m2.metric("Current MAGI", f"${float(current['MAGI']):,.0f}")
     m3.metric("Recommended MAGI", f"${float(recommended['MAGI']):,.0f}")
     m4.metric("ACA Cliff", f"${float(summary['ACA Cliff']):,.0f}" if summary['ACA Cliff'] is not None else "N/A")
-    m5.metric("Headroom Remaining", f"${float(summary['ACA Headroom Remaining']):,.0f}" if summary['ACA Headroom Remaining'] is not None else "N/A")
+    m5.metric("ACA Headroom", f"${float(summary['ACA Headroom Remaining']):,.0f}" if summary['ACA Headroom Remaining'] is not None else "N/A")
+    m6.metric("IRMAA Headroom", f"${float(summary['IRMAA Headroom Remaining']):,.0f}" if summary.get('IRMAA Headroom Remaining') is not None else "N/A (pre-Medicare)")
 
     st.subheader("Current-Year Snapshot")
     snapshot_rows = [
@@ -5263,9 +5278,10 @@ def render_standalone_annual_tax_results(result: dict) -> None:
 
     if summary['ACA Cliff'] is not None:
         st.write(f"ACA Cliff: ${float(summary['ACA Cliff']):,.0f}")
-        st.write(f"Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
+        st.write(f"ACA Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
     if summary['First IRMAA Cliff'] is not None:
         st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
+        st.write(f"IRMAA Headroom Remaining: ${float(summary['IRMAA Headroom Remaining']):,.0f}")
     else:
         st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
 
@@ -5282,6 +5298,8 @@ def render_standalone_annual_tax_results(result: dict) -> None:
             "Buffered Threshold": "${:,.0f}",
             "Max Additional Conversion": "${:,.0f}",
             "MAGI At Max": "${:,.0f}",
+            "ACA Headroom At Max": "${:,.0f}",
+            "IRMAA Headroom At Max": "${:,.0f}",
             "Taxable Income At Max": "${:,.0f}",
             "Federal Tax At Max": "${:,.0f}",
             "NC Tax At Max": "${:,.0f}",
@@ -5301,6 +5319,8 @@ def render_standalone_annual_tax_results(result: dict) -> None:
             "Taxable SS": "${:,.0f}",
             "AGI": "${:,.0f}",
             "MAGI": "${:,.0f}",
+            "ACA Headroom Remaining": "${:,.0f}",
+            "IRMAA Headroom Remaining": "${:,.0f}",
             "Taxable Income": "${:,.0f}",
             "Federal Tax": "${:,.0f}",
             "NC State Tax": "${:,.0f}",
