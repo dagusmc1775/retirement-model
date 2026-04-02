@@ -4781,7 +4781,6 @@ def run_annual_conversion_calculator(
         if abs(float(row['Conversion']) - float(recommended['Conversion'])) < 0.01:
             recommended_row_label = str(row['Scenario'])
             row['Scenario'] = f"{row['Scenario']} (Recommended conversion)"
-            row['Stop Reason'] = stop_reason
             break
 
     if recommended_row_label is None:
@@ -4860,6 +4859,11 @@ def run_annual_conversion_calculator(
         if recommended_spread_vs_future is not None:
             why_conversion += f" Spread versus future rate: {recommended_spread_vs_future:.2%}."
         stop_reason = ", ".join(binding_constraints)
+
+    if not baseline_vs_recommended.empty and 'Scenario' in baseline_vs_recommended.columns:
+        recommended_mask = baseline_vs_recommended['Scenario'].astype(str).str.contains('(Recommended conversion)', regex=False)
+        if recommended_mask.any():
+            baseline_vs_recommended.loc[recommended_mask, 'Stop Reason'] = stop_reason
 
     summary = {
         'Year': int(calc_year),
