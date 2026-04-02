@@ -1033,6 +1033,15 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
     return " ".join(pieces)
 
 
+def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
+    if len(ranked_rows) < 2:
+        return False
+    top_score = float(ranked_rows[0].get("score", 0.0))
+    second_score = float(ranked_rows[1].get("score", 0.0))
+    denom = max(abs(top_score), 1e-9)
+    return abs(top_score - second_score) / denom <= tolerance_pct
+
+
 def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> list[str]:
     if not ranked_rows:
         return []
