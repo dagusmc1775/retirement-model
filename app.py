@@ -4439,6 +4439,20 @@ def round_down_to_step(value: float, step_size: float) -> float:
     return math.floor(value / step_size) * step_size
 
 
+def safe_numeric_or_blank(value):
+    if value in ('', None):
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return ''
+
+
 def find_max_conversion_under_rule(
     year: int,
     base_other_ordinary_income: float,
@@ -4695,7 +4709,7 @@ def run_annual_conversion_calculator(
             'IRMAA Headroom Remaining': candidate.get('IRMAA Headroom Remaining'),
             'Marginal Federal Rate': float(candidate['Marginal Rate']),
             'Effective Tax Rate': float(candidate['Effective Tax Rate']),
-            'All-In Effective Rate': float(candidate['All-In Effective Rate']),
+            'All-In Effective Rate': safe_numeric_or_blank(candidate.get('All-In Effective Rate')),
             'Incremental Tax vs No Conversion': float(candidate_incremental_tax),
             'Incremental All-In vs No Conversion': float(candidate_incremental_drag),
             'Incremental All-In Rate vs No Conversion': float(candidate_incremental_rate),
@@ -5284,7 +5298,7 @@ def run_standalone_annual_tax_engine(
         "ACA Cost At Max": float(bracket_candidate["ACA Cost"]),
         "Total Drag At Max": float(bracket_candidate["Total Government Drag"]),
         "Effective Tax Rate At Max": float(bracket_candidate["Effective Tax Rate"]),
-        "All-In Effective Rate At Max": float(bracket_candidate["All-In Effective Rate"]),
+        "All-In Effective Rate At Max": safe_numeric_or_blank(bracket_candidate.get("All-In Effective Rate")),
         "Binding Metric": "Ordinary Taxable Income",
     })
     if use_bracket_guardrail:
@@ -5314,7 +5328,7 @@ def run_standalone_annual_tax_engine(
             "ACA Cost At Max": float(aca_candidate["ACA Cost"]),
             "Total Drag At Max": float(aca_candidate["Total Government Drag"]),
             "Effective Tax Rate At Max": float(aca_candidate["Effective Tax Rate"]),
-            "All-In Effective Rate At Max": float(aca_candidate["All-In Effective Rate"]),
+            "All-In Effective Rate At Max": safe_numeric_or_blank(aca_candidate.get("All-In Effective Rate")),
             "Binding Metric": "MAGI",
         })
         if use_aca_guardrail:
@@ -5345,7 +5359,7 @@ def run_standalone_annual_tax_engine(
             "ACA Cost At Max": float(irmaa_candidate["ACA Cost"]),
             "Total Drag At Max": float(irmaa_candidate["Total Government Drag"]),
             "Effective Tax Rate At Max": float(irmaa_candidate["Effective Tax Rate"]),
-            "All-In Effective Rate At Max": float(irmaa_candidate["All-In Effective Rate"]),
+            "All-In Effective Rate At Max": safe_numeric_or_blank(irmaa_candidate.get("All-In Effective Rate")),
             "Binding Metric": "MAGI",
         })
         if use_irmaa_guardrail:
@@ -5421,7 +5435,7 @@ def run_standalone_annual_tax_engine(
             "IRMAA Cost": float(candidate["IRMAA Cost"]),
             "Total Government Drag": float(candidate["Total Government Drag"]),
             "Effective Tax Rate": float(candidate["Effective Tax Rate"]),
-            "All-In Effective Rate": float(candidate["All-In Effective Rate"]),
+            "All-In Effective Rate": safe_numeric_or_blank(candidate.get("All-In Effective Rate")),
         })
 
     summary = {
