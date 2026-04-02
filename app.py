@@ -4706,6 +4706,7 @@ def run_annual_conversion_calculator(
         candidate_incremental_tax = float(candidate['Total Tax']) - float(baseline['Total Tax'])
         candidate_conversion_amount = float(candidate['Conversion'])
         candidate_incremental_rate = (candidate_incremental_drag / candidate_conversion_amount) if candidate_conversion_amount > 0 else 0.0
+        candidate_spread_vs_future = (estimated_future_marginal_rate - candidate_incremental_rate) if candidate_conversion_amount > 0 else None
         return {
             'Scenario': scenario_label,
             'Conversion': float(candidate['Conversion']),
@@ -4719,6 +4720,8 @@ def run_annual_conversion_calculator(
             'ACA Headroom Remaining': candidate.get('ACA Headroom Remaining'),
             'IRMAA Headroom Remaining': candidate.get('IRMAA Headroom Remaining'),
             'Marginal Federal Rate': float(candidate['Marginal Rate']),
+            'Estimated Future Marginal Rate': float(estimated_future_marginal_rate) if candidate_conversion_amount > 0 else None,
+            'Spread vs Future Rate': candidate_spread_vs_future,
             'Effective Tax Rate': float(candidate['Effective Tax Rate']),
             'All-In Effective Rate': safe_numeric_or_blank(candidate.get('All-In Effective Rate')),
             'Incremental Tax vs No Conversion': float(candidate_incremental_tax),
@@ -4861,11 +4864,16 @@ def render_annual_conversion_calculator_results(result: dict):
         st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
     st.write(f"Why this conversion: {summary['Why This Conversion']}")
 
-    metric_cols = st.columns(4)
+    metric_cols = st.columns(6)
     metric_cols[0].metric('Recommended Conversion', f"${float(summary['Recommended Conversion']):,.0f}")
     metric_cols[1].metric('Recommended MAGI', f"${float(recommended['MAGI']):,.0f}")
     metric_cols[2].metric('Incremental Total Drag', f"${float(recommended['Total Government Drag'] - baseline['Total Government Drag']):,.0f}")
     metric_cols[3].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
+    metric_cols[4].metric('Estimated Future Marginal Rate', f"{float(summary['Estimated Future Marginal Rate']):.2%}")
+    metric_cols[5].metric(
+        'Spread vs Future Rate',
+        '' if summary.get('Recommended Spread vs Future Rate') is None else f"{float(summary['Recommended Spread vs Future Rate']):.2%}"
+    )
     st.write(f"Estimated future marginal rate used: {float(summary['Estimated Future Marginal Rate']):.2%}")
     if summary.get('Recommended Spread vs Future Rate') is not None:
         st.write(f"Recommended spread vs future rate: {float(summary['Recommended Spread vs Future Rate']):.2%}")
