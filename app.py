@@ -28,6 +28,28 @@ ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
 APP_VERSION = "v45-spending-optimizer"
+APP_STATE_VERSION = "v94"
+
+
+
+def apply_app_state_version_guard() -> None:
+    current_version = st.session_state.get("app_state_version")
+    if current_version != APP_STATE_VERSION:
+        preserved_page = st.session_state.get("app_page", "home")
+        st.session_state.clear()
+        st.session_state["app_state_version"] = APP_STATE_VERSION
+        st.session_state["app_page"] = preserved_page
+
+
+def render_app_state_controls() -> None:
+    cols = st.columns([1, 5])
+    with cols[0]:
+        if st.button("Reset App State", key="reset_app_state_button", use_container_width=True):
+            preserved_page = st.session_state.get("app_page", "home")
+            st.session_state.clear()
+            st.session_state["app_state_version"] = APP_STATE_VERSION
+            st.session_state["app_page"] = preserved_page
+            st.rerun()
 
 def sanitize_governor_step_size(step_size: float) -> float:
     """
@@ -6852,7 +6874,9 @@ def render_annual_page() -> None:
         render_annual_conversion_calculator_results(annual_result)
 
 def main() -> None:
+    apply_app_state_version_guard()
     ensure_default_state()
+    render_app_state_controls()
     current_page = get_app_page()
     if current_page == "home":
         render_home_page()
