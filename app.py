@@ -332,6 +332,89 @@ def build_funding_debug_view_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def summarize_funding_debug_view(df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {}
+
+    working = df.copy()
+    numeric_cols = [
+        "Cash Used For Spending",
+        "Brokerage Used For Spending",
+        "Brokerage Basis Used",
+        "Realized LTCG",
+        "Traditional IRA Used For Spending",
+        "Roth Used For Spending",
+        "RMD Income",
+        "Roth Conversion",
+        "Earned Income",
+        "Total Social Security",
+        "MAGI",
+        "Annual Spending Need",
+    ]
+    for col in numeric_cols:
+        if col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+
+    totals = {
+        "cash": float(working.get("Cash Used For Spending", pd.Series(dtype=float)).sum()),
+        "brokerage": float(working.get("Brokerage Used For Spending", pd.Series(dtype=float)).sum()),
+        "basis": float(working.get("Brokerage Basis Used", pd.Series(dtype=float)).sum()),
+        "ltcg": float(working.get("Realized LTCG", pd.Series(dtype=float)).sum()),
+        "trad": float(working.get("Traditional IRA Used For Spending", pd.Series(dtype=float)).sum()),
+        "roth": float(working.get("Roth Used For Spending", pd.Series(dtype=float)).sum()),
+        "ss": float(working.get("Total Social Security", pd.Series(dtype=float)).sum()),
+        "earned": float(working.get("Earned Income", pd.Series(dtype=float)).sum()),
+        "spending": float(working.get("Annual Spending Need", pd.Series(dtype=float)).sum()),
+    }
+
+    funding_totals = {
+        "Cash": totals["cash"],
+        "Brokerage": totals["brokerage"],
+        "Traditional IRA": totals["trad"],
+        "Roth": totals["roth"],
+    }
+    primary_source = max(funding_totals.items(), key=lambda item: item[1])[0] if any(v > 0 for v in funding_totals.values()) else "None"
+
+    basis_share = 0.0
+    if totals["brokerage"] > 0:
+        basis_share = min(1.0, max(0.0, totals["basis"] / totals["brokerage"]))
+
+    low_magi_support_years = 0
+    if {"Annual Spending Need", "MAGI"}.issubset(set(working.columns)):
+        low_magi_support_years = int(((working["Annual Spending Need"] > 0) & (working["MAGI"] < working["Annual Spending Need"])).sum())
+
+    roth_spending_years = int((working.get("Roth Used For Spending", pd.Series(dtype=float)) > 0).sum()) if "Roth Used For Spending" in working.columns else 0
+    brokerage_years = int((working.get("Brokerage Used For Spending", pd.Series(dtype=float)) > 0).sum()) if "Brokerage Used For Spending" in working.columns else 0
+
+    insights = []
+    if totals["brokerage"] > 0:
+        insights.append(
+            f"Brokerage funded {format_dollars(totals['brokerage'])} of spending, and about {basis_share:.0%} of that came from basis rather than gains."
+        )
+    if totals["ltcg"] > 0 and totals["brokerage"] > 0:
+        insights.append(
+            f"Only {format_dollars(totals['ltcg'])} of brokerage spending showed up as realized LTCG."
+        )
+    if low_magi_support_years > 0:
+        insights.append(
+            f"In {low_magi_support_years} year(s), spending exceeded MAGI, which usually means basis, cash, or Roth supported spending without fully hitting income."
+        )
+    if roth_spending_years > 0:
+        insights.append(
+            f"Roth funded spending in {roth_spending_years} year(s)."
+        )
+
+    return {
+        "Primary Funding Source": primary_source,
+        "Total Spending": totals["spending"],
+        "Brokerage Basis Share": basis_share,
+        "Low MAGI Support Years": low_magi_support_years,
+        "Roth Spending Years": roth_spending_years,
+        "Brokerage Spending Years": brokerage_years,
+        "Insights": insights,
+    }
+
+
 PROFILE_PRESETS = {
     "Balanced": {
         "weights": {"nw": 0.24, "legacy": 0.14, "trad": 0.18, "stability": 0.18, "risk": 0.10, "drag": 0.08, "trad_share": 0.08},
@@ -6279,8 +6362,16 @@ def render_conversion_page() -> None:
 
             funding_debug_df = build_funding_debug_view_df(result["df"])
             if funding_debug_df is not None and not funding_debug_df.empty:
-                st.subheader("Annual Funding + Income View")
+                funding_summary = summarize_funding_debug_view(funding_debug_df)
+                st.subheader("Funding Trace + Income View")
                 st.caption("Use this to see how annual spending was funded and why MAGI can stay low even when spending is high. Brokerage Used For Spending shows total taxable-account dollars spent, while Brokerage Basis Used is the non-taxable portion and Realized LTCG is the portion that hits income.")
+                funding_metric_cols = st.columns(4)
+                funding_metric_cols[0].metric("Primary funding source", str(funding_summary.get("Primary Funding Source", "None")))
+                funding_metric_cols[1].metric("Brokerage basis share", f"{float(funding_summary.get('Brokerage Basis Share', 0.0)):.0%}")
+                funding_metric_cols[2].metric("Low-MAGI support years", f"{int(funding_summary.get('Low MAGI Support Years', 0))}")
+                funding_metric_cols[3].metric("Roth spending years", f"{int(funding_summary.get('Roth Spending Years', 0))}")
+                for insight in funding_summary.get("Insights", []):
+                    st.write(f"- {insight}")
                 funding_fmt = {}
                 funding_non_currency = {"Year", "Tax Funding Source"}
                 for col in funding_debug_df.columns:
