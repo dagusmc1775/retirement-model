@@ -1285,6 +1285,19 @@ def get_page_specific_state_keys(page: str) -> list[str]:
     for key in SCENARIO_STATE_KEYS:
         if any(key.startswith(prefix) for prefix in prefixes):
             keys.append(key)
+
+    if page == "annual":
+        annual_extras = [
+            "annual_external_other_ordinary_income",
+            "annual_realized_ltcg_so_far",
+            "annual_target_bracket",
+            "annual_income_safety_buffer",
+            "annual_max_conversion",
+        ]
+        for key in annual_extras:
+            if key in SCENARIO_STATE_KEYS and key not in keys:
+                keys.append(key)
+
     return keys
 
 
