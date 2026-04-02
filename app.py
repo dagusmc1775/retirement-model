@@ -4750,41 +4750,45 @@ def render_annual_conversion_calculator_results(result: dict):
     metric_cols[3].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
 
     st.subheader('Guardrail Thresholds')
+    threshold_df = result['threshold_df'].copy()
+    threshold_formatters = {
+        'Threshold Value': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Buffered Threshold': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Max Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'MAGI At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Headroom At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Headroom At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Ordinary Taxable Income At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Federal Tax At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'State Tax At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Cost At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Cost At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Total Government Drag At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+    }
     st.dataframe(
-        result['threshold_df'].style.format({
-            'Threshold Value': '${:,.0f}',
-            'Buffered Threshold': '${:,.0f}',
-            'Max Conversion': '${:,.0f}',
-            'MAGI At Max': '${:,.0f}',
-            'ACA Headroom At Max': '${:,.0f}',
-            'IRMAA Headroom At Max': '${:,.0f}',
-            'Ordinary Taxable Income At Max': '${:,.0f}',
-            'Federal Tax At Max': '${:,.0f}',
-            'State Tax At Max': '${:,.0f}',
-            'ACA Cost At Max': '${:,.0f}',
-            'IRMAA Cost At Max': '${:,.0f}',
-            'Total Government Drag At Max': '${:,.0f}',
-        }),
+        threshold_df.style.format(threshold_formatters),
         use_container_width=True,
     )
 
     st.subheader('Annual Conversion Options Comparison')
+    compare_df = result['compare_df'].copy()
+    compare_formatters = {
+        'Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'MAGI': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Ordinary Taxable Income': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Federal Tax': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'State Tax': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Cost': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Cost': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Total Government Drag': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Headroom Remaining': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Headroom Remaining': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Incremental vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Effective Tax Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'All-In Effective Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+    }
     st.dataframe(
-        result['compare_df'].style.format({
-            'Conversion': '${:,.0f}',
-            'MAGI': '${:,.0f}',
-            'Ordinary Taxable Income': '${:,.0f}',
-            'Federal Tax': '${:,.0f}',
-            'State Tax': '${:,.0f}',
-            'ACA Cost': '${:,.0f}',
-            'IRMAA Cost': '${:,.0f}',
-            'Total Government Drag': '${:,.0f}',
-            'ACA Headroom Remaining': '${:,.0f}',
-            'IRMAA Headroom Remaining': '${:,.0f}',
-            'Incremental vs No Conversion': '${:,.0f}',
-            'Effective Tax Rate': '{:.2%}',
-            'All-In Effective Rate': '{:.2%}',
-        }),
+        compare_df.style.format(compare_formatters),
         use_container_width=True,
     )
 
