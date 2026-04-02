@@ -4426,7 +4426,7 @@ def evaluate_annual_conversion_candidate(
         'Total Tax': total_tax,
         'Total Government Drag': total_drag,
         'Effective Tax Rate': float(effective_tax_rate),
-        'All-In Effective Rate': float(all_in_effective_rate),
+        'All-In Effective Rate': (float(all_in_effective_rate) if all_in_effective_rate is not None else ''),
         'ACA Headroom Remaining': aca_headroom_remaining,
         'IRMAA Headroom Remaining': irmaa_headroom_remaining,
         'Marginal Rate': float(tax_info['marginal_rate']),
