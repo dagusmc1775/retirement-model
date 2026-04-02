@@ -939,50 +939,30 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             "negative_score": float(negative_score),
             "ending_traditional_ira_share": float(trad_share_values[i]),
         })
+
+    if profile_name == "Legacy Focused" and preferences.get("minimize_trad_ira_for_heirs"):
+        best_after_tax_legacy = max(float(r.get("After-Tax Legacy", 0.0)) for r in scored) if scored else 0.0
+        legacy_floor = best_after_tax_legacy * 0.98
+        eligible = [r for r in scored if float(r.get("After-Tax Legacy", 0.0)) >= legacy_floor]
+        ineligible = [r for r in scored if float(r.get("After-Tax Legacy", 0.0)) < legacy_floor]
+        eligible_sorted = sorted(
+            eligible,
+            key=lambda r: (
+                float(r.get("Ending Traditional IRA Balance", 0.0)),
+                float(r.get("heir_tax_drag", 0.0)),
+                -float(r.get("After-Tax Legacy", 0.0)),
+                -float(r.get("Final Household SS Income", 0.0)),
+                -float(r.get("score", 0.0)),
+            ),
+        )
+        ineligible_sorted = sorted(ineligible, key=lambda x: x["score"], reverse=True)
+        return eligible_sorted + ineligible_sorted
+
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
 
 def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
-    if not ranked_rows:
-        return "No recommendation is available yet."
-    winner = ranked_rows[0]
-    baseline = next((r for r in ranked_rows if r["Strategy"] == "62/62"), ranked_rows[0])
-    nw_delta = float(baseline["Final Net Worth"] - winner["Final Net Worth"])
-    trad_delta = float(baseline["Ending Traditional IRA Balance"] - winner["Ending Traditional IRA Balance"])
-    legacy_delta = float(winner["After-Tax Legacy"] - baseline["After-Tax Legacy"])
-    pieces = [
-        f"Based on your selected priorities ({profile_name}), the model recommends {winner['Strategy']} as the strongest overall quick strategy.",
-    ]
-    if winner["Strategy"] != baseline["Strategy"]:
-        pieces.append(
-            f"Compared with 62/62, the recommended strategy changes ending Traditional IRA by {format_dollars(trad_delta)} and changes after-tax legacy value by {format_dollars(legacy_delta)}."
-        )
-        if nw_delta > 0:
-            pieces.append(
-                f"It also changes projected final net worth by {format_dollars(-nw_delta)} versus 62/62. This is not a strictly better outcome. It is a tradeoff between maximizing total wealth and improving tax efficiency, guaranteed income later in life, or both."
-            )
-        else:
-            pieces.append(
-                "It also matches or improves projected final net worth versus 62/62 while better aligning with your stated planning priorities."
-            )
-    else:
-        pieces.append(
-            "In this quick comparison, the same strategy that wins on net worth also best fits your selected planning profile."
-        )
-    pieces.append(
-        "Use this as a fast recommendation layer. If you want a tighter check, test a few nearby claim-age combinations around the winner before deciding whether a full 81-strategy run is worth it."
-    )
-    return " ".join(pieces)
-
-
-def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
-    if len(ranked_rows) < 2:
-        return False
-    top_score = float(ranked_rows[0].get("score", 0.0))
-    second_score = float(ranked_rows[1].get("score", 0.0))
-    denom = max(abs(top_score), 1e-9)
-    return abs(top_score - second_score) / denom <= tolerance_pct
-
+    return advisor_interpretation(profile_name, ranked_rows)
 
 def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> list[str]:
     if not ranked_rows:
