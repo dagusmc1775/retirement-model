@@ -5703,7 +5703,8 @@ def render_conversion_page() -> None:
             use_container_width=True,
         )
         st.subheader("Advisor Interpretation")
-        st.write(quick_result["advisor_text"])
+        advisor_text = str(quick_result.get("advisor_text", "")).replace("$", r"\$")
+        st.markdown(advisor_text)
         guidance = quick_result.get("next_step_guidance", [])
         if guidance:
             st.subheader("Recommended Next Steps")
