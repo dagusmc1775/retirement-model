@@ -4686,8 +4686,12 @@ def run_annual_conversion_calculator(
             'Total Government Drag': float(baseline['Total Government Drag']),
             'ACA Headroom Remaining': baseline.get('ACA Headroom Remaining'),
             'IRMAA Headroom Remaining': baseline.get('IRMAA Headroom Remaining'),
+            'Marginal Federal Rate': float(baseline['Marginal Rate']),
             'Effective Tax Rate': float(baseline['Effective Tax Rate']),
             'All-In Effective Rate': float(baseline['All-In Effective Rate']),
+            'Incremental Tax vs No Conversion': 0.0,
+            'Incremental All-In vs No Conversion': 0.0,
+            'Incremental All-In Rate vs No Conversion': 0.0,
         }
     ]
 
@@ -4707,6 +4711,10 @@ def run_annual_conversion_calculator(
             step_size,
             lambda c, limit=compare_bracket_limit: float(c['Ordinary Taxable Income']) <= limit,
         )
+        compare_incremental_drag = float(compare_candidate['Total Government Drag']) - float(baseline['Total Government Drag'])
+        compare_incremental_tax = float(compare_candidate['Total Tax']) - float(baseline['Total Tax'])
+        compare_conversion_amount = float(compare_candidate['Conversion'])
+        compare_incremental_rate = (compare_incremental_drag / compare_conversion_amount) if compare_conversion_amount > 0 else 0.0
         comparison_rows.append({
             'Scenario': f'Top of {compare_bracket} bracket',
             'Conversion': float(compare_candidate['Conversion']),
@@ -4719,10 +4727,18 @@ def run_annual_conversion_calculator(
             'Total Government Drag': float(compare_candidate['Total Government Drag']),
             'ACA Headroom Remaining': compare_candidate.get('ACA Headroom Remaining'),
             'IRMAA Headroom Remaining': compare_candidate.get('IRMAA Headroom Remaining'),
+            'Marginal Federal Rate': float(compare_candidate['Marginal Rate']),
             'Effective Tax Rate': float(compare_candidate['Effective Tax Rate']),
             'All-In Effective Rate': float(compare_candidate['All-In Effective Rate']),
+            'Incremental Tax vs No Conversion': float(compare_incremental_tax),
+            'Incremental All-In vs No Conversion': float(compare_incremental_drag),
+            'Incremental All-In Rate vs No Conversion': float(compare_incremental_rate),
         })
 
+    recommended_incremental_drag = float(recommended['Total Government Drag']) - float(baseline['Total Government Drag'])
+    recommended_incremental_tax = float(recommended['Total Tax']) - float(baseline['Total Tax'])
+    recommended_conversion_amount = float(recommended['Conversion'])
+    recommended_incremental_rate = (recommended_incremental_drag / recommended_conversion_amount) if recommended_conversion_amount > 0 else 0.0
     comparison_rows.append({
         'Scenario': 'Recommended conversion',
         'Conversion': float(recommended['Conversion']),
@@ -4735,8 +4751,12 @@ def run_annual_conversion_calculator(
         'Total Government Drag': float(recommended['Total Government Drag']),
         'ACA Headroom Remaining': recommended.get('ACA Headroom Remaining'),
         'IRMAA Headroom Remaining': recommended.get('IRMAA Headroom Remaining'),
+        'Marginal Federal Rate': float(recommended['Marginal Rate']),
         'Effective Tax Rate': float(recommended['Effective Tax Rate']),
         'All-In Effective Rate': float(recommended['All-In Effective Rate']),
+        'Incremental Tax vs No Conversion': float(recommended_incremental_tax),
+        'Incremental All-In vs No Conversion': float(recommended_incremental_drag),
+        'Incremental All-In Rate vs No Conversion': float(recommended_incremental_rate),
     })
 
     baseline_vs_recommended = pd.DataFrame(comparison_rows)
@@ -4859,6 +4879,7 @@ def render_annual_conversion_calculator_results(result: dict):
     )
 
     st.subheader('Annual Conversion Options Comparison')
+    st.caption('Added safe diagnostics: marginal federal rate, incremental tax dollars, and incremental all-in rate versus no conversion. These are display-only and do not change the recommendation engine.')
     compare_df = result['compare_df'].copy()
     compare_formatters = {
         'Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
@@ -4872,8 +4893,12 @@ def render_annual_conversion_calculator_results(result: dict):
         'ACA Headroom Remaining': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
         'IRMAA Headroom Remaining': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
         'Incremental vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Incremental Tax vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Incremental All-In vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Marginal Federal Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
         'Effective Tax Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
         'All-In Effective Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Incremental All-In Rate vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
     }
     st.dataframe(
         compare_df.style.format(compare_formatters),
