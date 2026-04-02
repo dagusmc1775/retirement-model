@@ -6653,9 +6653,10 @@ def render_annual_page() -> None:
             min_value=0.0,
             value=float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
             step=1000.0,
-            key="earned_income_annual",
+            key="annual_earned_income_shared_input",
             help="This is shared with the Conversion page Annual Wage Income field so both pages stay aligned.",
         )
+        st.session_state["earned_income_annual"] = float(external_other_ordinary_income)
         st.session_state["annual_external_other_ordinary_income"] = float(external_other_ordinary_income)
     with row2_col2:
         realized_ltcg_so_far = st.number_input(
