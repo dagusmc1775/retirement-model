@@ -4312,6 +4312,10 @@ def evaluate_annual_conversion_candidate(
     total_tax = float(tax_info['federal_tax'] + state_tax)
     effective_tax_rate = (total_tax / agi) if agi > 0 else 0.0
     all_in_effective_rate = (total_drag / agi) if agi > 0 else 0.0
+    aca_limit = get_aca_magi_limit(year, aca_lives) if aca_lives > 0 else None
+    first_irmaa_cliff = get_first_irmaa_cliff_threshold(year) if medicare_lives > 0 else None
+    aca_headroom_remaining = max(0.0, float(aca_limit) - float(magi)) if aca_limit is not None else None
+    irmaa_headroom_remaining = max(0.0, float(first_irmaa_cliff) - float(magi)) if first_irmaa_cliff is not None else None
 
     return {
         'Conversion': conversion,
@@ -4332,6 +4336,8 @@ def evaluate_annual_conversion_candidate(
         'Total Government Drag': total_drag,
         'Effective Tax Rate': float(effective_tax_rate),
         'All-In Effective Rate': float(all_in_effective_rate),
+        'ACA Headroom Remaining': aca_headroom_remaining,
+        'IRMAA Headroom Remaining': irmaa_headroom_remaining,
         'Marginal Rate': float(tax_info['marginal_rate']),
     }
 
@@ -4451,6 +4457,8 @@ def run_annual_conversion_calculator(
         'Buffered Threshold': bracket_limit,
         'Max Conversion': bracket_max_conversion,
         'MAGI At Max': float(bracket_candidate['MAGI']),
+        'ACA Headroom At Max': bracket_candidate.get('ACA Headroom Remaining'),
+        'IRMAA Headroom At Max': bracket_candidate.get('IRMAA Headroom Remaining'),
         'Ordinary Taxable Income At Max': float(bracket_candidate['Ordinary Taxable Income']),
         'Federal Tax At Max': float(bracket_candidate['Federal Tax']),
         'State Tax At Max': float(bracket_candidate['State Tax']),
@@ -4482,6 +4490,8 @@ def run_annual_conversion_calculator(
             'Buffered Threshold': float(aca_limit_buffered),
             'Max Conversion': aca_max_conversion,
             'MAGI At Max': float(aca_candidate['MAGI']),
+            'ACA Headroom At Max': aca_candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom At Max': aca_candidate.get('IRMAA Headroom Remaining'),
             'Ordinary Taxable Income At Max': float(aca_candidate['Ordinary Taxable Income']),
             'Federal Tax At Max': float(aca_candidate['Federal Tax']),
             'State Tax At Max': float(aca_candidate['State Tax']),
@@ -4500,6 +4510,8 @@ def run_annual_conversion_calculator(
             'Buffered Threshold': '',
             'Max Conversion': '',
             'MAGI At Max': '',
+            'ACA Headroom At Max': '',
+            'IRMAA Headroom At Max': '',
             'Ordinary Taxable Income At Max': '',
             'Federal Tax At Max': '',
             'State Tax At Max': '',
@@ -4529,6 +4541,8 @@ def run_annual_conversion_calculator(
             'Buffered Threshold': float(first_irmaa_cliff_buffered),
             'Max Conversion': irmaa_max_conversion,
             'MAGI At Max': float(irmaa_candidate['MAGI']),
+            'ACA Headroom At Max': irmaa_candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom At Max': irmaa_candidate.get('IRMAA Headroom Remaining'),
             'Ordinary Taxable Income At Max': float(irmaa_candidate['Ordinary Taxable Income']),
             'Federal Tax At Max': float(irmaa_candidate['Federal Tax']),
             'State Tax At Max': float(irmaa_candidate['State Tax']),
@@ -4547,6 +4561,8 @@ def run_annual_conversion_calculator(
             'Buffered Threshold': '',
             'Max Conversion': '',
             'MAGI At Max': '',
+            'ACA Headroom At Max': '',
+            'IRMAA Headroom At Max': '',
             'Ordinary Taxable Income At Max': '',
             'Federal Tax At Max': '',
             'State Tax At Max': '',
@@ -4580,6 +4596,8 @@ def run_annual_conversion_calculator(
             'ACA Cost': float(baseline['ACA Cost']),
             'IRMAA Cost': float(baseline['IRMAA Cost']),
             'Total Government Drag': float(baseline['Total Government Drag']),
+            'ACA Headroom Remaining': baseline.get('ACA Headroom Remaining'),
+            'IRMAA Headroom Remaining': baseline.get('IRMAA Headroom Remaining'),
             'Effective Tax Rate': float(baseline['Effective Tax Rate']),
             'All-In Effective Rate': float(baseline['All-In Effective Rate']),
         }
@@ -4611,6 +4629,8 @@ def run_annual_conversion_calculator(
             'ACA Cost': float(compare_candidate['ACA Cost']),
             'IRMAA Cost': float(compare_candidate['IRMAA Cost']),
             'Total Government Drag': float(compare_candidate['Total Government Drag']),
+            'ACA Headroom Remaining': compare_candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom Remaining': compare_candidate.get('IRMAA Headroom Remaining'),
             'Effective Tax Rate': float(compare_candidate['Effective Tax Rate']),
             'All-In Effective Rate': float(compare_candidate['All-In Effective Rate']),
         })
@@ -4625,6 +4645,8 @@ def run_annual_conversion_calculator(
         'ACA Cost': float(recommended['ACA Cost']),
         'IRMAA Cost': float(recommended['IRMAA Cost']),
         'Total Government Drag': float(recommended['Total Government Drag']),
+        'ACA Headroom Remaining': recommended.get('ACA Headroom Remaining'),
+        'IRMAA Headroom Remaining': recommended.get('IRMAA Headroom Remaining'),
         'Effective Tax Rate': float(recommended['Effective Tax Rate']),
         'All-In Effective Rate': float(recommended['All-In Effective Rate']),
     })
@@ -4650,6 +4672,25 @@ def run_annual_conversion_calculator(
     }
     calc_fingerprint = hashlib.md5(json.dumps(_json_safe(calc_assumptions), sort_keys=True).encode()).hexdigest()[:10]
 
+
+    binding_constraints = []
+    if bool(apply_bracket_guardrail) and abs(float(recommended_conversion) - float(bracket_max_conversion)) < 0.01:
+        binding_constraints.append(f"Top of {target_bracket} bracket")
+    if aca_lives > 0 and bool(apply_aca_guardrail) and abs(float(recommended_conversion) - float(aca_max_conversion)) < 0.01:
+        binding_constraints.append("ACA MAGI limit")
+    if medicare_lives > 0 and first_irmaa_cliff is not None and bool(apply_irmaa_guardrail) and abs(float(recommended_conversion) - float(irmaa_max_conversion)) < 0.01:
+        binding_constraints.append("First IRMAA cliff")
+
+    if not binding_constraints:
+        if recommended_conversion <= 0.0:
+            why_conversion = "No additional conversion fits within the active guardrails for the selected year."
+        elif not active_caps:
+            why_conversion = "No guardrails were active, so the calculator used the maximum additional conversion tested."
+        else:
+            why_conversion = "The recommendation stayed within the active guardrails without a single binding limit."
+    else:
+        why_conversion = "Recommendation stopped at: " + ", ".join(binding_constraints) + "."
+
     summary = {
         'Year': int(calc_year),
         'Recommended Conversion': float(recommended_conversion),
@@ -4661,8 +4702,11 @@ def run_annual_conversion_calculator(
         'Medicare Lives': int(medicare_lives),
         'ACA Limit': aca_limit,
         'ACA Headroom Remaining': max(0.0, float(aca_limit) - float(recommended['MAGI'])) if aca_limit is not None else None,
+        'IRMAA Headroom Remaining': max(0.0, float(first_irmaa_cliff) - float(recommended['MAGI'])) if first_irmaa_cliff is not None else None,
         'First IRMAA Cliff': first_irmaa_cliff,
         'IRMAA Guardrail Status': 'N/A (pre-Medicare)' if medicare_lives <= 0 else ('Enabled' if apply_irmaa_guardrail else 'Disabled'),
+        'Binding Constraints': binding_constraints,
+        'Why This Conversion': why_conversion,
         'Scenario Fingerprint': calc_fingerprint,
     }
 
@@ -4694,8 +4738,10 @@ def render_annual_conversion_calculator_results(result: dict):
         st.write(f"Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
     if summary['First IRMAA Cliff'] is not None:
         st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
+        st.write(f"IRMAA Headroom Remaining: ${float(summary['IRMAA Headroom Remaining']):,.0f}")
     else:
         st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
+    st.write(f"Why this conversion: {summary['Why This Conversion']}")
 
     metric_cols = st.columns(4)
     metric_cols[0].metric('Recommended Conversion', f"${float(summary['Recommended Conversion']):,.0f}")
@@ -4704,7 +4750,23 @@ def render_annual_conversion_calculator_results(result: dict):
     metric_cols[3].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
 
     st.subheader('Guardrail Thresholds')
-    st.dataframe(result['threshold_df'], use_container_width=True)
+    st.dataframe(
+        result['threshold_df'].style.format({
+            'Threshold Value': '${:,.0f}',
+            'Buffered Threshold': '${:,.0f}',
+            'Max Conversion': '${:,.0f}',
+            'MAGI At Max': '${:,.0f}',
+            'ACA Headroom At Max': '${:,.0f}',
+            'IRMAA Headroom At Max': '${:,.0f}',
+            'Ordinary Taxable Income At Max': '${:,.0f}',
+            'Federal Tax At Max': '${:,.0f}',
+            'State Tax At Max': '${:,.0f}',
+            'ACA Cost At Max': '${:,.0f}',
+            'IRMAA Cost At Max': '${:,.0f}',
+            'Total Government Drag At Max': '${:,.0f}',
+        }),
+        use_container_width=True,
+    )
 
     st.subheader('Annual Conversion Options Comparison')
     st.dataframe(
@@ -4717,6 +4779,8 @@ def render_annual_conversion_calculator_results(result: dict):
             'ACA Cost': '${:,.0f}',
             'IRMAA Cost': '${:,.0f}',
             'Total Government Drag': '${:,.0f}',
+            'ACA Headroom Remaining': '${:,.0f}',
+            'IRMAA Headroom Remaining': '${:,.0f}',
             'Incremental vs No Conversion': '${:,.0f}',
             'Effective Tax Rate': '{:.2%}',
             'All-In Effective Rate': '{:.2%}',
