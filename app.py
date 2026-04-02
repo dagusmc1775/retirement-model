@@ -4569,7 +4569,7 @@ def run_annual_conversion_calculator(
         medicare_lives,
     )
 
-    baseline_vs_recommended = pd.DataFrame([
+    comparison_rows = [
         {
             'Scenario': 'No conversion',
             'Conversion': float(baseline['Conversion']),
@@ -4582,21 +4582,54 @@ def run_annual_conversion_calculator(
             'Total Government Drag': float(baseline['Total Government Drag']),
             'Effective Tax Rate': float(baseline['Effective Tax Rate']),
             'All-In Effective Rate': float(baseline['All-In Effective Rate']),
-        },
-        {
-            'Scenario': 'Recommended conversion',
-            'Conversion': float(recommended['Conversion']),
-            'MAGI': float(recommended['MAGI']),
-            'Ordinary Taxable Income': float(recommended['Ordinary Taxable Income']),
-            'Federal Tax': float(recommended['Federal Tax']),
-            'State Tax': float(recommended['State Tax']),
-            'ACA Cost': float(recommended['ACA Cost']),
-            'IRMAA Cost': float(recommended['IRMAA Cost']),
-            'Total Government Drag': float(recommended['Total Government Drag']),
-            'Effective Tax Rate': float(recommended['Effective Tax Rate']),
-            'All-In Effective Rate': float(recommended['All-In Effective Rate']),
-        },
-    ])
+        }
+    ]
+
+    compare_brackets = ['10%', '12%', '22%', '24%']
+    for compare_bracket in compare_brackets:
+        bracket_top_for_compare = float(bracket_tops[compare_bracket])
+        compare_bracket_limit = max(0.0, bracket_top_for_compare - safety_buffer)
+        compare_conversion, compare_candidate = find_max_conversion_under_rule(
+            calc_year,
+            external_other_ordinary_income,
+            total_ss_for_year,
+            realized_ltcg_so_far,
+            state_tax_rate,
+            aca_lives,
+            medicare_lives,
+            max_conversion,
+            step_size,
+            lambda c, limit=compare_bracket_limit: float(c['Ordinary Taxable Income']) <= limit,
+        )
+        comparison_rows.append({
+            'Scenario': f'Top of {compare_bracket} bracket',
+            'Conversion': float(compare_candidate['Conversion']),
+            'MAGI': float(compare_candidate['MAGI']),
+            'Ordinary Taxable Income': float(compare_candidate['Ordinary Taxable Income']),
+            'Federal Tax': float(compare_candidate['Federal Tax']),
+            'State Tax': float(compare_candidate['State Tax']),
+            'ACA Cost': float(compare_candidate['ACA Cost']),
+            'IRMAA Cost': float(compare_candidate['IRMAA Cost']),
+            'Total Government Drag': float(compare_candidate['Total Government Drag']),
+            'Effective Tax Rate': float(compare_candidate['Effective Tax Rate']),
+            'All-In Effective Rate': float(compare_candidate['All-In Effective Rate']),
+        })
+
+    comparison_rows.append({
+        'Scenario': 'Recommended conversion',
+        'Conversion': float(recommended['Conversion']),
+        'MAGI': float(recommended['MAGI']),
+        'Ordinary Taxable Income': float(recommended['Ordinary Taxable Income']),
+        'Federal Tax': float(recommended['Federal Tax']),
+        'State Tax': float(recommended['State Tax']),
+        'ACA Cost': float(recommended['ACA Cost']),
+        'IRMAA Cost': float(recommended['IRMAA Cost']),
+        'Total Government Drag': float(recommended['Total Government Drag']),
+        'Effective Tax Rate': float(recommended['Effective Tax Rate']),
+        'All-In Effective Rate': float(recommended['All-In Effective Rate']),
+    })
+
+    baseline_vs_recommended = pd.DataFrame(comparison_rows)
     baseline_vs_recommended['Incremental vs No Conversion'] = baseline_vs_recommended['Total Government Drag'] - float(baseline['Total Government Drag'])
 
     calc_assumptions = {
@@ -4673,7 +4706,7 @@ def render_annual_conversion_calculator_results(result: dict):
     st.subheader('Guardrail Thresholds')
     st.dataframe(result['threshold_df'], use_container_width=True)
 
-    st.subheader('No Conversion vs Recommended Conversion')
+    st.subheader('Annual Conversion Options Comparison')
     st.dataframe(
         result['compare_df'].style.format({
             'Conversion': '${:,.0f}',
