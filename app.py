@@ -4399,7 +4399,10 @@ def evaluate_annual_conversion_candidate(
     agi = float(tax_info['agi'])
     total_tax = float(tax_info['federal_tax'] + state_tax)
     effective_tax_rate = (total_tax / agi) if agi > 0 else 0.0
-    all_in_effective_rate = (total_drag / agi) if agi > 0 else 0.0
+    # All-in effective rate is intentionally conversion-based, not AGI-based.
+    # This keeps it aligned with the annual conversion decision question:
+    # "What percent of this conversion is being consumed by total government drag?"
+    all_in_effective_rate = (total_drag / conversion) if conversion > 0 else None
     aca_limit = get_aca_magi_limit(year, aca_lives) if aca_lives > 0 else None
     first_irmaa_cliff = get_first_irmaa_cliff_threshold(year) if medicare_lives > 0 else None
     aca_headroom_remaining = max(0.0, float(aca_limit) - float(magi)) if aca_limit is not None else None
