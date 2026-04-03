@@ -534,22 +534,22 @@ def describe_active_scoring_preferences(preferences: dict) -> str:
     if preferences.get("maximize_social_security"):
         labels.append("Maximize Social Security")
     if preferences.get("minimize_trad_ira_for_heirs"):
-    heir_structure_penalty = (
-        0.24 * (trad_share_norm[i] ** 2.20)
-        + 0.24 * (heir_tax_drag_norm[i] ** 1.45)
-        + 0.10 * (trad_norm[i] ** 1.30)
-    )
-    if profile_name == "Legacy Focused":
-        heir_structure_penalty *= 1.75
-    preference_penalty += heir_structure_penalty
+        heir_structure_penalty = (
+            0.24 * (trad_share_norm[i] ** 2.20)
+            + 0.24 * (heir_tax_drag_norm[i] ** 1.45)
+            + 0.10 * (trad_norm[i] ** 1.30)
+        )
+        if profile_name == "Legacy Focused":
+            heir_structure_penalty *= 1.75
+        preference_penalty += heir_structure_penalty
 
-    # DEBUG OUTPUT
-    if i == 0:
-        print("DEBUG WEIGHTS:", weights)
-        print("DEBUG COMPONENTS:",
-              trad_norm[i],
-              trad_share_norm[i],
-              heir_tax_drag_norm[i])
+        # DEBUG OUTPUT
+        if i == 0:
+            print("DEBUG WEIGHTS:", weights)
+            print("DEBUG COMPONENTS:",
+                  trad_norm[i],
+                  trad_share_norm[i],
+                  heir_tax_drag_norm[i])
 
 
         positive_score += preference_bonus
