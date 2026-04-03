@@ -1685,6 +1685,18 @@ def clear_loaded_scenario_identity() -> None:
     st.session_state["loaded_scenario_fingerprint"] = None
 
 
+def clear_transient_recommendation_state() -> None:
+    for key in [
+        "selected_recommendation_strategy",
+        "selected_recommendation_source",
+        "selected_recommendation_profile",
+        "break_even_governor_preset_note",
+        "suppress_quick_recommendation_stale_once",
+    ]:
+        if key in st.session_state:
+            st.session_state.pop(key, None)
+
+
 def sync_scenario_name_widget_default() -> None:
     loaded_name = str(st.session_state.get("loaded_scenario_name", "") or "").strip()
     current_value = str(st.session_state.get("scenario_name_input", "") or "").strip()
@@ -1716,6 +1728,7 @@ def sync_widget_state_from_canonical_state() -> None:
 
 def apply_scenario_state(state: dict) -> None:
     ensure_default_state()
+    clear_transient_recommendation_state()
     for key in SCENARIO_STATE_KEYS:
         st.session_state[key] = copy.deepcopy(state.get(key, DEFAULT_APP_STATE[key]))
     if "annual_external_other_ordinary_income" in state and "annual_other_ordinary_income" not in state:
@@ -1728,6 +1741,9 @@ def apply_scenario_state(state: dict) -> None:
         st.session_state.get("annual_other_ordinary_income", DEFAULT_APP_STATE["annual_other_ordinary_income"])
     )
     sync_widget_state_from_canonical_state()
+    loaded_owner_age = int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"]))
+    loaded_spouse_age = int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"]))
+    st.session_state["selected_recommendation_strategy"] = f"{loaded_owner_age}/{loaded_spouse_age}"
 
 
 def reset_scenario_state() -> None:
@@ -2042,7 +2058,7 @@ def render_scenario_manager(current_page: str) -> None:
         sync_scenario_name_widget_default()
         st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
-        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v120"
+        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v122"
         st.download_button(
             "Save Scenario",
             data=build_scenario_export_payload("full", export_name),
@@ -6398,7 +6414,7 @@ def render_top_nav(current_page: str) -> None:
                 use_container_width=True,
             )
     else:
-        nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
+        nav1, nav2, nav3 = st.columns([1, 1, 1])
         with nav1:
             st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
         with nav2:
@@ -6415,14 +6431,6 @@ def render_top_nav(current_page: str) -> None:
                 on_click=go_to_page,
                 args=("conversion",),
                 disabled=current_page == "conversion",
-                use_container_width=True,
-            )
-        with nav4:
-            st.button(
-                "Snapshot Viewer",
-                on_click=go_to_page,
-                args=("snapshot",),
-                disabled=current_page == "snapshot",
                 use_container_width=True,
             )
     st.divider()
