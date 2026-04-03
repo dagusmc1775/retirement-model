@@ -1052,25 +1052,7 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             "ending_traditional_ira_share": float(trad_share_values[i]),
         })
 
-    if profile_name == "Legacy Focused" and preferences.get("minimize_trad_ira_for_heirs"):
-        best_after_tax_legacy = max(float(r.get("After-Tax Legacy", 0.0)) for r in scored) if scored else 0.0
-        legacy_floor = best_after_tax_legacy * 0.98
-        eligible = [r for r in scored if float(r.get("After-Tax Legacy", 0.0)) >= legacy_floor]
-        ineligible = [r for r in scored if float(r.get("After-Tax Legacy", 0.0)) < legacy_floor]
-        eligible_sorted = sorted(
-            eligible,
-            key=lambda r: (
-                float(r.get("Ending Traditional IRA Balance", 0.0)),
-                float(r.get("heir_tax_drag", 0.0)),
-                -float(r.get("After-Tax Legacy", 0.0)),
-                -float(r.get("Final Household SS Income", 0.0)),
-                -float(r.get("score", 0.0)),
-            ),
-        )
-        ineligible_sorted = sorted(ineligible, key=lambda x: x["score"], reverse=True)
-        return eligible_sorted + ineligible_sorted
-
-    return sorted(scored, key=lambda x: x["score"], reverse=True)
+        return sorted(scored, key=lambda x: x["score"], reverse=True)
 
 
 def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
