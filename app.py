@@ -1027,6 +1027,9 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
         elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
             ss_bonus *= 1.15
         preference_bonus += ss_bonus
+        elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
+            ss_bonus *= 1.15
+        preference_bonus += ss_bonus
         if preferences.get("income_stability_focus"):
             stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
             preference_bonus += stability_bonus
