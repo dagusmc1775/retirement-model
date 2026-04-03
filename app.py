@@ -1476,6 +1476,31 @@ def ensure_default_state() -> None:
             st.session_state[key] = copy.deepcopy(value)
 
 
+def preserve_session_state_across_pages() -> None:
+    """
+    Streamlit drops widget-backed session_state keys when those widgets are not
+    rendered on a later page. Most of this app's canonical scenario values use
+    the same keys as their widgets, so page switches can silently wipe loaded
+    scenarios unless we detach those keys from widget cleanup on every run.
+    """
+    keys_to_preserve = set(SCENARIO_STATE_KEYS)
+    keys_to_preserve.update({
+        "app_page",
+        "app_state_version",
+        "state_tax_rate_pct_display",
+        "target_trad_override_max_rate_pct_display",
+        "conversion_earned_income_annual_input",
+        "conversion_earned_income_start_year_input",
+        "conversion_earned_income_end_year_input",
+        "conversion_earned_income_source_signature",
+        "annual_edit_long_range_assumptions",
+        "annual_earned_income_display",
+    })
+    for key in keys_to_preserve:
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
+
+
 def collect_scenario_state() -> dict:
     ensure_default_state()
     return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in SCENARIO_STATE_KEYS}
@@ -6999,6 +7024,7 @@ def render_annual_page() -> None:
 def main() -> None:
     apply_app_state_version_guard()
     ensure_default_state()
+    preserve_session_state_across_pages()
     render_app_state_controls()
     current_page = get_app_page()
     if current_page == "home":
