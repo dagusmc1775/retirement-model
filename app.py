@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v117"
+APP_VERSION = "v123"
 APP_STATE_VERSION = "v103"
 
 
@@ -6435,7 +6435,8 @@ def render_top_nav(current_page: str) -> None:
             )
     st.divider()
     render_scenario_manager(current_page)
-    render_snapshot_open_controls()
+    with st.expander("Snapshot Open / Viewer", expanded=False):
+        render_snapshot_open_controls()
 
 
 def render_home_page() -> None:
@@ -6834,14 +6835,19 @@ def render_conversion_page() -> None:
 
             stable_strategy = str(most_stable_row.get('Strategy', ''))
             highest_nw_strategy = str(highest_net_worth_row.get('Strategy', ''))
+            tradeoff_lines = []
             if stable_strategy != str(recommended_row.get('Strategy', '')):
-                st.caption(
-                    f"Versus the most stable option ({stable_strategy}), the recommended strategy changes final net worth by ${abs(stable_nw_delta):,.0f}, household Social Security income by ${abs(stable_ss_delta):,.0f}, and ending Traditional IRA by ${abs(stable_trad_delta):,.0f}."
+                tradeoff_lines.append(
+                    f"- **Versus Most Stable ({stable_strategy})**: Final Net Worth {format_signed_dollars(stable_nw_delta)}, Household Social Security Income {format_signed_dollars(stable_ss_delta)}/year, Ending Traditional IRA {format_signed_dollars(stable_trad_delta)}."
                 )
             if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
-                st.caption(
-                    f"Versus the highest net worth option ({highest_nw_strategy}), the recommended strategy changes final net worth by ${abs(nw_nw_delta):,.0f}, after-tax legacy by ${abs(nw_legacy_delta):,.0f}, and ending Traditional IRA by ${abs(nw_trad_delta):,.0f}."
+                tradeoff_lines.append(
+                    f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
                 )
+            if tradeoff_lines:
+                st.markdown("**Tradeoff Details**")
+                for line in tradeoff_lines:
+                    st.markdown(line)
         with st.expander("Quick Recommendation Snapshot", expanded=False):
             default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
             if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
