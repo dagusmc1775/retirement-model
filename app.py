@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v110"
+APP_VERSION = "v111"
 APP_STATE_VERSION = "v103"
 
 
@@ -1583,6 +1583,8 @@ def preserve_session_state_across_pages() -> None:
         "loaded_scenario_fingerprint",
         "loaded_scenario_app_version",
         "scenario_name_input_seed",
+        "snapshot_viewer_payload",
+        "snapshot_viewer_name",
     })
     for key in keys_to_preserve:
         if key in st.session_state:
@@ -1821,36 +1823,85 @@ def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapsho
         c1.metric("Recommended", str(summary.get("recommended_strategy", "—")))
         c2.metric("Most stable", str(summary.get("most_stable_strategy", "—")))
         c3.metric("Highest net worth", str(summary.get("highest_net_worth_strategy", "—")))
-        if summary.get("planning_profile") or meta.get("planning_profile"):
-            st.write(f"Planning profile: {meta.get('planning_profile', summary.get('planning_profile', ''))}")
+        if meta.get("planning_profile"):
+            st.write(f"Planning profile: {meta.get('planning_profile', '')}")
         if summary.get("active_preferences_text"):
             st.write(f"Preference modifiers: {summary.get('active_preferences_text')}")
         advisor_text = str(summary.get("advisor_text", "") or "")
         if advisor_text:
             st.write("Advisor interpretation")
-            st.caption(advisor_text)
+            st.markdown(advisor_text)
+        strategy_rows = snapshot_payload.get("strategy_summary_rows", []) if isinstance(snapshot_payload, dict) else []
+        if strategy_rows:
+            strategy_df = pd.DataFrame(strategy_rows)
+            st.subheader("Strategy Summary")
+            st.dataframe(
+                strategy_df.style.format({
+                    "Score": "{:.1f}",
+                    "Net Worth": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Trad IRA @ End": "${:,.0f}",
+                    "Roth @ End": "${:,.0f}",
+                    "Brokerage @ End": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Survivor SS Income": "${:,.0f}",
+                }),
+                use_container_width=True,
+            )
         rows = snapshot_payload.get("anchor_comparison_rows", []) if isinstance(snapshot_payload, dict) else []
         if rows:
             anchor_df = pd.DataFrame(rows)
-            st.dataframe(anchor_df, use_container_width=True)
+            st.subheader("Tradeoff Summary")
+            st.dataframe(
+                anchor_df.style.format({
+                    "Net Worth": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Lifetime taxes / government drag": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Ending Traditional IRA": "${:,.0f}",
+                }),
+                use_container_width=True,
+            )
+
+
+def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
+    st.session_state["snapshot_viewer_payload"] = copy.deepcopy(snapshot_payload)
+    meta = snapshot_payload.get("meta", {}) if isinstance(snapshot_payload, dict) else {}
+    name = meta.get("snapshot_name", "Snapshot Viewer") if isinstance(meta, dict) else "Snapshot Viewer"
+    st.session_state["snapshot_viewer_name"] = str(name)
+    st.session_state["app_page"] = "snapshot"
+
+
+def render_snapshot_open_controls() -> None:
+    st.caption("Open a saved snapshot file to view a read-only saved recommendation report.")
+    opened_snapshot = st.file_uploader("Open Snapshot", type=["json"], key="global_snapshot_open")
+    if opened_snapshot is not None:
+        try:
+            opened_payload = json.load(opened_snapshot)
+            if str((opened_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
+                raise ValueError("This file is not a Quick Recommendation snapshot.")
+            open_snapshot_in_viewer(opened_payload)
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not open snapshot: {exc}")
 
 
 def render_scenario_manager(current_page: str) -> None:
-    with st.expander("Scenario Save / Load / Reset", expanded=False):
-        st.caption("Download one full scenario file that carries inputs across both pages, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
+    with st.expander("Scenario Save / Open / Reset", expanded=False):
+        st.caption("Save one full scenario file that carries inputs across both pages, open a saved scenario into this session, or reset all inputs back to zero-style defaults.")
         sync_scenario_name_widget_default()
         st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
         safe_filename = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in export_name).strip("_") or "retirement_model_scenario"
         st.download_button(
-            "Download Full Scenario",
+            "Save Scenario",
             data=build_scenario_export_payload("full", export_name),
             file_name=f"{safe_filename}.json",
             mime="application/json",
             use_container_width=True,
         )
         upload_key = f"scenario_upload_{current_page}"
-        uploaded_file = st.file_uploader("Upload Saved Scenario", type=["json"], key=upload_key)
+        uploaded_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Load Uploaded Scenario", use_container_width=True, disabled=uploaded_file is None, key=f"load_scenario_{current_page}"):
@@ -6176,7 +6227,7 @@ def get_app_page() -> str:
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
     render_scenario_identity_bar(current_page)
-    nav1, nav2, nav3 = st.columns([1, 1, 1])
+    nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
     with nav1:
         st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
     with nav2:
@@ -6195,8 +6246,17 @@ def render_top_nav(current_page: str) -> None:
             disabled=current_page == "conversion",
             use_container_width=True,
         )
+    with nav4:
+        st.button(
+            "Snapshot Viewer",
+            on_click=go_to_page,
+            args=("snapshot",),
+            disabled=current_page == "snapshot",
+            use_container_width=True,
+        )
     st.divider()
     render_scenario_manager(current_page)
+    render_snapshot_open_controls()
 
 
 def render_home_page() -> None:
@@ -6696,7 +6756,7 @@ def render_conversion_page() -> None:
             snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
             safe_snapshot_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in snapshot_name).strip("_") or "quick_recommendation_snapshot"
             st.download_button(
-                "Download Quick Recommendation Snapshot",
+                "Save Snapshot",
                 data=snapshot_json,
                 file_name=f"{safe_snapshot_name}.json",
                 mime="application/json",
@@ -6705,15 +6765,9 @@ def render_conversion_page() -> None:
             )
             current_snapshot_payload = json.loads(snapshot_json)
             render_snapshot_summary_card(current_snapshot_payload, heading="Current Quick Recommendation Snapshot")
-            uploaded_snapshot = st.file_uploader("Upload Saved Snapshot", type=["json"], key="quick_snapshot_upload")
-            if uploaded_snapshot is not None:
-                try:
-                    uploaded_payload = json.load(uploaded_snapshot)
-                    if str((uploaded_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
-                        raise ValueError("This file is not a Quick Recommendation snapshot.")
-                    render_snapshot_summary_card(uploaded_payload, heading="Uploaded Snapshot")
-                except Exception as exc:
-                    st.error(f"Could not read snapshot: {exc}")
+            if st.button("Open Current Snapshot in Viewer", use_container_width=True, key="open_current_snapshot_in_viewer"):
+                open_snapshot_in_viewer(current_snapshot_payload)
+                st.rerun()
 
         guidance = quick_result.get("next_step_guidance", [])
         if guidance:
@@ -7346,6 +7400,17 @@ def render_annual_page() -> None:
     if annual_result:
         render_annual_conversion_calculator_results(annual_result)
 
+
+def render_snapshot_viewer_page() -> None:
+    ensure_default_state()
+    st.title("Snapshot Viewer")
+    render_top_nav("snapshot")
+    payload = st.session_state.get("snapshot_viewer_payload")
+    if not payload:
+        st.info("No snapshot is currently open. Use Open Snapshot above to view a saved recommendation snapshot.")
+        return
+    render_snapshot_summary_card(payload, heading="Opened Snapshot")
+
 def main() -> None:
     apply_app_state_version_guard()
     ensure_default_state()
@@ -7356,6 +7421,8 @@ def main() -> None:
         render_home_page()
     elif current_page == "annual":
         render_annual_page()
+    elif current_page == "snapshot":
+        render_snapshot_viewer_page()
     else:
         render_conversion_page()
 
