@@ -6600,124 +6600,34 @@ def render_conversion_page() -> None:
     
     inputs = render_shared_household_inputs()
 
-    st.header("Break-Even Governor Inputs")
     current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
     if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
         st.session_state["max_conversion"] = float(current_max_conversion_value)
-    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
+    max_conversion = float(current_max_conversion_value)
     current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
     if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
         st.session_state["step_size"] = float(current_step_size_value)
-    step_size = st.number_input(
-        "Break-Even Step Size",
-        min_value=1000.0,
-        value=float(current_step_size_value),
-        step=1000.0,
-        help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
-        key="step_size",
-    )
+    step_size = float(current_step_size_value)
+    cash_sweep_threshold = float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"]))
+    current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
+    state_tax_rate = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"]))
+    target_trad_balance_enabled = bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"]))
+    target_trad_balance = float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"]))
+    target_trad_override_enabled = bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"]))
+    current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
+    target_trad_override_max_rate = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"]))
+    post_aca_target_bracket = str(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
+    rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
 
-    pol1, pol2 = st.columns(2)
-    with pol1:
-        cash_sweep_threshold = st.number_input(
-            "Cash Sweep Threshold",
-            min_value=0.0,
-            value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
-            step=5000.0,
-            help="End-of-year cash above this amount is swept into brokerage.",
-            key="cash_sweep_threshold",
-        )
-    with pol2:
-        current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
-        existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
-        if not isinstance(existing_state_tax_display, str):
-            existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
-            st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
-        state_tax_display_value = st.text_input(
-            "State Tax Rate",
-            value=f"{current_state_tax_pct:.2f}%",
-            help="Enter the state tax rate as a percent, for example 4.75%.",
-            key="state_tax_rate_pct_display",
-        )
-        cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
-        try:
-            state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
-        except Exception:
-            state_tax_rate_pct = current_state_tax_pct
-        state_tax_rate = state_tax_rate_pct / 100.0
-        st.session_state["state_tax_rate"] = state_tax_rate
-        normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
-        if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
-            st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
+    st.subheader("Scenario / Profile Context")
+    context_cols = st.columns(3)
+    context_cols[0].metric("Scenario", str(st.session_state.get("loaded_scenario_name", "Unsaved session")))
+    context_cols[1].metric("Active SS Strategy", active_strategy)
+    context_cols[2].metric("Planning Profile", str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))))
 
-    tg1, tg2 = st.columns(2)
-    with tg1:
-        target_trad_balance_enabled = st.checkbox(
-            "Use Target Traditional IRA Balance Goal",
-            value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
-            help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
-            key="target_trad_balance_enabled",
-        )
-    with tg2:
-        target_trad_balance = st.number_input(
-            "Target Traditional IRA Balance By RMD Start",
-            min_value=0.0,
-            value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
-            step=25000.0,
-            help="Planner goal for remaining Traditional IRA balance by household RMD start.",
-            key="target_trad_balance",
-        )
-
-    ov1, ov2 = st.columns(2)
-    with ov1:
-        target_trad_override_enabled = st.checkbox(
-            "Allow Target Traditional IRA Planner Override",
-            value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
-            help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
-            key="target_trad_override_enabled",
-        )
-    with ov2:
-        current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
-        existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
-        if not isinstance(existing_override_display, str):
-            existing_override_display = f"{float(existing_override_display):.0f}%"
-            st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
-        display_value = st.text_input(
-            "Target Traditional IRA Override Max All-In Rate",
-            value=f"{current_override_pct:.0f}%",
-            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
-            key="target_trad_override_max_rate_pct_display",
-        )
-        cleaned_display_value = str(display_value).strip().replace("%", "")
-        try:
-            target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
-        except Exception:
-            target_trad_override_max_rate_pct = current_override_pct
-        target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
-        st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
-        normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
-        if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
-            st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
-
-    br1, br2 = st.columns(2)
-    with br1:
-        post_aca_target_bracket = st.selectbox(
-            "Post-ACA Target Bracket",
-            ["12%", "22%", "24%"],
-            index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
-            help="Used in non-ACA years before household RMDs begin.",
-            key="post_aca_target_bracket",
-        )
-    with br2:
-        rmd_era_target_bracket = st.selectbox(
-            "RMD-Era Target Bracket",
-            ["12%", "22%", "24%"],
-            index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
-            help="Used once the household reaches the first RMD year.",
-            key="rmd_era_target_bracket",
-        )
-
-    st.header("Recommendation Engine v1")
+    st.divider()
+    st.header("Quick Strategy Recommendation")
+    st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls should be read as recommendation settings, not Governor execution settings.")
     planning_profile = st.selectbox(
         "Optimize For",
         list(PROFILE_PRESETS.keys()),
@@ -7066,7 +6976,10 @@ def render_conversion_page() -> None:
         disabled=not integrity_mode,
     )
 
-    st.header("Social Security Optimizer Workflow")
+    st.divider()
+    st.header("Social Security Optimizer")
+    st.caption("Use this section only when you want the full 81-combination fact set and profile-rescored shortlists.")
+    st.subheader("Optimizer Workflow")
     st.info(
         "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
         "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
@@ -7195,8 +7108,121 @@ def render_conversion_page() -> None:
     else:
         st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
 
-    st.header("Strategy Execution")
-    st.caption("These sections stay visible so you can always run or review the Break-Even Governor and Flat Strategy without hiding the optimizer.")
+    st.divider()
+    st.header("Break-Even Governor")
+    st.caption("These settings control the Governor only. They do not change the quick recommendation ranking section above.")
+    st.subheader("Governor Execution Controls")
+
+    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
+    step_size = st.number_input(
+        "Break-Even Step Size",
+        min_value=1000.0,
+        value=float(current_step_size_value),
+        step=1000.0,
+        help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
+        key="step_size",
+    )
+
+    pol1, pol2 = st.columns(2)
+    with pol1:
+        cash_sweep_threshold = st.number_input(
+            "Cash Sweep Threshold",
+            min_value=0.0,
+            value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
+            step=5000.0,
+            help="End-of-year cash above this amount is swept into brokerage.",
+            key="cash_sweep_threshold",
+        )
+    with pol2:
+        existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
+        if not isinstance(existing_state_tax_display, str):
+            existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
+            st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
+        state_tax_display_value = st.text_input(
+            "State Tax Rate",
+            value=f"{current_state_tax_pct:.2f}%",
+            help="Enter the state tax rate as a percent, for example 4.75%.",
+            key="state_tax_rate_pct_display",
+        )
+        cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
+        try:
+            state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
+        except Exception:
+            state_tax_rate_pct = current_state_tax_pct
+        state_tax_rate = state_tax_rate_pct / 100.0
+        st.session_state["state_tax_rate"] = state_tax_rate
+        normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
+        if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
+            st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
+
+    tg1, tg2 = st.columns(2)
+    with tg1:
+        target_trad_balance_enabled = st.checkbox(
+            "Use Target Traditional IRA Balance Goal",
+            value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
+            help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
+            key="target_trad_balance_enabled",
+        )
+    with tg2:
+        target_trad_balance = st.number_input(
+            "Target Traditional IRA Balance By RMD Start",
+            min_value=0.0,
+            value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
+            step=25000.0,
+            help="Planner goal for remaining Traditional IRA balance by household RMD start.",
+            key="target_trad_balance",
+        )
+
+    ov1, ov2 = st.columns(2)
+    with ov1:
+        target_trad_override_enabled = st.checkbox(
+            "Allow Target Traditional IRA Planner Override",
+            value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
+            help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
+            key="target_trad_override_enabled",
+        )
+    with ov2:
+        existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
+        if not isinstance(existing_override_display, str):
+            existing_override_display = f"{float(existing_override_display):.0f}%"
+            st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
+        display_value = st.text_input(
+            "Target Traditional IRA Override Max All-In Rate",
+            value=f"{current_override_pct:.0f}%",
+            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
+            key="target_trad_override_max_rate_pct_display",
+        )
+        cleaned_display_value = str(display_value).strip().replace("%", "")
+        try:
+            target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
+        except Exception:
+            target_trad_override_max_rate_pct = current_override_pct
+        target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
+        st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
+        normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
+        if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
+            st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
+
+    br1, br2 = st.columns(2)
+    with br1:
+        post_aca_target_bracket = st.selectbox(
+            "Post-ACA Target Bracket",
+            ["12%", "22%", "24%"],
+            index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
+            help="Used in non-ACA years before household RMDs begin.",
+            key="post_aca_target_bracket",
+        )
+    with br2:
+        rmd_era_target_bracket = st.selectbox(
+            "RMD-Era Target Bracket",
+            ["12%", "22%", "24%"],
+            index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
+            help="Used once the household reaches the first RMD year.",
+            key="rmd_era_target_bracket",
+        )
+
+    st.subheader("Execution & Results")
+    st.caption("Run the Flat Strategy or Break-Even Governor here after setting the Governor controls above.")
 
     flat_annual_conversion = st.number_input(
         "Flat Annual Conversion",
@@ -7210,7 +7236,7 @@ def render_conversion_page() -> None:
     btn1, btn2 = st.columns(2)
 
     with btn1:
-        st.subheader("Flat Strategy")
+        st.subheader("Flat Strategy Test")
         if st.button("Run Flat Strategy Test"):
             flat_inputs = dict(inputs)
             flat_inputs["annual_conversion"] = float(flat_annual_conversion)
@@ -7228,7 +7254,7 @@ def render_conversion_page() -> None:
             st.dataframe(flat_result["df"], use_container_width=True)
 
     with btn2:
-        st.subheader("Break-Even Governor")
+        st.subheader("Run Break-Even Governor")
         st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
         if st.button("Run Break-Even Governor"):
             result = run_governor_with_validation(
