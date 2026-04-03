@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v105"
+APP_VERSION = "v106"
 APP_STATE_VERSION = "v103"
 
 
@@ -6463,40 +6463,63 @@ def render_conversion_page() -> None:
         ranked_rows_for_tradeoff = quick_result.get("ranked_rows", [])
         if ranked_rows_for_tradeoff:
             recommended_row = ranked_rows_for_tradeoff[0]
-            best_legacy_row = max(
+            most_stable_row = max(
                 ranked_rows_for_tradeoff,
-                key=lambda r: float(r.get("After-Tax Legacy", r.get("after_tax_legacy", 0.0)))
+                key=lambda r: (
+                    float(r.get("Final Household SS Income", r.get("final_household_ss_income", 0.0))),
+                    float(r.get("Survivor SS Income", r.get("survivor_ss_income", 0.0))),
+                    -float(r.get("Ending Traditional IRA Balance", r.get("ending_traditional_ira_balance", 0.0))),
+                )
             )
+            highest_net_worth_row = max(
+                ranked_rows_for_tradeoff,
+                key=lambda r: float(r.get("Final Net Worth", r.get("final_net_worth", 0.0)))
+            )
+
+            def _strategy_metrics_for_display(row: dict) -> tuple[str, float, float, float, float]:
+                return (
+                    str(row.get("Strategy", "")),
+                    float(row.get("After-Tax Legacy", row.get("after_tax_legacy", 0.0))),
+                    float(row.get("Ending Traditional IRA Balance", row.get("ending_traditional_ira_balance", 0.0))),
+                    float(row.get("Final Net Worth", row.get("final_net_worth", 0.0))),
+                    float(row.get("Final Household SS Income", row.get("final_household_ss_income", 0.0))),
+                )
+
+            def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
+                same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
+                with col:
+                    st.markdown(f"**{title}**")
+                    if same_as_recommended and title != "Recommended Strategy":
+                        st.caption("Same as recommended")
+                    st.write(row.get("Strategy", ""))
+                    st.write(f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
+                    st.write(f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
+                    st.write(f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
+                    st.write(f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
 
             st.subheader("Tradeoff Summary")
-            tc1, tc2 = st.columns(2)
+            tc1, tc2, tc3 = st.columns(3)
+            _render_tradeoff_column(tc1, "Recommended Strategy", recommended_row, recommended_row)
+            _render_tradeoff_column(tc2, "Most Stable Strategy", most_stable_row, recommended_row)
+            _render_tradeoff_column(tc3, "Highest Net Worth Strategy", highest_net_worth_row, recommended_row)
 
-            with tc1:
-                st.markdown("**Recommended Strategy**")
-                st.write(recommended_row.get("Strategy", ""))
-                st.write(f"After-Tax Legacy: ${float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))):,.0f}")
-                st.write(f"Ending Trad IRA: ${float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
-                st.write(f"Final Net Worth: ${float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))):,.0f}")
-                st.write(f"Household SS Income: ${float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))):,.0f}")
+            stable_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(most_stable_row.get('Ending Traditional IRA Balance', most_stable_row.get('ending_traditional_ira_balance', 0.0)))
+            stable_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(most_stable_row.get('Final Net Worth', most_stable_row.get('final_net_worth', 0.0)))
+            stable_ss_delta = float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))) - float(most_stable_row.get('Final Household SS Income', most_stable_row.get('final_household_ss_income', 0.0)))
+            nw_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(highest_net_worth_row.get('Ending Traditional IRA Balance', highest_net_worth_row.get('ending_traditional_ira_balance', 0.0)))
+            nw_legacy_delta = float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))) - float(highest_net_worth_row.get('After-Tax Legacy', highest_net_worth_row.get('after_tax_legacy', 0.0)))
+            nw_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(highest_net_worth_row.get('Final Net Worth', highest_net_worth_row.get('final_net_worth', 0.0)))
 
-            with tc2:
-                st.markdown("**Best Legacy Strategy**")
-                st.write(best_legacy_row.get("Strategy", ""))
-                st.write(f"After-Tax Legacy: ${float(best_legacy_row.get('After-Tax Legacy', best_legacy_row.get('after_tax_legacy', 0.0))):,.0f}")
-                st.write(f"Ending Trad IRA: ${float(best_legacy_row.get('Ending Traditional IRA Balance', best_legacy_row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
-                st.write(f"Final Net Worth: ${float(best_legacy_row.get('Final Net Worth', best_legacy_row.get('final_net_worth', 0.0))):,.0f}")
-                st.write(f"Household SS Income: ${float(best_legacy_row.get('Final Household SS Income', best_legacy_row.get('final_household_ss_income', 0.0))):,.0f}")
-
-            trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(best_legacy_row.get('Ending Traditional IRA Balance', best_legacy_row.get('ending_traditional_ira_balance', 0.0)))
-            legacy_delta = float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))) - float(best_legacy_row.get('After-Tax Legacy', best_legacy_row.get('after_tax_legacy', 0.0)))
-            nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(best_legacy_row.get('Final Net Worth', best_legacy_row.get('final_net_worth', 0.0)))
-            ss_delta = float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))) - float(best_legacy_row.get('Final Household SS Income', best_legacy_row.get('final_household_ss_income', 0.0)))
-
-            st.caption(
-                f"Versus the best pure legacy row, the recommended strategy changes Traditional IRA by ${abs(trad_delta):,.0f}, "
-                f"after-tax legacy by ${abs(legacy_delta):,.0f}, final net worth by ${abs(nw_delta):,.0f}, "
-                f"and household Social Security income by ${abs(ss_delta):,.0f}."
-            )
+            stable_strategy = str(most_stable_row.get('Strategy', ''))
+            highest_nw_strategy = str(highest_net_worth_row.get('Strategy', ''))
+            if stable_strategy != str(recommended_row.get('Strategy', '')):
+                st.caption(
+                    f"Versus the most stable option ({stable_strategy}), the recommended strategy changes final net worth by ${abs(stable_nw_delta):,.0f}, household Social Security income by ${abs(stable_ss_delta):,.0f}, and ending Traditional IRA by ${abs(stable_trad_delta):,.0f}."
+                )
+            if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
+                st.caption(
+                    f"Versus the highest net worth option ({highest_nw_strategy}), the recommended strategy changes final net worth by ${abs(nw_nw_delta):,.0f}, after-tax legacy by ${abs(nw_legacy_delta):,.0f}, and ending Traditional IRA by ${abs(nw_trad_delta):,.0f}."
+                )
         guidance = quick_result.get("next_step_guidance", [])
         if guidance:
             st.subheader("Recommended Next Steps")
