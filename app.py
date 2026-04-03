@@ -2003,6 +2003,16 @@ def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
     st.session_state["app_page"] = "snapshot"
 
 
+
+
+def sanitize_export_filename(value: str, fallback: str = "file") -> str:
+    raw = str(value or "").strip()
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in raw)
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    safe = safe.strip("-_")
+    return safe or fallback
+
 def render_snapshot_open_controls() -> None:
     st.caption("Open a saved snapshot file to view a read-only saved recommendation report.")
     opened_snapshot = st.file_uploader("Open Snapshot", type=["json"], key="global_snapshot_open")
@@ -2032,7 +2042,7 @@ def render_scenario_manager(current_page: str) -> None:
         sync_scenario_name_widget_default()
         st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
-        safe_filename = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in export_name).strip("_") or "retirement_model_scenario"
+        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v120"
         st.download_button(
             "Save Scenario",
             data=build_scenario_export_payload("full", export_name),
@@ -6806,7 +6816,10 @@ def render_conversion_page() -> None:
             st.text_input("Snapshot name", key="quick_snapshot_name_input", placeholder="Baseline Plan - Growth")
             snapshot_json = build_quick_recommendation_snapshot_payload(quick_result, planning_profile)
             snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
-            safe_snapshot_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in snapshot_name).strip("_") or "quick_recommendation_snapshot"
+            snapshot_profile = sanitize_export_filename(planning_profile, 'profile')
+            snapshot_strategy = sanitize_export_filename(str(recommended_row.get('Strategy', '')).replace('/', '-'), 'strategy')
+            snapshot_date = pd.Timestamp.now().strftime('%Y-%m-%d')
+            safe_snapshot_name = f"snapshot__{snapshot_profile}__{snapshot_strategy}__{snapshot_date}"
             st.download_button(
                 "Save Snapshot",
                 data=snapshot_json,
