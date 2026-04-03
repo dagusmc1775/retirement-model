@@ -27,8 +27,8 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v101"
-APP_STATE_VERSION = "v94"
+APP_VERSION = "v103"
+APP_STATE_VERSION = "v103"
 
 
 
@@ -1083,11 +1083,54 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
 
+def build_quick_profile_anchor_rows(ranked_rows: list[dict]) -> dict:
+    if not ranked_rows:
+        return {}
+
+    def _as_float(row: dict, key: str) -> float:
+        try:
+            return float(row.get(key, 0.0))
+        except Exception:
+            return 0.0
+
+    recommended = ranked_rows[0]
+    best_growth = max(
+        ranked_rows,
+        key=lambda r: (
+            _as_float(r, "Final Net Worth"),
+            _as_float(r, "After-Tax Legacy"),
+        ),
+    )
+    best_legacy = max(
+        ranked_rows,
+        key=lambda r: (
+            _as_float(r, "After-Tax Legacy"),
+            -_as_float(r, "Ending Traditional IRA Balance"),
+            _as_float(r, "Effective Legacy Value"),
+        ),
+    )
+    most_stable = max(
+        ranked_rows,
+        key=lambda r: (
+            _as_float(r, "Final Household SS Income"),
+            _as_float(r, "Survivor SS Income"),
+            _as_float(r, "Stability Value"),
+        ),
+    )
+    return {
+        "recommended": recommended,
+        "best_growth": best_growth,
+        "best_legacy": best_legacy,
+        "most_stable": most_stable,
+    }
+
+
 def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
     if not ranked_rows:
         return "No recommendation is available yet."
 
-    winner = ranked_rows[0]
+    anchors = build_quick_profile_anchor_rows(ranked_rows)
+    winner = anchors.get("recommended", ranked_rows[0])
 
     def _as_float(row: dict, key: str) -> float:
         try:
@@ -1097,23 +1140,31 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
 
     def _pick_reference_row() -> tuple[dict, str]:
         if profile_name == "Growth":
-            ref = max(
-                ranked_rows,
-                key=lambda r: (
-                    _as_float(r, "Final Household SS Income"),
-                    _as_float(r, "Survivor SS Income"),
-                    _as_float(r, "Stability Value"),
-                ),
-            )
+            ref = anchors.get("most_stable", winner)
+            if str(ref.get("Strategy", "")) == str(winner.get("Strategy", "")):
+                alternatives = [r for r in ranked_rows if str(r.get("Strategy", "")) != str(winner.get("Strategy", ""))]
+                if alternatives:
+                    ref = max(
+                        alternatives,
+                        key=lambda r: (
+                            _as_float(r, "Final Household SS Income"),
+                            _as_float(r, "Survivor SS Income"),
+                            _as_float(r, "Stability Value"),
+                        ),
+                    )
             return ref, "most stable option"
 
-        ref = max(
-            ranked_rows,
-            key=lambda r: (
-                _as_float(r, "Final Net Worth"),
-                _as_float(r, "After-Tax Legacy"),
-            ),
-        )
+        ref = anchors.get("best_growth", winner)
+        if str(ref.get("Strategy", "")) == str(winner.get("Strategy", "")):
+            alternatives = [r for r in ranked_rows if str(r.get("Strategy", "")) != str(winner.get("Strategy", ""))]
+            if alternatives:
+                ref = max(
+                    alternatives,
+                    key=lambda r: (
+                        _as_float(r, "Final Net Worth"),
+                        _as_float(r, "After-Tax Legacy"),
+                    ),
+                )
         return ref, "best growth option"
 
     reference, reference_label = _pick_reference_row()
@@ -1142,7 +1193,8 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
         return f"{strategy} — a delayed-claiming tilt toward stability and tax control"
 
     def _tradeoff_block() -> str:
-        return "\n".join([
+        return "
+".join([
             f"- **Net worth:** {format_signed_dollars(nw_delta)}",
             f"- **Lifetime taxes / government drag:** {format_signed_dollars(tax_delta)}",
             f"- **Guaranteed income (Social Security):** {format_signed_dollars(income_delta)}/year",
@@ -1206,10 +1258,12 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
         _strategy_phrase(),
         "",
         "**Why this wins**  ",
-        "\n".join(why_lines),
+        "
+".join(why_lines),
         "",
         "**What you give up**  ",
-        "\n".join(give_up_lines),
+        "
+".join(give_up_lines),
         "",
         f"**Tradeoffs (vs {reference_label}: {reference.get('Strategy', '')})**  ",
         _tradeoff_block(),
@@ -1218,9 +1272,31 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
         meaning,
         "",
         "**Estate impact**  ",
-        "\n".join(estate_lines),
+        "
+".join(estate_lines),
     ]
-    return "\n".join(sections)
+    return "
+".join(sections)
+
+
+def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
+    anchors = build_quick_profile_anchor_rows(ranked_rows)
+    if not anchors:
+        return pd.DataFrame()
+
+    rows = []
+    for label, key in [("Recommended strategy", "recommended"), ("Best legacy strategy", "best_legacy"), ("Most stable strategy", "most_stable")]:
+        row = anchors.get(key, {}) or {}
+        rows.append({
+            "Lens": label,
+            "Strategy": row.get("Strategy", ""),
+            "Net Worth": float(row.get("Final Net Worth", 0.0)),
+            "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "Lifetime taxes / government drag": float(row.get("Total Government Drag", 0.0)),
+            "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
+            "Ending Traditional IRA": float(row.get("Ending Traditional IRA Balance", 0.0)),
+        })
+    return pd.DataFrame(rows)
 
 
 def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
@@ -5246,9 +5322,16 @@ def render_annual_conversion_calculator_results(result: dict):
 # DISPLAY
 # -----------------------------
 def render_summary(title: str, result: dict):
-    st.subheader(title)
-    st.write(f"Owner SS Start Year: {result['owner_ss_start']}")
-    st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}")
+    owner_claim_age = result.get("owner_claim_age")
+    spouse_claim_age = result.get("spouse_claim_age")
+    title_suffix = ""
+    if owner_claim_age is not None and spouse_claim_age is not None:
+        title_suffix = f" ({int(owner_claim_age)}/{int(spouse_claim_age)})"
+    st.subheader(f"{title}{title_suffix}")
+    owner_year_suffix = f" ({int(owner_claim_age)})" if owner_claim_age is not None else ""
+    spouse_year_suffix = f" ({int(spouse_claim_age)})" if spouse_claim_age is not None else ""
+    st.write(f"Owner SS Start Year: {result['owner_ss_start']}{owner_year_suffix}")
+    st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}{spouse_year_suffix}")
     st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
     st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
     st.write(f"Ending Traditional IRA Balance at RMD Start Age: ${result['ending_trad_balance']:,.0f}")
@@ -6344,6 +6427,19 @@ def render_conversion_page() -> None:
             }),
             use_container_width=True,
         )
+        anchor_compare_df = build_quick_anchor_comparison_df(quick_result.get("ranked_rows", []))
+        if not anchor_compare_df.empty:
+            st.caption("Anchor comparison shows the recommendation next to the strongest legacy and stability anchors from the same quick-run set.")
+            st.dataframe(
+                anchor_compare_df.style.format({
+                    "Net Worth": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Lifetime taxes / government drag": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Ending Traditional IRA": "${:,.0f}",
+                }),
+                use_container_width=True,
+            )
         if quick_result.get("close_result"):
             st.info(
                 "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
