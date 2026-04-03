@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v112"
+APP_VERSION = "v114"
 APP_STATE_VERSION = "v103"
 
 
@@ -1884,7 +1884,13 @@ def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
 def render_snapshot_open_controls() -> None:
     st.caption("Open a saved snapshot file to view a read-only saved recommendation report.")
     opened_snapshot = st.file_uploader("Open Snapshot", type=["json"], key="global_snapshot_open")
-    if opened_snapshot is not None:
+    open_col1, open_col2 = st.columns([1, 3])
+    with open_col1:
+        open_clicked = st.button("Open Snapshot File", use_container_width=True, disabled=opened_snapshot is None, key="open_snapshot_file_button")
+    with open_col2:
+        if opened_snapshot is not None:
+            st.caption(f"Selected file: {opened_snapshot.name}")
+    if open_clicked and opened_snapshot is not None:
         try:
             raw_bytes = opened_snapshot.getvalue()
             if not raw_bytes:
@@ -1893,6 +1899,7 @@ def render_snapshot_open_controls() -> None:
             if str((opened_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
                 raise ValueError("This file is not a Quick Recommendation snapshot.")
             open_snapshot_in_viewer(opened_payload)
+            st.session_state["global_snapshot_open"] = None
             st.rerun()
         except Exception as exc:
             st.error(f"Could not open snapshot: {exc}")
