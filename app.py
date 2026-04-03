@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v106"
+APP_VERSION = "v107"
 APP_STATE_VERSION = "v103"
 
 
@@ -6003,11 +6003,16 @@ def go_to_page(page_name: str) -> None:
 
 
 def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, source_label: str = "quick_recommendation", profile_name: str | None = None) -> None:
+    strategy = f"{int(owner_age)}/{int(spouse_age)}"
     st.session_state["owner_claim_age"] = int(owner_age)
     st.session_state["spouse_claim_age"] = int(spouse_age)
-    st.session_state["selected_recommendation_strategy"] = f"{int(owner_age)}/{int(spouse_age)}"
+    st.session_state["selected_recommendation_strategy"] = strategy
     st.session_state["selected_recommendation_source"] = source_label
+    st.session_state["selected_recommendation_profile"] = profile_name
     st.session_state["suppress_quick_recommendation_stale_once"] = True
+    source_text = str(source_label).replace("_", " ").strip()
+    profile_text = f" under {profile_name}" if profile_name else ""
+    st.session_state["governor_strategy_applied_notice"] = f"Governor now set to {strategy} from {source_text}{profile_text}."
     if profile_name:
         st.session_state["planning_profile"] = profile_name
         apply_break_even_governor_profile_presets(profile_name, st.session_state.get("trad", 0.0), force=True)
@@ -6223,6 +6228,19 @@ def render_conversion_page() -> None:
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
     preset_note = st.session_state.get("break_even_governor_preset_note")
+    active_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
+    quick_result_snapshot = get_current_result_payload("quick_strategy_recommendation_result")
+    quick_winner_strategy = None
+    if quick_result_snapshot is not None:
+        ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
+        if ranked_rows:
+            quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
+    st.success(f"Active SS Strategy in Governor: {active_strategy}")
+    applied_notice = st.session_state.get("governor_strategy_applied_notice")
+    if applied_notice:
+        st.caption(applied_notice)
+    if quick_winner_strategy and quick_winner_strategy != active_strategy:
+        st.warning(f"Quick recommendation winner is {quick_winner_strategy}. Governor is currently set to {active_strategy}.")
     if selected_strategy:
         source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
         profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
@@ -6528,9 +6546,15 @@ def render_conversion_page() -> None:
         top_ranked_rows = quick_result.get("ranked_rows", [])
         if top_ranked_rows:
             top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
+            current_governor_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
+            recommended_strategy_label = str(top_strategy['Strategy'])
+            if current_governor_strategy == recommended_strategy_label:
+                st.success(f"Governor currently matches the recommended quick strategy: {recommended_strategy_label}")
+            else:
+                st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Governor is currently set to {current_governor_strategy}.")
             st.caption("Quick Strategy and Optimizer picks can differ because they come from different ranking layers. Use the button below to load this quick recommendation into the Governor.")
             st.button(
-                f"Apply Quick Strategy Winner {top_strategy['Strategy']} to Governor",
+                "Apply Recommended Strategy to Governor",
                 on_click=launch_conversion_optimizer_from_strategy,
                 args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
                 use_container_width=True,
