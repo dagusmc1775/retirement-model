@@ -508,6 +508,8 @@ PROFILE_PRESETS = {
 }
 
 QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
+QUICK_RECOMMENDATION_MAX_CONVERSION = 300000.0
+QUICK_RECOMMENDATION_STEP_SIZE = 1000.0
 
 HEIR_EFFECTIVE_TRAD_TAX_RATE = 0.40
 TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE = 0.32
@@ -748,6 +750,58 @@ def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict
     adjusted["planning_profile"] = profile_name
     adjusted["selected_recommendation_profile"] = profile_name
     adjusted["break_even_governor_preset_note"] = preset.get("preset_note", "")
+    return adjusted, preset
+
+
+def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_name: str) -> tuple[dict, dict]:
+    """
+    Build a clean quick-recommendation input package from current visible inputs only.
+    This deliberately ignores live governor execution controls like the currently selected
+    SS pair, max conversion cap to test, and any mutated downstream session state.
+    """
+    base = {
+        "trad": float(current_inputs.get("trad", 0.0)),
+        "roth": float(current_inputs.get("roth", 0.0)),
+        "brokerage": float(current_inputs.get("brokerage", 0.0)),
+        "brokerage_basis": float(min(current_inputs.get("brokerage_basis", current_inputs.get("brokerage", 0.0)), current_inputs.get("brokerage", 0.0))),
+        "cash": float(current_inputs.get("cash", 0.0)),
+        "growth": float(current_inputs.get("growth", 0.0)),
+        "annual_spending": float(current_inputs.get("annual_spending", 0.0)),
+        "spending_inflation_rate": float(current_inputs.get("spending_inflation_rate", 0.0)),
+        "retirement_smile_enabled": bool(current_inputs.get("retirement_smile_enabled", False)),
+        "go_go_end_age": int(current_inputs.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+        "slow_go_end_age": int(current_inputs.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+        "go_go_multiplier": float(current_inputs.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
+        "slow_go_multiplier": float(current_inputs.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
+        "no_go_multiplier": float(current_inputs.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
+        "annual_conversion": 0.0,
+        "conversion_tax_funding_policy": str(current_inputs.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"])),
+        "owner_current_age": int(current_inputs.get("owner_current_age", 0)),
+        "spouse_current_age": int(current_inputs.get("spouse_current_age", 0)),
+        "owner_claim_age": 62,
+        "spouse_claim_age": 62,
+        "owner_ss_base": float(current_inputs.get("owner_ss_base", 0.0)),
+        "spouse_ss_base": float(current_inputs.get("spouse_ss_base", 0.0)),
+        "earned_income_annual": float(current_inputs.get("earned_income_annual", 0.0)),
+        "earned_income_start_year": int(current_inputs.get("earned_income_start_year", START_YEAR)),
+        "earned_income_end_year": int(current_inputs.get("earned_income_end_year", START_YEAR)),
+        "primary_aca_end_year": int(current_inputs.get("primary_aca_end_year", START_YEAR)),
+        "spouse_aca_end_year": int(current_inputs.get("spouse_aca_end_year", START_YEAR)),
+        "preference_maximize_social_security": bool(current_inputs.get("preference_maximize_social_security", False)),
+        "preference_minimize_trad_ira_for_heirs": bool(current_inputs.get("preference_minimize_trad_ira_for_heirs", False)),
+        "preference_income_stability_focus": bool(current_inputs.get("preference_income_stability_focus", False)),
+        "cash_sweep_threshold": float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
+        "state_tax_rate": float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])),
+        "post_aca_target_bracket": DEFAULT_APP_STATE["post_aca_target_bracket"],
+        "rmd_era_target_bracket": DEFAULT_APP_STATE["rmd_era_target_bracket"],
+        "target_trad_balance_enabled": False,
+        "target_trad_balance": 0.0,
+        "target_trad_override_enabled": False,
+        "target_trad_override_max_rate": 0.0,
+    }
+    adjusted, preset = build_profile_adjusted_inputs(profile_name, base)
+    adjusted["quick_recommendation_max_conversion"] = QUICK_RECOMMENDATION_MAX_CONVERSION
+    adjusted["quick_recommendation_step_size"] = QUICK_RECOMMENDATION_STEP_SIZE
     return adjusted, preset
 
 
@@ -1281,7 +1335,7 @@ def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows = []
-    for label, key in [("Recommended strategy", "recommended"), ("Best legacy strategy", "best_legacy"), ("Most stable strategy", "most_stable")]:
+    for label, key in [("Recommended strategy", "recommended"), ("Highest net worth strategy", "best_growth"), ("Most stable strategy", "most_stable")]:
         row = anchors.get(key, {}) or {}
         rows.append({
             "Lens": label,
@@ -1355,9 +1409,12 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
 
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
-    step_size = sanitize_governor_step_size(step_size)
+    _ = max_conversion
+    _ = step_size
     preferences = extract_scoring_preferences(inputs)
-    base_inputs, preset = build_profile_adjusted_inputs(profile_name, inputs)
+    base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
+    quick_max_conversion = sanitize_governor_max_conversion(float(base_inputs.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION)))
+    quick_step_size = sanitize_governor_step_size(float(base_inputs.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE)))
     metric_rows = []
     errors = []
     for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
@@ -1365,7 +1422,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
             scenario_inputs = copy.deepcopy(base_inputs)
             scenario_inputs["owner_claim_age"] = int(owner_age)
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
-            run_result = run_model_break_even_governor(scenario_inputs, sanitize_governor_max_conversion(max_conversion), step_size)
+            run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
             metrics = build_strategy_metrics(run_result)
             metric_rows.append({
                 **metrics,
@@ -4600,7 +4657,7 @@ def run_ss_optimizer(
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
             try:
-                run_result = run_model_break_even_governor(scenario_inputs, sanitize_governor_max_conversion(max_conversion), step_size)
+                run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
             except Exception as exc:
                 st.session_state["ss_optimizer_progress_index"] = combo_index
                 st.session_state["ss_optimizer_partial_results"] = results
@@ -6708,19 +6765,19 @@ def render_conversion_page() -> None:
                     step_size=step_size,
                     profile_name=planning_profile,
                 )
-            quick_hash_inputs, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-            quick_hash_inputs.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+            quick_hash_inputs, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
+            quick_hash_inputs.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
             recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
             recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
             st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
             mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
     with rec_col2:
-        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
+        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. It uses a clean recommendation context with a fixed internal conversion cap/step so current Governor execution settings do not distort the quick ranking. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
 
     quick_result = get_current_result_payload("quick_strategy_recommendation_result")
     if quick_result is not None:
-        quick_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-        quick_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+        quick_inputs_snapshot, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
+        quick_inputs_snapshot.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
         if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
             st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
             st.session_state["suppress_quick_recommendation_stale_once"] = False
@@ -6746,7 +6803,7 @@ def render_conversion_page() -> None:
         )
         anchor_compare_df = build_quick_anchor_comparison_df(quick_result.get("ranked_rows", []))
         if not anchor_compare_df.empty:
-            st.caption("Anchor comparison shows the recommendation next to the strongest legacy and stability anchors from the same quick-run set.")
+            st.caption("Anchor comparison shows the recommendation next to the highest net worth and stability anchors from the same quick-run set.")
             st.dataframe(
                 anchor_compare_df.style.format({
                     "Net Worth": "${:,.0f}",
