@@ -4825,6 +4825,28 @@ def run_annual_conversion_calculator(
             return 'Within active guardrails'
         return scenario_label
 
+    def _label_with_cap_if_needed(base_label: str, candidate: dict, *, limit_type: str, limit_value: float | None = None) -> str:
+        conversion_value = float(candidate.get('Conversion', 0.0) or 0.0)
+        if conversion_value <= 0.0:
+            return base_label
+        hit_max_test = abs(conversion_value - float(max_conversion)) < 0.01
+        if not hit_max_test:
+            return base_label
+
+        if limit_type == 'bracket' and limit_value is not None:
+            remaining_room = float(limit_value) - float(candidate.get('Ordinary Taxable Income', 0.0) or 0.0)
+            if remaining_room > max(float(step_size), 1.0):
+                return f"{base_label} (capped by max conversion tested)"
+        elif limit_type == 'aca' and limit_value is not None:
+            remaining_room = float(limit_value) - float(candidate.get('MAGI', 0.0) or 0.0)
+            if remaining_room > max(float(step_size), 1.0):
+                return f"{base_label} (capped by max conversion tested)"
+        elif limit_type == 'irmaa' and limit_value is not None:
+            remaining_room = float(limit_value) - float(candidate.get('MAGI', 0.0) or 0.0)
+            if remaining_room > max(float(step_size), 1.0):
+                return f"{base_label} (capped by max conversion tested)"
+        return base_label
+
     def _build_comparison_row(scenario_label: str, candidate: dict) -> dict:
         candidate_incremental_drag = float(candidate['Total Government Drag']) - float(baseline['Total Government Drag'])
         candidate_incremental_tax = float(candidate['Total Tax']) - float(baseline['Total Tax'])
@@ -4874,13 +4896,31 @@ def run_annual_conversion_calculator(
             step_size,
             lambda c, limit=compare_bracket_limit: float(c['Ordinary Taxable Income']) <= limit,
         )
-        comparison_rows.append(_build_comparison_row(f'Top of {compare_bracket} bracket', compare_candidate))
+        compare_label = _label_with_cap_if_needed(
+            f'Top of {compare_bracket} bracket',
+            compare_candidate,
+            limit_type='bracket',
+            limit_value=compare_bracket_limit,
+        )
+        comparison_rows.append(_build_comparison_row(compare_label, compare_candidate))
 
     if aca_lives > 0:
-        comparison_rows.append(_build_comparison_row('ACA MAGI limit', aca_candidate))
+        aca_compare_label = _label_with_cap_if_needed(
+            'ACA MAGI limit',
+            aca_candidate,
+            limit_type='aca',
+            limit_value=aca_limit_buffered,
+        )
+        comparison_rows.append(_build_comparison_row(aca_compare_label, aca_candidate))
 
     if medicare_lives > 0:
-        comparison_rows.append(_build_comparison_row('First IRMAA cliff', irmaa_candidate))
+        irmaa_compare_label = _label_with_cap_if_needed(
+            'First IRMAA cliff',
+            irmaa_candidate,
+            limit_type='irmaa',
+            limit_value=first_irmaa_cliff_buffered,
+        )
+        comparison_rows.append(_build_comparison_row(irmaa_compare_label, irmaa_candidate))
 
     recommended_row_label = None
     for row in comparison_rows:
@@ -4893,6 +4933,7 @@ def run_annual_conversion_calculator(
         comparison_rows.append(_build_comparison_row('Recommended conversion', recommended))
 
     baseline_vs_recommended = pd.DataFrame(comparison_rows)
+    baseline_vs_recommended['Is Recommended'] = baseline_vs_recommended['Scenario'].astype(str).str.contains(r'\(Recommended conversion\)', regex=True)
     baseline_vs_recommended['Incremental vs No Conversion'] = baseline_vs_recommended['Total Government Drag'] - float(baseline['Total Government Drag'])
 
     calc_assumptions = {
@@ -5088,8 +5129,21 @@ def render_annual_conversion_calculator_results(result: dict):
         'All-In Effective Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
         'Incremental All-In Rate vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
     }
+    display_compare_df = compare_df.drop(columns=['Is Recommended'], errors='ignore')
+
+    def _highlight_recommended_row(row):
+        is_recommended = False
+        try:
+            source_row = compare_df.loc[row.name]
+            is_recommended = bool(source_row.get('Is Recommended', False))
+        except Exception:
+            is_recommended = '(Recommended conversion)' in str(row.get('Scenario', ''))
+        if is_recommended:
+            return ['font-weight: bold; background-color: #f6f9e8'] * len(row)
+        return [''] * len(row)
+
     st.dataframe(
-        compare_df.style.format(compare_formatters),
+        display_compare_df.style.format(compare_formatters).apply(_highlight_recommended_row, axis=1),
         use_container_width=True,
     )
 
