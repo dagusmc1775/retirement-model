@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v116"
+APP_VERSION = "v117"
 APP_STATE_VERSION = "v103"
 
 
@@ -1873,10 +1873,32 @@ def render_tradeoff_summary_columns_from_rows(rows: list[dict]) -> None:
     if not normalized:
         return
 
-    row_map = {str(r.get("Column", "")): r for r in normalized}
+    def _normalize_label(value: str) -> str:
+        text = str(value or "").strip().lower()
+        text = text.replace("-", " ").replace("_", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text
 
-    def _get(label: str, field: str, default=""):
-        return row_map.get(label, {}).get(field, default)
+    canonical_label_map = {
+        "recommended strategy": "Recommended Strategy",
+        "best legacy strategy": "Best Legacy Strategy",
+        "most stable strategy": "Most Stable Strategy",
+        "highest net worth strategy": "Highest Net Worth Strategy",
+    }
+
+    row_map = {}
+    for r in normalized:
+        raw_label = r.get("Column", r.get("Lens", r.get("Title", "")))
+        canonical = canonical_label_map.get(_normalize_label(raw_label), str(raw_label or "").strip())
+        row_map[canonical] = r
+
+    def _get(label: str, *field_names, default=""):
+        row = row_map.get(label, {})
+        for field in field_names:
+            if field in row and row.get(field) not in (None, ""):
+                return row.get(field)
+        return default
 
     def _as_float(value, default=0.0):
         try:
@@ -1884,25 +1906,35 @@ def render_tradeoff_summary_columns_from_rows(rows: list[dict]) -> None:
         except Exception:
             return float(default)
 
-    recommended_strategy = str(_get("Recommended Strategy", "Strategy", ""))
+    preferred_recommended_label = "Recommended Strategy" if "Recommended Strategy" in row_map else "Best Legacy Strategy"
+    recommended_strategy = str(_get(preferred_recommended_label, "Strategy", default=""))
 
     def _render(col, title: str):
-        same_as_recommended = title != "Recommended Strategy" and str(_get(title, "Strategy", "")) == recommended_strategy
+        if title not in row_map:
+            with col:
+                st.markdown(f"**{title}**")
+                st.caption("Not available in this snapshot")
+            return
+        same_as_recommended = title != preferred_recommended_label and str(_get(title, "Strategy", default="")) == recommended_strategy
         with col:
             st.markdown(f"**{title}**")
             if same_as_recommended:
                 st.caption("Same as recommended")
-            st.write(str(_get(title, "Strategy", "")))
-            st.write(f"After-Tax Legacy: ${_as_float(_get(title, 'After-Tax Legacy')):,.0f}")
-            st.write(f"Ending Trad IRA: ${_as_float(_get(title, 'Ending Traditional IRA')):,.0f}")
-            st.write(f"Final Net Worth: ${_as_float(_get(title, 'Net Worth')):,.0f}")
-            st.write(f"Household SS Income: ${_as_float(_get(title, 'Final Household SS Income')):,.0f}")
+            st.write(str(_get(title, "Strategy", default="")))
+            st.write(f"After-Tax Legacy: ${_as_float(_get(title, 'After-Tax Legacy', default=0.0)):,.0f}")
+            st.write(f"Ending Trad IRA: ${_as_float(_get(title, 'Ending Traditional IRA', 'Ending Trad IRA', default=0.0)):,.0f}")
+            st.write(f"Final Net Worth: ${_as_float(_get(title, 'Net Worth', 'Final Net Worth', default=0.0)):,.0f}")
+            st.write(f"Household SS Income: ${_as_float(_get(title, 'Final Household SS Income', 'Household SS Income', default=0.0)):,.0f}")
 
     st.subheader("Tradeoff Summary")
     c1, c2, c3 = st.columns(3)
-    _render(c1, "Recommended Strategy")
-    _render(c2, "Most Stable Strategy")
-    _render(c3, "Highest Net Worth Strategy")
+    _render(c1, preferred_recommended_label)
+    if "Highest Net Worth Strategy" in row_map:
+        _render(c2, "Most Stable Strategy")
+        _render(c3, "Highest Net Worth Strategy")
+    else:
+        _render(c2, "Best Legacy Strategy")
+        _render(c3, "Most Stable Strategy")
 
 
 def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
