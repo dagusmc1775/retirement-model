@@ -485,7 +485,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
     },
     "Legacy Focused": {
-        "weights": {"nw": 0.01, "legacy": 0.76, "trad": 0.24, "stability": 0.05, "risk": 0.02, "drag": 0.08, "trad_share": 0.28},
+    "weights": {"nw": 0.01, "legacy": 0.76, "trad": 0.30, "stability": 0.05, "risk": 0.02, "drag": 0.08, "trad_share": 0.36},
         "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
         "bullets": [
             "favor more tax-efficient assets at death",
