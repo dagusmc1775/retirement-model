@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v114"
+APP_VERSION = "v115"
 APP_STATE_VERSION = "v103"
 
 
@@ -1899,7 +1899,6 @@ def render_snapshot_open_controls() -> None:
             if str((opened_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
                 raise ValueError("This file is not a Quick Recommendation snapshot.")
             open_snapshot_in_viewer(opened_payload)
-            st.session_state["global_snapshot_open"] = None
             st.rerun()
         except Exception as exc:
             st.error(f"Could not open snapshot: {exc}")
