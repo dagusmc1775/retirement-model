@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v115"
+APP_VERSION = "v116"
 APP_STATE_VERSION = "v103"
 
 
@@ -1858,18 +1858,51 @@ def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapsho
             st.caption("This snapshot stores the exact input state used to generate the quick recommendation. It does not silently overwrite itself with current live governor settings.")
         rows = snapshot_payload.get("anchor_comparison_rows", []) if isinstance(snapshot_payload, dict) else []
         if rows:
-            anchor_df = pd.DataFrame(rows)
-            st.subheader("Tradeoff Summary")
-            st.dataframe(
-                anchor_df.style.format({
-                    "Net Worth": "${:,.0f}",
-                    "After-Tax Legacy": "${:,.0f}",
-                    "Lifetime taxes / government drag": "${:,.0f}",
-                    "Final Household SS Income": "${:,.0f}",
-                    "Ending Traditional IRA": "${:,.0f}",
-                }),
-                use_container_width=True,
-            )
+            render_tradeoff_summary_columns_from_rows(rows)
+
+
+def render_tradeoff_summary_columns_from_rows(rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized.append({str(k): v for k, v in row.items()})
+    if not normalized:
+        return
+
+    row_map = {str(r.get("Column", "")): r for r in normalized}
+
+    def _get(label: str, field: str, default=""):
+        return row_map.get(label, {}).get(field, default)
+
+    def _as_float(value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    recommended_strategy = str(_get("Recommended Strategy", "Strategy", ""))
+
+    def _render(col, title: str):
+        same_as_recommended = title != "Recommended Strategy" and str(_get(title, "Strategy", "")) == recommended_strategy
+        with col:
+            st.markdown(f"**{title}**")
+            if same_as_recommended:
+                st.caption("Same as recommended")
+            st.write(str(_get(title, "Strategy", "")))
+            st.write(f"After-Tax Legacy: ${_as_float(_get(title, 'After-Tax Legacy')):,.0f}")
+            st.write(f"Ending Trad IRA: ${_as_float(_get(title, 'Ending Traditional IRA')):,.0f}")
+            st.write(f"Final Net Worth: ${_as_float(_get(title, 'Net Worth')):,.0f}")
+            st.write(f"Household SS Income: ${_as_float(_get(title, 'Final Household SS Income')):,.0f}")
+
+    st.subheader("Tradeoff Summary")
+    c1, c2, c3 = st.columns(3)
+    _render(c1, "Recommended Strategy")
+    _render(c2, "Most Stable Strategy")
+    _render(c3, "Highest Net Worth Strategy")
 
 
 def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
