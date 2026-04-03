@@ -7,6 +7,7 @@
 # version: nc-state-tax-clean-base-v2
 # version: nc-state-tax-clean-base
 import copy
+import datetime as dt
 import hashlib
 import json
 import math
@@ -27,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v109"
+APP_VERSION = "v110"
 APP_STATE_VERSION = "v103"
 
 
@@ -1751,6 +1752,87 @@ def build_scenario_export_payload(scope: str = "full", scenario_name: str | None
         "state": state,
     }
     return json.dumps(payload, indent=2)
+
+
+def build_quick_recommendation_snapshot_payload(quick_result: dict, planning_profile: str) -> str:
+    ranked_rows = quick_result.get("ranked_rows", []) or []
+    recommended = ranked_rows[0] if ranked_rows else {}
+    most_stable = max(
+        ranked_rows,
+        key=lambda r: (
+            float(r.get("Final Household SS Income", r.get("final_household_ss_income", 0.0))),
+            float(r.get("Survivor SS Income", r.get("survivor_ss_income", 0.0))),
+            -float(r.get("Ending Traditional IRA Balance", r.get("ending_traditional_ira_balance", 0.0))),
+        ),
+        default={},
+    )
+    highest_nw = max(
+        ranked_rows,
+        key=lambda r: float(r.get("Final Net Worth", r.get("final_net_worth", 0.0))),
+        default={},
+    )
+    scenario_name = get_loaded_scenario_name()
+    snapshot_name = str(
+        st.session_state.get("quick_snapshot_name_input", "")
+        or f"{scenario_name} - {planning_profile}"
+    ).strip() or f"{scenario_name} - {planning_profile}"
+    payload = {
+        "meta": {
+            "app": "retirement_model",
+            "snapshot_type": "quick_recommendation",
+            "version": APP_VERSION,
+            "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "scenario_name": scenario_name,
+            "snapshot_name": snapshot_name,
+            "planning_profile": str(planning_profile),
+        },
+        "summary": {
+            "recommended_strategy": str(recommended.get("Strategy", "")),
+            "most_stable_strategy": str(most_stable.get("Strategy", "")),
+            "highest_net_worth_strategy": str(highest_nw.get("Strategy", "")),
+            "advisor_text": str(quick_result.get("advisor_text", "")),
+            "active_preferences_text": str(quick_result.get("active_preferences_text", "None")),
+            "applied_preset_note": str(quick_result.get("applied_preset_note", "")),
+        },
+        "strategy_summary_rows": _json_safe(pd.DataFrame(quick_result.get("summary_df", pd.DataFrame())).to_dict("records")),
+        "anchor_comparison_rows": _json_safe(build_quick_anchor_comparison_df(ranked_rows).to_dict("records")),
+        "top_ranked_rows": _json_safe(ranked_rows[:5]),
+        "scenario_state": _json_safe(collect_scenario_state()),
+    }
+    return json.dumps(payload, indent=2)
+
+
+def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapshot Preview") -> None:
+    meta = snapshot_payload.get("meta", {}) if isinstance(snapshot_payload, dict) else {}
+    summary = snapshot_payload.get("summary", {}) if isinstance(snapshot_payload, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if not isinstance(summary, dict):
+        summary = {}
+    with st.container(border=True):
+        st.markdown(f"**{heading}**")
+        st.caption(
+            f"Snapshot: {meta.get('snapshot_name', 'Unnamed snapshot')} | "
+            f"Scenario: {meta.get('scenario_name', 'Unknown')} | "
+            f"Generated: {meta.get('generated_at', 'Unknown')} | "
+            f"App version: {meta.get('version', 'Unknown')}"
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Recommended", str(summary.get("recommended_strategy", "—")))
+        c2.metric("Most stable", str(summary.get("most_stable_strategy", "—")))
+        c3.metric("Highest net worth", str(summary.get("highest_net_worth_strategy", "—")))
+        if summary.get("planning_profile") or meta.get("planning_profile"):
+            st.write(f"Planning profile: {meta.get('planning_profile', summary.get('planning_profile', ''))}")
+        if summary.get("active_preferences_text"):
+            st.write(f"Preference modifiers: {summary.get('active_preferences_text')}")
+        advisor_text = str(summary.get("advisor_text", "") or "")
+        if advisor_text:
+            st.write("Advisor interpretation")
+            st.caption(advisor_text)
+        rows = snapshot_payload.get("anchor_comparison_rows", []) if isinstance(snapshot_payload, dict) else []
+        if rows:
+            anchor_df = pd.DataFrame(rows)
+            st.dataframe(anchor_df, use_container_width=True)
 
 
 def render_scenario_manager(current_page: str) -> None:
@@ -6605,6 +6687,34 @@ def render_conversion_page() -> None:
                 st.caption(
                     f"Versus the highest net worth option ({highest_nw_strategy}), the recommended strategy changes final net worth by ${abs(nw_nw_delta):,.0f}, after-tax legacy by ${abs(nw_legacy_delta):,.0f}, and ending Traditional IRA by ${abs(nw_trad_delta):,.0f}."
                 )
+        with st.expander("Quick Recommendation Snapshot", expanded=False):
+            default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
+            if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
+                st.session_state["quick_snapshot_name_input"] = default_snapshot_name
+            st.text_input("Snapshot name", key="quick_snapshot_name_input", placeholder="Baseline Plan - Growth")
+            snapshot_json = build_quick_recommendation_snapshot_payload(quick_result, planning_profile)
+            snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
+            safe_snapshot_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in snapshot_name).strip("_") or "quick_recommendation_snapshot"
+            st.download_button(
+                "Download Quick Recommendation Snapshot",
+                data=snapshot_json,
+                file_name=f"{safe_snapshot_name}.json",
+                mime="application/json",
+                use_container_width=True,
+                key="download_quick_recommendation_snapshot",
+            )
+            current_snapshot_payload = json.loads(snapshot_json)
+            render_snapshot_summary_card(current_snapshot_payload, heading="Current Quick Recommendation Snapshot")
+            uploaded_snapshot = st.file_uploader("Upload Saved Snapshot", type=["json"], key="quick_snapshot_upload")
+            if uploaded_snapshot is not None:
+                try:
+                    uploaded_payload = json.load(uploaded_snapshot)
+                    if str((uploaded_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
+                        raise ValueError("This file is not a Quick Recommendation snapshot.")
+                    render_snapshot_summary_card(uploaded_payload, heading="Uploaded Snapshot")
+                except Exception as exc:
+                    st.error(f"Could not read snapshot: {exc}")
+
         guidance = quick_result.get("next_step_guidance", [])
         if guidance:
             st.subheader("Recommended Next Steps")
