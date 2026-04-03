@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v111"
+APP_VERSION = "v112"
 APP_STATE_VERSION = "v103"
 
 
@@ -1778,6 +1778,9 @@ def build_quick_recommendation_snapshot_payload(quick_result: dict, planning_pro
         st.session_state.get("quick_snapshot_name_input", "")
         or f"{scenario_name} - {planning_profile}"
     ).strip() or f"{scenario_name} - {planning_profile}"
+    quick_rec_input_state = copy.deepcopy(quick_result.get("quick_recommendation_input_state") or {})
+    source_scenario_state = copy.deepcopy(quick_result.get("quick_recommendation_source_scenario_state") or {})
+
     payload = {
         "meta": {
             "app": "retirement_model",
@@ -1799,7 +1802,8 @@ def build_quick_recommendation_snapshot_payload(quick_result: dict, planning_pro
         "strategy_summary_rows": _json_safe(pd.DataFrame(quick_result.get("summary_df", pd.DataFrame())).to_dict("records")),
         "anchor_comparison_rows": _json_safe(build_quick_anchor_comparison_df(ranked_rows).to_dict("records")),
         "top_ranked_rows": _json_safe(ranked_rows[:5]),
-        "scenario_state": _json_safe(collect_scenario_state()),
+        "scenario_state_used_for_quick_rec": _json_safe(source_scenario_state),
+        "quick_recommendation_input_state": _json_safe(quick_rec_input_state),
     }
     return json.dumps(payload, indent=2)
 
@@ -1848,6 +1852,9 @@ def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapsho
                 }),
                 use_container_width=True,
             )
+        quick_input_state = snapshot_payload.get("quick_recommendation_input_state", {}) if isinstance(snapshot_payload, dict) else {}
+        if isinstance(quick_input_state, dict) and quick_input_state:
+            st.caption("This snapshot stores the exact input state used to generate the quick recommendation. It does not silently overwrite itself with current live governor settings.")
         rows = snapshot_payload.get("anchor_comparison_rows", []) if isinstance(snapshot_payload, dict) else []
         if rows:
             anchor_df = pd.DataFrame(rows)
@@ -6627,6 +6634,8 @@ def render_conversion_page() -> None:
                 )
             quick_hash_inputs, _ = build_profile_adjusted_inputs(planning_profile, inputs)
             quick_hash_inputs.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
+            recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
+            recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
             st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
             mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
     with rec_col2:
