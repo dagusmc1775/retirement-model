@@ -6377,33 +6377,54 @@ def get_app_page() -> str:
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
     render_scenario_identity_bar(current_page)
-    nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
-    with nav1:
-        st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
-    with nav2:
-        st.button(
-            "Annual Calculator",
-            on_click=go_to_page,
-            args=("annual",),
-            disabled=current_page == "annual",
-            use_container_width=True,
-        )
-    with nav3:
-        st.button(
-            "Conversion Optimizer",
-            on_click=go_to_page,
-            args=("conversion",),
-            disabled=current_page == "conversion",
-            use_container_width=True,
-        )
-    with nav4:
-        st.button(
-            "Snapshot Viewer",
-            on_click=go_to_page,
-            args=("snapshot",),
-            disabled=current_page == "snapshot",
-            use_container_width=True,
-        )
+    if current_page == "home":
+        nav1, nav2, nav3 = st.columns([1, 1, 1])
+        with nav1:
+            st.button("Home", on_click=go_to_page, args=("home",), disabled=True, use_container_width=True)
+        with nav2:
+            st.button(
+                "Annual Calculator",
+                on_click=go_to_page,
+                args=("annual",),
+                disabled=False,
+                use_container_width=True,
+            )
+        with nav3:
+            st.button(
+                "Conversion Optimizer",
+                on_click=go_to_page,
+                args=("conversion",),
+                disabled=False,
+                use_container_width=True,
+            )
+    else:
+        nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
+        with nav1:
+            st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
+        with nav2:
+            st.button(
+                "Annual Calculator",
+                on_click=go_to_page,
+                args=("annual",),
+                disabled=current_page == "annual",
+                use_container_width=True,
+            )
+        with nav3:
+            st.button(
+                "Conversion Optimizer",
+                on_click=go_to_page,
+                args=("conversion",),
+                disabled=current_page == "conversion",
+                use_container_width=True,
+            )
+        with nav4:
+            st.button(
+                "Snapshot Viewer",
+                on_click=go_to_page,
+                args=("snapshot",),
+                disabled=current_page == "snapshot",
+                use_container_width=True,
+            )
     st.divider()
     render_scenario_manager(current_page)
     render_snapshot_open_controls()
@@ -6630,10 +6651,14 @@ def render_conversion_page() -> None:
     rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
 
     st.subheader("Scenario / Profile Context")
-    context_cols = st.columns(3)
-    context_cols[0].metric("Scenario", str(st.session_state.get("loaded_scenario_name", "Unsaved session")))
-    context_cols[1].metric("Active SS Strategy", active_strategy)
-    context_cols[2].metric("Planning Profile", str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))))
+    scenario_name_display = str(st.session_state.get("loaded_scenario_name", "Unsaved session"))
+    profile_name_display = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
+    with st.container(border=True):
+        st.markdown(
+            f"**Scenario:** {scenario_name_display} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; "
+            f"**Active SS Strategy:** {active_strategy} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; "
+            f"**Profile:** {profile_name_display}"
+        )
 
     st.divider()
     st.header("Quick Strategy Recommendation")
