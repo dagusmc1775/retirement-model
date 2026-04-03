@@ -1193,8 +1193,7 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
         return f"{strategy} — a delayed-claiming tilt toward stability and tax control"
 
     def _tradeoff_block() -> str:
-        return "
-".join([
+        return "\n".join([
             f"- **Net worth:** {format_signed_dollars(nw_delta)}",
             f"- **Lifetime taxes / government drag:** {format_signed_dollars(tax_delta)}",
             f"- **Guaranteed income (Social Security):** {format_signed_dollars(income_delta)}/year",
@@ -1258,12 +1257,10 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
         _strategy_phrase(),
         "",
         "**Why this wins**  ",
-        "
-".join(why_lines),
+        "\n".join(why_lines),
         "",
         "**What you give up**  ",
-        "
-".join(give_up_lines),
+        "\n".join(give_up_lines),
         "",
         f"**Tradeoffs (vs {reference_label}: {reference.get('Strategy', '')})**  ",
         _tradeoff_block(),
@@ -1272,11 +1269,9 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
         meaning,
         "",
         "**Estate impact**  ",
-        "
-".join(estate_lines),
+        "\n".join(estate_lines),
     ]
-    return "
-".join(sections)
+    return "\n".join(sections)
 
 
 def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
