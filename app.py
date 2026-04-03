@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v45-spending-optimizer"
+APP_VERSION = "v101"
 APP_STATE_VERSION = "v94"
 
 
@@ -1086,73 +1086,141 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
 def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
     if not ranked_rows:
         return "No recommendation is available yet."
+
     winner = ranked_rows[0]
-    baseline = next((r for r in ranked_rows if r["Strategy"] == "62/62"), ranked_rows[0])
 
-    winner_nw = float(winner.get("Final Net Worth", 0.0))
-    baseline_nw = float(baseline.get("Final Net Worth", 0.0))
-    winner_trad = float(winner.get("Ending Traditional IRA Balance", 0.0))
-    baseline_trad = float(baseline.get("Ending Traditional IRA Balance", 0.0))
-    winner_legacy = float(winner.get("After-Tax Legacy", 0.0))
-    baseline_legacy = float(baseline.get("After-Tax Legacy", 0.0))
-    winner_ss = float(winner.get("Final Household SS Income", 0.0))
-    baseline_ss = float(baseline.get("Final Household SS Income", 0.0))
-    winner_gov_drag = float(winner.get("Total Government Drag", 0.0))
-    baseline_gov_drag = float(baseline.get("Total Government Drag", 0.0))
+    def _as_float(row: dict, key: str) -> float:
+        try:
+            return float(row.get(key, 0.0))
+        except Exception:
+            return 0.0
 
-    nw_delta = winner_nw - baseline_nw
-    trad_delta = winner_trad - baseline_trad
-    legacy_delta = winner_legacy - baseline_legacy
-    ss_delta = winner_ss - baseline_ss
-    gov_drag_delta = winner_gov_drag - baseline_gov_drag
+    def _pick_reference_row() -> tuple[dict, str]:
+        if profile_name == "Growth":
+            ref = max(
+                ranked_rows,
+                key=lambda r: (
+                    _as_float(r, "Final Household SS Income"),
+                    _as_float(r, "Survivor SS Income"),
+                    _as_float(r, "Stability Value"),
+                ),
+            )
+            return ref, "most stable option"
 
-    pieces = [
-        f"Based on your selected priorities ({profile_name}), the model recommends {winner['Strategy']} as the strongest overall quick strategy.",
-    ]
-
-    if winner["Strategy"] != baseline["Strategy"]:
-        pieces.append(
-            "Compared with 62/62, the recommended strategy "
-            + describe_delta("ending Traditional IRA", trad_delta)
-            + ", "
-            + describe_delta("after-tax legacy value", legacy_delta)
-            + ", and "
-            + describe_delta("projected final net worth", nw_delta)
-            + "."
+        ref = max(
+            ranked_rows,
+            key=lambda r: (
+                _as_float(r, "Final Net Worth"),
+                _as_float(r, "After-Tax Legacy"),
+            ),
         )
+        return ref, "best growth option"
 
-        both_after_tax_like = winner_trad <= 1000 and baseline_trad <= 1000 and abs(legacy_delta - nw_delta) < 1
-        if both_after_tax_like:
-            pieces.append(
-                "Because both strategies finish with little or no Traditional IRA remaining, after-tax legacy and total net worth move together."
-            )
+    reference, reference_label = _pick_reference_row()
 
-        if nw_delta < 0:
-            pieces.append("This is not a strictly higher net worth outcome.")
-        elif nw_delta > 0:
-            pieces.append("This recommendation also improves projected final net worth versus 62/62.")
+    winner_nw = _as_float(winner, "Final Net Worth")
+    winner_trad = _as_float(winner, "Ending Traditional IRA Balance")
+    winner_ss = _as_float(winner, "Final Household SS Income")
+    winner_gov_drag = _as_float(winner, "Total Government Drag")
 
-        if ss_delta > 0 and nw_delta <= 0:
-            pieces.append(
-                f"It favors higher guaranteed income later in life through delayed Social Security, increasing final household Social Security income by ${abs(float(ss_delta)):,.0f} per year."
-            )
-        elif trad_delta < 0:
-            pieces.append(
-                f"It reduces future tax exposure by lowering ending Traditional IRA balance and heir tax drag, while changing total government drag by {format_signed_dollars(gov_drag_delta)}."
-            )
-        else:
-            pieces.append(
-                "It balances long-term tax efficiency, income timing, and total wealth rather than strictly maximizing one metric."
-            )
+    reference_nw = _as_float(reference, "Final Net Worth")
+    reference_trad = _as_float(reference, "Ending Traditional IRA Balance")
+    reference_ss = _as_float(reference, "Final Household SS Income")
+    reference_gov_drag = _as_float(reference, "Total Government Drag")
+
+    nw_delta = winner_nw - reference_nw
+    tax_delta = winner_gov_drag - reference_gov_drag
+    income_delta = winner_ss - reference_ss
+    trad_delta = winner_trad - reference_trad
+
+    def _strategy_phrase() -> str:
+        strategy = str(winner.get("Strategy", ""))
+        if profile_name == "Growth":
+            return f"{strategy} — an earlier-claiming tilt that leans toward growth"
+        if profile_name == "Balanced":
+            return f"{strategy} — a middle-ground claiming approach"
+        return f"{strategy} — a delayed-claiming tilt toward stability and tax control"
+
+    def _tradeoff_block() -> str:
+        return "\n".join([
+            f"- **Net worth:** {format_signed_dollars(nw_delta)}",
+            f"- **Lifetime taxes / government drag:** {format_signed_dollars(tax_delta)}",
+            f"- **Guaranteed income (Social Security):** {format_signed_dollars(income_delta)}/year",
+            f"- **Ending Traditional IRA:** {format_signed_dollars(trad_delta)}",
+        ])
+
+    if profile_name == "Growth":
+        meaning = "You are choosing maximum growth and upside over maximum guaranteed income later in life."
+        why_lines = [
+            "- Favors the highest projected ending wealth in this quick comparison",
+            "- Keeps more capital invested earlier",
+            "- Accepts lower guaranteed income later in exchange for more upside now",
+        ]
+        give_up_lines = [
+            "- Less guaranteed income later in retirement",
+            "- More reliance on portfolio withdrawals and market performance",
+            "- A larger chance that more assets remain in Traditional IRA",
+        ]
+        estate_lines = [
+            "- Usually leaves a larger gross estate",
+            "- Can leave more assets in Traditional IRA",
+            "- May create a higher future tax burden for heirs",
+        ]
+    elif profile_name == "Balanced":
+        meaning = "You are choosing balance and flexibility instead of pushing hard for either maximum growth or maximum guaranteed income."
+        why_lines = [
+            "- Balances wealth creation and income stability",
+            "- Keeps tax exposure more manageable over time",
+            "- Avoids the most extreme claim-timing choices",
+        ]
+        give_up_lines = [
+            "- Not the absolute highest-net-worth path",
+            "- Not the absolute highest guaranteed-income path",
+            "- Gives up some upside to reduce regret across competing priorities",
+        ]
+        estate_lines = [
+            "- Leaves a more balanced mix of account types",
+            "- Usually avoids the worst Traditional IRA overhang",
+            "- Produces a steadier inheritance structure for heirs",
+        ]
     else:
-        pieces.append(
-            "In this quick comparison, the same strategy that wins on net worth also best fits your selected planning profile."
-        )
+        meaning = "You are choosing income security and tax control over maximum projected ending wealth."
+        why_lines = [
+            "- Favors higher guaranteed lifetime income",
+            "- Reduces long-term pressure from Traditional IRA balances and future withdrawals",
+            "- Improves late-retirement stability in this quick comparison",
+        ]
+        give_up_lines = [
+            "- Lower projected net worth than the most aggressive growth option",
+            "- More reliance on portfolio withdrawals before Social Security starts",
+            "- Less short-term flexibility in exchange for stronger later-life support",
+        ]
+        estate_lines = [
+            "- Usually leaves less in Traditional IRA",
+            "- Can improve after-tax inheritance quality",
+            "- Better fits future estate or charitable planning",
+        ]
 
-    pieces.append(
-        "Use this as a fast recommendation layer. If you want a tighter check, test a few nearby claim-age combinations around the winner before deciding whether a full 81-strategy run is worth it."
-    )
-    return " ".join(pieces)
+    sections = [
+        "**Recommended strategy**  ",
+        _strategy_phrase(),
+        "",
+        "**Why this wins**  ",
+        "\n".join(why_lines),
+        "",
+        "**What you give up**  ",
+        "\n".join(give_up_lines),
+        "",
+        f"**Tradeoffs (vs {reference_label}: {reference.get('Strategy', '')})**  ",
+        _tradeoff_block(),
+        "",
+        "**What this means**  ",
+        meaning,
+        "",
+        "**Estate impact**  ",
+        "\n".join(estate_lines),
+    ]
+    return "\n".join(sections)
 
 
 def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
