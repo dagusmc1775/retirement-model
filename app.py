@@ -1029,9 +1029,13 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
             preference_bonus += stability_bonus
         if preferences.get("minimize_trad_ira_for_heirs"):
-            heir_structure_penalty = 0.16 * (trad_share_norm[i] ** 2.00) + 0.16 * (heir_tax_drag_norm[i] ** 1.35) + 0.06 * (trad_norm[i] ** 1.25)
+            heir_structure_penalty = (
+                0.24 * (trad_share_norm[i] ** 2.20)
+                + 0.24 * (heir_tax_drag_norm[i] ** 1.45)
+                + 0.10 * (trad_norm[i] ** 1.30)
+            )
             if profile_name == "Legacy Focused":
-                heir_structure_penalty *= 1.20
+                heir_structure_penalty *= 1.40
             preference_penalty += heir_structure_penalty
 
         positive_score += preference_bonus
