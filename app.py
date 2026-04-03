@@ -1585,6 +1585,7 @@ def preserve_session_state_across_pages() -> None:
         "scenario_name_input_seed",
         "snapshot_viewer_payload",
         "snapshot_viewer_name",
+        "snapshot_open_notice",
     })
     for key in keys_to_preserve:
         if key in st.session_state:
@@ -1876,6 +1877,7 @@ def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
     meta = snapshot_payload.get("meta", {}) if isinstance(snapshot_payload, dict) else {}
     name = meta.get("snapshot_name", "Snapshot Viewer") if isinstance(meta, dict) else "Snapshot Viewer"
     st.session_state["snapshot_viewer_name"] = str(name)
+    st.session_state["snapshot_open_notice"] = f"Opened snapshot: {str(name)}"
     st.session_state["app_page"] = "snapshot"
 
 
@@ -1884,7 +1886,10 @@ def render_snapshot_open_controls() -> None:
     opened_snapshot = st.file_uploader("Open Snapshot", type=["json"], key="global_snapshot_open")
     if opened_snapshot is not None:
         try:
-            opened_payload = json.load(opened_snapshot)
+            raw_bytes = opened_snapshot.getvalue()
+            if not raw_bytes:
+                raise ValueError("The selected file is empty.")
+            opened_payload = json.loads(raw_bytes.decode("utf-8"))
             if str((opened_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
                 raise ValueError("This file is not a Quick Recommendation snapshot.")
             open_snapshot_in_viewer(opened_payload)
@@ -7414,6 +7419,9 @@ def render_snapshot_viewer_page() -> None:
     ensure_default_state()
     st.title("Snapshot Viewer")
     render_top_nav("snapshot")
+    notice = st.session_state.pop("snapshot_open_notice", None)
+    if notice:
+        st.success(str(notice))
     payload = st.session_state.get("snapshot_viewer_payload")
     if not payload:
         st.info("No snapshot is currently open. Use Open Snapshot above to view a saved recommendation snapshot.")
