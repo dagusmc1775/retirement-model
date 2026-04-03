@@ -6531,128 +6531,128 @@ def render_home_page() -> None:
     )
 
 
+
 def render_shared_household_inputs() -> dict:
-    st.header("Household Inputs")
+    with st.expander("Household Inputs", expanded=True):
+        owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
+        spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
 
-    owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
-    spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
+        owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
+        spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
 
-    owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
-    spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
+        col1, col2 = st.columns(2)
 
-    col1, col2 = st.columns(2)
+        with col1:
+            trad = st.number_input("Traditional IRA Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
+            roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
+            brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
+            brokerage_basis = st.number_input(
+                "Brokerage Cost Basis",
+                min_value=0.0,
+                value=float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+                step=1000.0,
+                help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
+                key="brokerage_basis",
+            )
+            cash = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])), step=1000.0, key="cash")
 
-    with col1:
-        trad = st.number_input("Traditional IRA Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
-        roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
-        brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
-        brokerage_basis = st.number_input(
-            "Brokerage Cost Basis",
-            min_value=0.0,
-            value=float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
-            step=1000.0,
-            help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
-            key="brokerage_basis",
+        with col2:
+            growth = st.number_input("Growth Rate (%)", min_value=0.0, value=float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])), step=0.1, key="growth_pct") / 100
+            annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])), step=1000.0, key="annual_spending")
+            spending_inflation_rate = st.number_input(
+                "Spending Inflation Rate (%)",
+                min_value=0.0,
+                value=float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])),
+                step=0.1,
+                help="Applied to spending each year before any retirement-smile multiplier.",
+                key="spending_inflation_rate_pct",
+            ) / 100
+            owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
+            spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
+
+    with st.expander("Retirement Smile Spending", expanded=True):
+        sm1, sm2 = st.columns(2)
+        with sm1:
+            retirement_smile_enabled = st.checkbox(
+                "Enable Retirement Smile Spending",
+                value=bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+                help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
+                key="retirement_smile_enabled",
+            )
+            go_go_end_age = st.number_input(
+                "Go-Go Ends At Age",
+                min_value=0,
+                value=int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+                step=1,
+                help="Applies to the older household member's age for the modeled year.",
+                key="go_go_end_age",
+            )
+            slow_go_end_age = st.number_input(
+                "Slow-Go Ends At Age",
+                min_value=0,
+                value=int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+                step=1,
+                help="No-go spending starts at this age and later.",
+                key="slow_go_end_age",
+            )
+        with sm2:
+            go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])), step=0.05, format="%.2f", key="go_go_multiplier")
+            slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])), step=0.05, format="%.2f", key="slow_go_multiplier")
+            no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])), step=0.05, format="%.2f", key="no_go_multiplier")
+
+        st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
+
+    with st.expander("ACA Coverage", expanded=True):
+        cov1, cov2 = st.columns(2)
+        with cov1:
+            primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
+        with cov2:
+            spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
+
+    with st.expander("Earned Income", expanded=True):
+        sync_conversion_earned_income_widget_state()
+        earn1, earn2, earn3 = st.columns(3)
+        with earn1:
+            earned_income_annual = st.number_input(
+                "Annual Wage Income",
+                min_value=0.0,
+                value=float(st.session_state.get("conversion_earned_income_annual_input", st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))),
+                step=1000.0,
+                key="conversion_earned_income_annual_input",
+                on_change=on_conversion_earned_income_change,
+            )
+        with earn2:
+            earned_income_start_year = st.number_input(
+                "Wage Income Start Year",
+                min_value=START_YEAR,
+                value=int(st.session_state.get("conversion_earned_income_start_year_input", st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))),
+                step=1,
+                key="conversion_earned_income_start_year_input",
+                on_change=on_conversion_earned_income_change,
+            )
+        with earn3:
+            earned_income_end_year = st.number_input(
+                "Wage Income End Year",
+                min_value=START_YEAR,
+                value=int(st.session_state.get("conversion_earned_income_end_year_input", st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))),
+                step=1,
+                key="conversion_earned_income_end_year_input",
+                on_change=on_conversion_earned_income_change,
+            )
+
+    with st.expander("Tax Funding", expanded=True):
+        conversion_tax_funding_policy = st.selectbox(
+            "Preferred tax funding source",
+            [
+                "Cash then Brokerage",
+                "Brokerage only",
+                "Cash only",
+                "Cash then Brokerage then Trad then Roth",
+            ],
+            index=0,
+            key="conversion_tax_funding_policy",
         )
-        cash = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])), step=1000.0, key="cash")
-
-    with col2:
-        growth = st.number_input("Growth Rate (%)", min_value=0.0, value=float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])), step=0.1, key="growth_pct") / 100
-        annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])), step=1000.0, key="annual_spending")
-        spending_inflation_rate = st.number_input(
-            "Spending Inflation Rate (%)",
-            min_value=0.0,
-            value=float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])),
-            step=0.1,
-            help="Applied to spending each year before any retirement-smile multiplier.",
-            key="spending_inflation_rate_pct",
-        ) / 100
-        owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
-        spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
-
-    st.header("Retirement Smile Spending")
-    sm1, sm2 = st.columns(2)
-    with sm1:
-        retirement_smile_enabled = st.checkbox(
-            "Enable Retirement Smile Spending",
-            value=bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
-            help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
-            key="retirement_smile_enabled",
-        )
-        go_go_end_age = st.number_input(
-            "Go-Go Ends At Age",
-            min_value=0,
-            value=int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
-            step=1,
-            help="Applies to the older household member's age for the modeled year.",
-            key="go_go_end_age",
-        )
-        slow_go_end_age = st.number_input(
-            "Slow-Go Ends At Age",
-            min_value=0,
-            value=int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
-            step=1,
-            help="No-go spending starts at this age and later.",
-            key="slow_go_end_age",
-        )
-    with sm2:
-        go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])), step=0.05, format="%.2f", key="go_go_multiplier")
-        slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])), step=0.05, format="%.2f", key="slow_go_multiplier")
-        no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])), step=0.05, format="%.2f", key="no_go_multiplier")
-
-    st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
-
-    st.header("Coverage Timing")
-    cov1, cov2 = st.columns(2)
-    with cov1:
-        primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
-    with cov2:
-        spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
-
-    st.header("Earned Income")
-    sync_conversion_earned_income_widget_state()
-    earn1, earn2, earn3 = st.columns(3)
-    with earn1:
-        earned_income_annual = st.number_input(
-            "Annual Wage Income",
-            min_value=0.0,
-            value=float(st.session_state.get("conversion_earned_income_annual_input", st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))),
-            step=1000.0,
-            key="conversion_earned_income_annual_input",
-            on_change=on_conversion_earned_income_change,
-        )
-    with earn2:
-        earned_income_start_year = st.number_input(
-            "Wage Income Start Year",
-            min_value=START_YEAR,
-            value=int(st.session_state.get("conversion_earned_income_start_year_input", st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))),
-            step=1,
-            key="conversion_earned_income_start_year_input",
-            on_change=on_conversion_earned_income_change,
-        )
-    with earn3:
-        earned_income_end_year = st.number_input(
-            "Wage Income End Year",
-            min_value=START_YEAR,
-            value=int(st.session_state.get("conversion_earned_income_end_year_input", st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))),
-            step=1,
-            key="conversion_earned_income_end_year_input",
-            on_change=on_conversion_earned_income_change,
-        )
-
-    st.header("Tax Funding Policy")
-    conversion_tax_funding_policy = st.selectbox(
-        "Preferred tax funding source",
-        [
-            "Cash then Brokerage",
-            "Brokerage only",
-            "Cash only",
-            "Cash then Brokerage then Trad then Roth",
-        ],
-        index=0,
-        key="conversion_tax_funding_policy",
-    )
-    st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
+        st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
 
     inputs = {
         "trad": trad,
@@ -6924,9 +6924,8 @@ def render_conversion_page() -> None:
                     f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
                 )
             if tradeoff_lines:
-                st.markdown("**Tradeoff Details**")
-                for line in tradeoff_lines:
-                    st.markdown(line)
+                tradeoff_block = "**Tradeoff Details**\n\n" + "\n\n".join(tradeoff_lines)
+                st.markdown(tradeoff_block)
         with st.expander("Quick Recommendation Snapshot", expanded=False):
             default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
             if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
@@ -7107,139 +7106,6 @@ def render_conversion_page() -> None:
         disabled=not integrity_mode,
     )
 
-    st.divider()
-    st.header("Social Security Optimizer")
-    st.caption("Use this section only when you want the full 81-combination fact set and profile-rescored shortlists.")
-    st.subheader("Optimizer Workflow")
-    st.info(
-        "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
-        "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
-        "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
-        "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
-    )
-    ss_opt1, ss_opt2 = st.columns(2)
-    with ss_opt1:
-        run_ss_optimizer_toggle = st.checkbox(
-            "Run SS Optimizer",
-            value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
-            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
-            key="run_ss_optimizer_toggle",
-        )
-    with ss_opt2:
-        trad_balance_penalty_lambda = st.number_input(
-            "SS Optimizer Traditional IRA Penalty Lambda",
-            min_value=0.0,
-            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-            step=0.05,
-            format="%.2f",
-            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
-            key="trad_balance_penalty_lambda",
-        )
-
-    inputs.update(
-        {
-            "cash_sweep_threshold": cash_sweep_threshold,
-            "state_tax_rate": state_tax_rate,
-            "target_trad_balance_enabled": target_trad_balance_enabled,
-            "target_trad_balance": target_trad_balance,
-            "target_trad_override_enabled": target_trad_override_enabled,
-            "target_trad_override_max_rate": target_trad_override_max_rate,
-            "post_aca_target_bracket": post_aca_target_bracket,
-            "rmd_era_target_bracket": rmd_era_target_bracket,
-        }
-    )
-
-    if "annual_calc_year" in st.session_state:
-        st.info(
-            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
-        )
-
-    if run_ss_optimizer_toggle:
-        total_combos = get_ss_optimizer_combo_count()
-        if st.session_state.get("ss_optimizer_running"):
-            st.session_state["ss_optimizer_running"] = False
-        partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
-        progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
-        last_completed = st.session_state.get("ss_optimizer_last_completed")
-        partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
-        if partial_available:
-            last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
-            st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
-        optimizer_error = st.session_state.get("ss_optimizer_error")
-        if optimizer_error:
-            st.error(optimizer_error)
-        b1, b2, b3, b4 = st.columns(4)
-        with b1:
-            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=0,
-                    existing_results=[],
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b2:
-            resume_disabled = not partial_available
-            if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=progress_index,
-                    existing_results=partial_results,
-                    profile_name=planning_profile,
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b3:
-            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
-            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
-            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
-                reranked = rerank_existing_optimizer_result(
-                    last_result_for_rerank,
-                    preferences=extract_scoring_preferences(st.session_state),
-                )
-                reranked["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                st.rerun()
-        with b4:
-            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
-            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                st.rerun()
-
-        last_result = get_current_result_payload("ss_optimizer_last_result")
-        if last_result is not None:
-            if last_result.get("completed", False):
-                st.caption(
-                    f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
-                    f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
-                )
-            render_ss_optimizer_results(last_result)
-    else:
-        st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
-
-    st.divider()
     st.header("Break-Even Governor")
     st.caption("These settings control the Governor only. They do not change the quick recommendation ranking section above.")
     st.subheader("Governor Execution Controls")
@@ -7516,6 +7382,141 @@ def get_shared_household_inputs_from_state() -> dict:
         "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
         "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
     }
+
+    st.divider()
+    st.header("Advanced SS Optimizer (81 combinations)")
+    st.caption("Use this section for exhaustive analysis or validation after you have reviewed the quick recommendation and Break-Even Governor results.")
+    st.subheader("Optimizer Workflow")
+    st.info(
+        "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
+        "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
+        "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
+        "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
+    )
+    ss_opt1, ss_opt2 = st.columns(2)
+    with ss_opt1:
+        run_ss_optimizer_toggle = st.checkbox(
+            "Run SS Optimizer",
+            value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
+            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
+            key="run_ss_optimizer_toggle",
+        )
+    with ss_opt2:
+        trad_balance_penalty_lambda = st.number_input(
+            "SS Optimizer Traditional IRA Penalty Lambda",
+            min_value=0.0,
+            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+            step=0.05,
+            format="%.2f",
+            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
+            key="trad_balance_penalty_lambda",
+        )
+
+    inputs.update(
+        {
+            "cash_sweep_threshold": cash_sweep_threshold,
+            "state_tax_rate": state_tax_rate,
+            "target_trad_balance_enabled": target_trad_balance_enabled,
+            "target_trad_balance": target_trad_balance,
+            "target_trad_override_enabled": target_trad_override_enabled,
+            "target_trad_override_max_rate": target_trad_override_max_rate,
+            "post_aca_target_bracket": post_aca_target_bracket,
+            "rmd_era_target_bracket": rmd_era_target_bracket,
+        }
+    )
+
+    if "annual_calc_year" in st.session_state:
+        st.info(
+            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+        )
+
+    if run_ss_optimizer_toggle:
+        total_combos = get_ss_optimizer_combo_count()
+        if st.session_state.get("ss_optimizer_running"):
+            st.session_state["ss_optimizer_running"] = False
+        partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
+        progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
+        last_completed = st.session_state.get("ss_optimizer_last_completed")
+        partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
+        if partial_available:
+            last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
+            st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
+        optimizer_error = st.session_state.get("ss_optimizer_error")
+        if optimizer_error:
+            st.error(optimizer_error)
+        b1, b2, b3, b4 = st.columns(4)
+        with b1:
+            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
+                clear_ss_optimizer_state(clear_last_result=True)
+                optimizer_result = run_ss_optimizer(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                    integrity_mode=integrity_mode,
+                    validation_tolerance=validation_tolerance,
+                    start_index=0,
+                    existing_results=[],
+                )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                st.rerun()
+        with b2:
+            resume_disabled = not partial_available
+            if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
+                optimizer_result = run_ss_optimizer(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                    integrity_mode=integrity_mode,
+                    validation_tolerance=validation_tolerance,
+                    start_index=progress_index,
+                    existing_results=partial_results,
+                    profile_name=planning_profile,
+                )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                st.rerun()
+        with b3:
+            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
+            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
+            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
+                reranked = rerank_existing_optimizer_result(
+                    last_result_for_rerank,
+                    preferences=extract_scoring_preferences(st.session_state),
+                )
+                reranked["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                st.rerun()
+        with b4:
+            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
+            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
+                clear_ss_optimizer_state(clear_last_result=True)
+                st.rerun()
+
+        last_result = get_current_result_payload("ss_optimizer_last_result")
+        if last_result is not None:
+            if last_result.get("completed", False):
+                st.caption(
+                    f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
+                    f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
+                )
+            render_ss_optimizer_results(last_result)
+    else:
+        st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
+
+    st.divider()
+
 
 def render_annual_page() -> None:
     ensure_default_state()
