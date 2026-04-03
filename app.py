@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v107"
+APP_VERSION = "v108"
 APP_STATE_VERSION = "v103"
 
 
@@ -1576,6 +1576,11 @@ def preserve_session_state_across_pages() -> None:
         "conversion_earned_income_source_signature",
         "annual_edit_long_range_assumptions",
         "annual_earned_income_display",
+        "scenario_name_input",
+        "loaded_scenario_name",
+        "loaded_scenario_scope",
+        "loaded_scenario_fingerprint",
+        "loaded_scenario_app_version",
     })
     for key in keys_to_preserve:
         if key in st.session_state:
@@ -1585,6 +1590,51 @@ def preserve_session_state_across_pages() -> None:
 def collect_scenario_state() -> dict:
     ensure_default_state()
     return {key: copy.deepcopy(st.session_state.get(key, DEFAULT_APP_STATE[key])) for key in SCENARIO_STATE_KEYS}
+
+
+def get_current_scenario_fingerprint() -> str:
+    return build_scenario_fingerprint(collect_scenario_state())
+
+
+def get_loaded_scenario_name() -> str:
+    name = str(st.session_state.get("loaded_scenario_name", "") or "").strip()
+    return name if name else "Unsaved session"
+
+
+def scenario_has_unsaved_changes() -> bool:
+    loaded_fp = st.session_state.get("loaded_scenario_fingerprint")
+    if not loaded_fp:
+        return False
+    return str(loaded_fp) != get_current_scenario_fingerprint()
+
+
+def set_loaded_scenario_identity(name: str | None, scope: str = "full", app_version: str | None = None) -> None:
+    clean_name = str(name or "").strip() or "Loaded scenario"
+    st.session_state["loaded_scenario_name"] = clean_name
+    st.session_state["loaded_scenario_scope"] = str(scope or "full")
+    st.session_state["loaded_scenario_app_version"] = str(app_version or APP_VERSION)
+    st.session_state["loaded_scenario_fingerprint"] = get_current_scenario_fingerprint()
+    st.session_state["scenario_name_input"] = clean_name
+
+
+def clear_loaded_scenario_identity() -> None:
+    st.session_state["loaded_scenario_name"] = ""
+    st.session_state["loaded_scenario_scope"] = "full"
+    st.session_state["loaded_scenario_app_version"] = APP_VERSION
+    st.session_state["loaded_scenario_fingerprint"] = None
+    st.session_state["scenario_name_input"] = ""
+
+
+def render_scenario_identity_bar(current_page: str) -> None:
+    scenario_name = get_loaded_scenario_name()
+    active_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
+    profile = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
+    parts = [f"**Scenario:** {scenario_name}", f"**Active SS Strategy:** {active_strategy}"]
+    if current_page == "conversion":
+        parts.append(f"**Profile:** {profile}")
+    st.caption(" | ".join(parts))
+    if scenario_has_unsaved_changes():
+        st.warning("Current inputs differ from the loaded scenario.")
 
 
 def sync_widget_state_from_canonical_state() -> None:
@@ -1614,6 +1664,7 @@ def apply_scenario_state(state: dict) -> None:
 def reset_scenario_state() -> None:
     current_page = st.session_state.get("app_page", "home")
     apply_scenario_state({})
+    clear_loaded_scenario_identity()
     st.session_state["app_page"] = current_page
 
 def mark_result_state(result_key: str, inputs: dict) -> None:
@@ -1679,13 +1730,15 @@ def should_suppress_quick_recommendation_stale_warning(current_inputs: dict) -> 
         return False
 
 
-def build_scenario_export_payload(scope: str = "full") -> str:
+def build_scenario_export_payload(scope: str = "full", scenario_name: str | None = None) -> str:
     state = collect_scenario_state() if scope == "full" else collect_page_state(scope)
+    clean_name = str(scenario_name or st.session_state.get("scenario_name_input", "") or get_loaded_scenario_name()).strip() or "retirement_model_scenario"
     payload = {
         "meta": {
             "app": "retirement_model",
-            "version": "two_page_tools_save_load_guardrails_rates_v2",
+            "version": APP_VERSION,
             "scope": scope,
+            "scenario_name": clean_name,
         },
         "state": state,
     }
@@ -1695,10 +1748,14 @@ def build_scenario_export_payload(scope: str = "full") -> str:
 def render_scenario_manager(current_page: str) -> None:
     with st.expander("Scenario Save / Load / Reset", expanded=False):
         st.caption("Download one full scenario file that carries inputs across both pages, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
+        default_name = str(st.session_state.get("scenario_name_input", "") or st.session_state.get("loaded_scenario_name", "") or "").strip()
+        st.text_input("Scenario name", value=default_name, key="scenario_name_input", placeholder="Baseline plan")
+        export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
+        safe_filename = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in export_name).strip("_") or "retirement_model_scenario"
         st.download_button(
             "Download Full Scenario",
-            data=build_scenario_export_payload("full"),
-            file_name="retirement_model_scenario.json",
+            data=build_scenario_export_payload("full", export_name),
+            file_name=f"{safe_filename}.json",
             mime="application/json",
             use_container_width=True,
         )
@@ -1721,8 +1778,9 @@ def render_scenario_manager(current_page: str) -> None:
                         for key in get_page_specific_state_keys(scope):
                             if key in state:
                                 st.session_state[key] = copy.deepcopy(state[key])
+                    set_loaded_scenario_identity(meta.get("scenario_name", uploaded_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
                     st.session_state["app_page"] = current_page
-                    st.success(f"Scenario loaded ({scope}).")
+                    st.success(f"Scenario loaded ({scope}): {get_loaded_scenario_name()}")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not load scenario: {exc}")
@@ -6027,6 +6085,7 @@ def get_app_page() -> str:
 
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
+    render_scenario_identity_bar(current_page)
     nav1, nav2, nav3 = st.columns([1, 1, 1])
     with nav1:
         st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
