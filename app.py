@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v123"
+APP_VERSION = "v124"
 APP_STATE_VERSION = "v103"
 
 
@@ -2052,13 +2052,109 @@ def render_snapshot_open_controls() -> None:
             st.error(f"Could not open snapshot: {exc}")
 
 
+def _export_df_records(df) -> list[dict]:
+    if df is None:
+        return []
+    try:
+        if isinstance(df, pd.DataFrame):
+            return df.to_dict("records")
+        return pd.DataFrame(df).to_dict("records")
+    except Exception:
+        return []
+
+
+def build_ss_optimizer_export_payload(result: dict) -> str:
+    payload = {
+        "meta": {
+            "export_type": "ss_optimizer_results",
+            "app_version": APP_VERSION,
+            "scenario_name": get_loaded_scenario_name(),
+        },
+        "context": {
+            "planning_profile": st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")),
+            "preference_modifiers": extract_scoring_preferences(st.session_state),
+            "active_ss_strategy": f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}",
+            "scenario_state": collect_scenario_state(),
+        },
+        "results": {
+            "completed": bool(result.get("completed", False)),
+            "best_result": _json_safe(result.get("best_result")),
+            "comparison_rows": _export_df_records(result.get("comparison_df")),
+            "top_10_rows": _export_df_records(result.get("top_10_df")),
+            "all_results_rows": _export_df_records(result.get("all_results_df")),
+            "profile_shortlists": {k: _export_df_records(v) for k, v in (result.get("profile_shortlists", {}) or {}).items()},
+        },
+    }
+    return json.dumps(_json_safe(payload), indent=2)
+
+
+def build_break_even_export_payload(result: dict) -> str:
+    summary_fields = [
+        "final_net_worth", "total_federal_taxes", "total_state_taxes", "total_aca_cost",
+        "total_irmaa_cost", "total_government_drag", "total_shortfall", "max_magi",
+        "aca_hit_years", "irmaa_hit_years", "first_irmaa_year", "owner_ss_start",
+        "spouse_ss_start", "household_rmd_start", "owner_claim_age", "spouse_claim_age",
+        "total_conversions", "ending_trad_balance",
+    ]
+    payload = {
+        "meta": {
+            "export_type": "break_even_governor_results",
+            "app_version": APP_VERSION,
+            "scenario_name": get_loaded_scenario_name(),
+        },
+        "context": {
+            "planning_profile": st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")),
+            "active_ss_strategy": f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}",
+            "scenario_state": collect_scenario_state(),
+        },
+        "summary": {k: _json_safe(result.get(k)) for k in summary_fields},
+        "chosen_path_rows": _export_df_records(result.get("df")),
+        "decision_rows": _export_df_records(result.get("decision_df")),
+        "validation": _json_safe(result.get("validation")),
+        "validation_rerun_summary": _json_safe(result.get("validation_rerun_summary")),
+    }
+    return json.dumps(_json_safe(payload), indent=2)
+
+
+
 def render_scenario_manager(current_page: str) -> None:
-    with st.expander("Scenario Save / Open / Reset", expanded=False):
-        st.caption("Save one full scenario file that carries inputs across both pages, open a saved scenario into this session, or reset all inputs back to zero-style defaults.")
+    with st.expander("Scenario Open / Save / Reset", expanded=False):
+        st.caption("Open a saved scenario into this session, save the current scenario to a file, or reset all inputs back to zero-style defaults.")
+        upload_key = f"scenario_upload_{current_page}"
+        opened_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
+        open_col1, open_col2 = st.columns([1, 3])
+        with open_col1:
+            open_clicked = st.button("Open Scenario File", use_container_width=True, disabled=opened_file is None, key=f"open_scenario_{current_page}")
+        with open_col2:
+            if opened_file is not None:
+                st.caption(f"Selected file: {opened_file.name}")
+        if open_clicked and opened_file is not None:
+            try:
+                payload = json.loads(opened_file.getvalue().decode("utf-8"))
+                state = payload.get("state", payload)
+                if not isinstance(state, dict):
+                    raise ValueError("Opened JSON does not contain a valid scenario state.")
+                meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+                scope = str(meta.get("scope", "full"))
+                if scope == "full":
+                    apply_scenario_state(state)
+                else:
+                    ensure_default_state()
+                    for key in get_page_specific_state_keys(scope):
+                        if key in state:
+                            st.session_state[key] = copy.deepcopy(state[key])
+                set_loaded_scenario_identity(meta.get("scenario_name", opened_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
+                st.session_state["app_page"] = current_page
+                st.success(f"Scenario opened ({scope}): {get_loaded_scenario_name()}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not open scenario: {exc}")
+
+        st.divider()
         sync_scenario_name_widget_default()
         st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
-        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v122"
+        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v124"
         st.download_button(
             "Save Scenario",
             data=build_scenario_export_payload("full", export_name),
@@ -2066,36 +2162,10 @@ def render_scenario_manager(current_page: str) -> None:
             mime="application/json",
             use_container_width=True,
         )
-        upload_key = f"scenario_upload_{current_page}"
-        uploaded_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Load Uploaded Scenario", use_container_width=True, disabled=uploaded_file is None, key=f"load_scenario_{current_page}"):
-                try:
-                    payload = json.load(uploaded_file)
-                    state = payload.get("state", payload)
-                    if not isinstance(state, dict):
-                        raise ValueError("Uploaded JSON does not contain a valid scenario state.")
-                    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
-                    scope = str(meta.get("scope", "full"))
-                    if scope == "full":
-                        apply_scenario_state(state)
-                    else:
-                        ensure_default_state()
-                        for key in get_page_specific_state_keys(scope):
-                            if key in state:
-                                st.session_state[key] = copy.deepcopy(state[key])
-                    set_loaded_scenario_identity(meta.get("scenario_name", uploaded_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
-                    st.session_state["app_page"] = current_page
-                    st.success(f"Scenario loaded ({scope}): {get_loaded_scenario_name()}")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Could not load scenario: {exc}")
-        with c2:
-            if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
-                reset_scenario_state()
-                st.success("Inputs reset to defaults.")
-                st.rerun()
+        if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
+            reset_scenario_state()
+            st.success("Inputs reset to defaults.")
+            st.rerun()
 
 
 
@@ -4922,6 +4992,15 @@ def render_ss_optimizer_results(result: dict):
         use_container_width=True,
     )
 
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v124.json"
+    st.download_button(
+        "Save SS Optimizer Results",
+        data=build_ss_optimizer_export_payload(result),
+        file_name=ss_export_name,
+        mime="application/json",
+        use_container_width=True,
+    )
+
     profile_shortlists = result.get("profile_shortlists", {}) or {}
     if profile_shortlists:
         st.subheader("Top 5 combinations by planning profile")
@@ -6435,7 +6514,7 @@ def render_top_nav(current_page: str) -> None:
             )
     st.divider()
     render_scenario_manager(current_page)
-    with st.expander("Snapshot Open / Viewer", expanded=False):
+    with st.expander("Snapshot Open", expanded=False):
         render_snapshot_open_controls()
 
 
@@ -6612,7 +6691,7 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.title("Break-Even Governor")
+    st.title("Conversion Optimizer")
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
@@ -7322,6 +7401,15 @@ def render_conversion_page() -> None:
         if result is not None:
             render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
             render_summary("Break-Even Governor Summary", result)
+            beg_export_name = f"beg__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{active_strategy.replace('/', '-')}__v124.json"
+            st.download_button(
+                "Save Break-Even Governor Results",
+                data=build_break_even_export_payload(result),
+                file_name=beg_export_name,
+                mime="application/json",
+                use_container_width=True,
+                key="save_beg_results_button",
+            )
             st.subheader("Chosen Year-by-Year Path")
             path_display_df = build_chosen_path_display_df(result["df"])
             st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
