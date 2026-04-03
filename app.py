@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v126"
+APP_VERSION = "v127"
 APP_STATE_VERSION = "v103"
 
 
@@ -4737,6 +4737,12 @@ def run_ss_optimizer(
     base_snapshot = copy.deepcopy(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
+    quick_max_conversion = sanitize_governor_max_conversion(
+        float(base_snapshot.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION))
+    )
+    quick_step_size = sanitize_governor_step_size(
+        float(base_snapshot.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE))
+    )
 
     results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
