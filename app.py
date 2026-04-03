@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v103"
+APP_VERSION = "v105"
 APP_STATE_VERSION = "v103"
 
 
@@ -1375,15 +1375,25 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
                 "After-Tax Legacy": float(metrics["after_tax_legacy"]),
                 "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
                 "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
-                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
-                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
                 "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
                 "Roth @ End": float(metrics["ending_roth_balance"]),
                 "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
+                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
                 "Stability Value": float(metrics["stability_value"]),
                 "Risk Value": float(metrics["risk_value"]),
                 "Final Household SS Income": float(metrics["final_household_ss_income"]),
                 "Survivor SS Income": float(metrics["survivor_ss_income"]),
+                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+                "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
+                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
+                "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
+                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                "Total Conversions": float(run_result.get("total_conversions", 0.0)),
+                "Max MAGI": float(run_result.get("max_magi", 0.0)),
+                "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
+                "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
+                "First IRMAA Year": run_result.get("first_irmaa_year"),
             })
         except Exception as exc:
             errors.append(f"{owner_age}/{spouse_age}: {exc}")
