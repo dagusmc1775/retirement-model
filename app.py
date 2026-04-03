@@ -27,7 +27,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v108"
+APP_VERSION = "v109"
 APP_STATE_VERSION = "v103"
 
 
@@ -1581,6 +1581,7 @@ def preserve_session_state_across_pages() -> None:
         "loaded_scenario_scope",
         "loaded_scenario_fingerprint",
         "loaded_scenario_app_version",
+        "scenario_name_input_seed",
     })
     for key in keys_to_preserve:
         if key in st.session_state:
@@ -1614,7 +1615,6 @@ def set_loaded_scenario_identity(name: str | None, scope: str = "full", app_vers
     st.session_state["loaded_scenario_scope"] = str(scope or "full")
     st.session_state["loaded_scenario_app_version"] = str(app_version or APP_VERSION)
     st.session_state["loaded_scenario_fingerprint"] = get_current_scenario_fingerprint()
-    st.session_state["scenario_name_input"] = clean_name
 
 
 def clear_loaded_scenario_identity() -> None:
@@ -1622,7 +1622,15 @@ def clear_loaded_scenario_identity() -> None:
     st.session_state["loaded_scenario_scope"] = "full"
     st.session_state["loaded_scenario_app_version"] = APP_VERSION
     st.session_state["loaded_scenario_fingerprint"] = None
-    st.session_state["scenario_name_input"] = ""
+
+
+def sync_scenario_name_widget_default() -> None:
+    loaded_name = str(st.session_state.get("loaded_scenario_name", "") or "").strip()
+    current_value = str(st.session_state.get("scenario_name_input", "") or "").strip()
+    prior_seed = str(st.session_state.get("scenario_name_input_seed", "") or "").strip()
+    if (not current_value) or (current_value == prior_seed):
+        st.session_state["scenario_name_input"] = loaded_name
+    st.session_state["scenario_name_input_seed"] = loaded_name
 
 
 def render_scenario_identity_bar(current_page: str) -> None:
@@ -1748,8 +1756,8 @@ def build_scenario_export_payload(scope: str = "full", scenario_name: str | None
 def render_scenario_manager(current_page: str) -> None:
     with st.expander("Scenario Save / Load / Reset", expanded=False):
         st.caption("Download one full scenario file that carries inputs across both pages, upload a saved scenario into a new session, or reset all inputs back to zero-style defaults.")
-        default_name = str(st.session_state.get("scenario_name_input", "") or st.session_state.get("loaded_scenario_name", "") or "").strip()
-        st.text_input("Scenario name", value=default_name, key="scenario_name_input", placeholder="Baseline plan")
+        sync_scenario_name_widget_default()
+        st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
         safe_filename = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in export_name).strip("_") or "retirement_model_scenario"
         st.download_button(
