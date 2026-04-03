@@ -1022,8 +1022,13 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
         preference_penalty = 0.0
         if preferences.get("maximize_social_security"):
             ss_bonus = 0.24 * (ss_present_value_norm[i] ** 1.30)
+
             if profile_name == "Legacy Focused":
                 ss_bonus *= 1.40
+        elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
+                ss_bonus *= 1.15
+
+        preference_bonus += ss_bonus
         elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
             ss_bonus *= 1.15
         preference_bonus += ss_bonus
