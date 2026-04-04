@@ -1321,8 +1321,11 @@ def score_strategy_metrics(
                 heir_structure_penalty *= 1.40
             preference_penalty += heir_structure_penalty
 
+        lambda_penalty_dollars = float(trad_balance_penalty_lambda) * float(metrics.get("ending_traditional_ira_balance", 0.0))
+        lambda_penalty_score = float(trad_balance_penalty_lambda) * float(trad_norm[i])
+
         positive_score += preference_bonus
-        negative_score += preference_penalty
+        negative_score += preference_penalty + lambda_penalty_score
         score = positive_score - negative_score
 
         scored.append({
