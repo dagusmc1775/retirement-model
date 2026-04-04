@@ -2039,11 +2039,11 @@ def render_tradeoff_summary_columns_from_rows(rows: list[dict]) -> None:
             st.markdown(f"**{title}**")
             if same_as_recommended:
                 st.caption("Same as recommended")
-            st.write(str(_get(title, "Strategy", default="")))
-            st.write(f"After-Tax Legacy: ${_as_float(_get(title, 'After-Tax Legacy', default=0.0)):,.0f}")
-            st.write(f"Ending Trad IRA: ${_as_float(_get(title, 'Ending Traditional IRA', 'Ending Trad IRA', default=0.0)):,.0f}")
-            st.write(f"Final Net Worth: ${_as_float(_get(title, 'Net Worth', 'Final Net Worth', default=0.0)):,.0f}")
-            st.write(f"Household SS Income: ${_as_float(_get(title, 'Final Household SS Income', 'Household SS Income', default=0.0)):,.0f}")
+            st.markdown(str(_get(title, "Strategy", default="")))
+            st.markdown(f"After-Tax Legacy: \\${_as_float(_get(title, 'After-Tax Legacy', default=0.0)):,.0f}")
+            st.markdown(f"Ending Trad IRA: \\${_as_float(_get(title, 'Ending Traditional IRA', 'Ending Trad IRA', default=0.0)):,.0f}")
+            st.markdown(f"Final Net Worth: \\${_as_float(_get(title, 'Net Worth', 'Final Net Worth', default=0.0)):,.0f}")
+            st.markdown(f"Household SS Income: \\${_as_float(_get(title, 'Final Household SS Income', 'Household SS Income', default=0.0)):,.0f}")
 
     st.subheader("Tradeoff Summary")
     c1, c2, c3 = st.columns(3)
