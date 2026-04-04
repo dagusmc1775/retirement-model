@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v128"
+APP_VERSION = "v132"
 APP_STATE_VERSION = "v103"
 
 
@@ -805,6 +805,71 @@ def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_na
     return adjusted, preset
 
 
+def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion: float, quick_step_size: float) -> tuple[list[dict], list[str]]:
+    """
+    Build or reuse the full 81-combination fact set used by Quick Strategy Recommendation.
+    This keeps Quick Strategy and the exhaustive optimizer aligned on the same strategy universe.
+    """
+    cache = st.session_state.setdefault("_quick_recommendation_factset_cache", {})
+    fact_key = build_scenario_fingerprint(base_inputs, quick_max_conversion, quick_step_size)
+    cached = cache.get(fact_key)
+    if isinstance(cached, dict):
+        metric_rows = copy.deepcopy(cached.get("metric_rows", []))
+        errors = copy.deepcopy(cached.get("errors", []))
+        if metric_rows:
+            return metric_rows, errors
+
+    metric_rows: list[dict] = []
+    errors: list[str] = []
+    for owner_age in range(62, 71):
+        for spouse_age in range(62, 71):
+            try:
+                scenario_inputs = copy.deepcopy(base_inputs)
+                scenario_inputs["owner_claim_age"] = int(owner_age)
+                scenario_inputs["spouse_claim_age"] = int(spouse_age)
+                run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
+                metrics = build_strategy_metrics(run_result)
+                metric_rows.append({
+                    **metrics,
+                    "Strategy": f"{owner_age}/{spouse_age}",
+                    "Owner SS Age": int(owner_age),
+                    "Spouse SS Age": int(spouse_age),
+                    "Final Net Worth": float(metrics["final_net_worth"]),
+                    "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                    "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                    "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+                    "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+                    "Roth @ End": float(metrics["ending_roth_balance"]),
+                    "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+                    "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
+                    "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+                    "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+                    "Stability Value": float(metrics["stability_value"]),
+                    "Risk Value": float(metrics["risk_value"]),
+                    "Final Household SS Income": float(metrics["final_household_ss_income"]),
+                    "Survivor SS Income": float(metrics["survivor_ss_income"]),
+                    "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+                    "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
+                    "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                    "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
+                    "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
+                    "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                    "Total Conversions": float(run_result.get("total_conversions", 0.0)),
+                    "Max MAGI": float(run_result.get("max_magi", 0.0)),
+                    "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
+                    "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
+                    "First IRMAA Year": run_result.get("first_irmaa_year"),
+                })
+            except Exception as exc:
+                errors.append(f"{owner_age}/{spouse_age}: {exc}")
+
+    cache[fact_key] = {"metric_rows": copy.deepcopy(metric_rows), "errors": copy.deepcopy(errors)}
+    if len(cache) > 6:
+        while len(cache) > 6:
+            cache.pop(next(iter(cache)))
+    return metric_rows, errors
+
+
 def build_strategy_metrics(run_result: dict) -> dict:
     df = run_result["df"]
     last = df.iloc[-1]
@@ -1453,51 +1518,12 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
     quick_max_conversion = sanitize_governor_max_conversion(float(base_inputs.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION)))
     quick_step_size = sanitize_governor_step_size(float(base_inputs.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE)))
-    metric_rows = []
-    errors = []
-    for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
-        try:
-            scenario_inputs = copy.deepcopy(base_inputs)
-            scenario_inputs["owner_claim_age"] = int(owner_age)
-            scenario_inputs["spouse_claim_age"] = int(spouse_age)
-            run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
-            metrics = build_strategy_metrics(run_result)
-            metric_rows.append({
-                **metrics,
-                "Strategy": f"{owner_age}/{spouse_age}",
-                "Owner SS Age": int(owner_age),
-                "Spouse SS Age": int(spouse_age),
-                "Final Net Worth": float(metrics["final_net_worth"]),
-                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
-                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
-                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
-                "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
-                "Roth @ End": float(metrics["ending_roth_balance"]),
-                "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
-                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
-                "Stability Value": float(metrics["stability_value"]),
-                "Risk Value": float(metrics["risk_value"]),
-                "Final Household SS Income": float(metrics["final_household_ss_income"]),
-                "Survivor SS Income": float(metrics["survivor_ss_income"]),
-                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
-                "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
-                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
-                "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
-                "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
-                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
-                "Total Conversions": float(run_result.get("total_conversions", 0.0)),
-                "Max MAGI": float(run_result.get("max_magi", 0.0)),
-                "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
-                "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
-                "First IRMAA Year": run_result.get("first_irmaa_year"),
-            })
-        except Exception as exc:
-            errors.append(f"{owner_age}/{spouse_age}: {exc}")
+    metric_rows, errors = build_quick_recommendation_fact_rows(base_inputs, quick_max_conversion, quick_step_size)
     if not metric_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
     ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
     summary_rows = []
-    for row in ranked:
+    for row in ranked[:10]:
         summary_rows.append({
             "Strategy": row["Strategy"],
             "Score": row["score_100"],
@@ -1521,9 +1547,10 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
-        "data_source": "break_even_governor",
+        "data_source": "full_81_quick_recommendation",
         "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
+        "strategy_universe_size": len(metric_rows),
     }
 
 
@@ -5009,7 +5036,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
             if quick_strategy == best_strategy:
                 st.success(f"Exhaustive search across all 81 combinations confirms the current-profile recommendation ({quick_strategy}).")
             else:
-                st.warning(f"Exhaustive search across all 81 combinations found a stronger current-profile strategy than the quick recommendation ({quick_strategy} → {best_strategy}).")
+                st.warning(f"Exhaustive search across all 81 combinations found a stronger current-profile strategy than the current quick recommendation ({quick_strategy} → {best_strategy}).")
 
             quick_net = _f(quick_winner, "Final Net Worth")
             quick_legacy = _f(quick_winner, "After-Tax Legacy")
@@ -5023,7 +5050,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
 
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**Quick recommendation (5 anchor strategies)**")
+                st.markdown("**Quick recommendation (full 81-combination recommendation)**")
                 st.write(quick_strategy)
             with c2:
                 st.markdown(f"**Best exhaustive result for {planning_profile}**")
@@ -5045,7 +5072,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                 abs(best_ss - quick_ss) * 15.0,
             )
             if materiality_score < 100000:
-                st.info("Differences are small. The quick recommendation is already strong, so the exhaustive search is mostly a confirmation.")
+                st.info("Differences are small. The quick recommendation is already aligned with the full 81-combination search, so the exhaustive result is mostly a confirmation.")
             else:
                 st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
 
@@ -6937,7 +6964,7 @@ def render_conversion_page() -> None:
                 st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
                 mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
         with rec_col2:
-            st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. It uses a clean recommendation context with a fixed internal conversion cap/step so current Governor execution settings do not distort the quick ranking. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
+            st.caption("Quick Strategy now evaluates the full 81-combination Social Security universe in a clean recommendation context with a fixed internal conversion cap/step, so current Governor execution settings do not distort the ranking. Cached 81-row results are reused when the same recommendation assumptions are rerun.")
             st.caption("Changing modifiers does not update an existing quick recommendation automatically. Run the quick recommendation again after any modifier change.")
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
@@ -6950,7 +6977,7 @@ def render_conversion_page() -> None:
             else:
                 render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
             st.subheader("Strategy Summary")
-            st.caption("These strategy rows are produced by the same Break-Even Governor engine used below, with the selected planning-profile presets applied before the quick run. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+            st.caption("These strategy rows come from the full 81-combination recommendation universe, scored using the selected planning profile and current modifiers in a clean recommendation context. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
             if quick_result.get("applied_preset_note"):
                 st.caption(quick_result["applied_preset_note"])
             st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
@@ -7098,7 +7125,7 @@ def render_conversion_page() -> None:
                     st.success(f"Governor currently matches the recommended quick strategy: {recommended_strategy_label}")
                 else:
                     st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Governor is currently set to {current_governor_strategy}.")
-                st.caption("Quick Strategy and Optimizer picks can differ because they come from different ranking layers. Use the button below to load this quick recommendation into the Governor.")
+                st.caption("Quick Strategy now uses the same full 81-combination universe as the exhaustive search. Use the button below to load this recommendation into the Governor.")
                 st.button(
                     "Apply Recommended Strategy to Governor",
                     on_click=launch_conversion_optimizer_from_strategy,
