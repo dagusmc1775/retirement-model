@@ -1748,8 +1748,16 @@ def render_scenario_identity_bar(current_page: str) -> None:
     scenario_name = get_loaded_scenario_name()
     active_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
     profile = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
-    parts = [f"**Scenario:** {scenario_name}", f"**Active SS Strategy:** {active_strategy}"]
+    parts = ["**Retirement Optimizer**", f"**Scenario:** {scenario_name}", f"**Active SS Strategy:** {active_strategy}"]
     if current_page == "conversion":
+        quick_result_snapshot = get_current_result_payload("quick_strategy_recommendation_result")
+        quick_winner_strategy = None
+        if quick_result_snapshot is not None:
+            ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
+            if ranked_rows:
+                quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
+        if quick_winner_strategy:
+            parts.append(f"**Quick Winner:** {quick_winner_strategy}")
         parts.append(f"**Profile:** {profile}")
     st.caption(" | ".join(parts))
     if scenario_has_unsaved_changes():
@@ -6822,7 +6830,6 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.title("Retirement Optimizer")
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
@@ -7006,14 +7013,18 @@ def render_conversion_page() -> None:
                 def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
                     same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
                     with col:
-                        st.markdown(f"**{title}**")
+                        lines = [
+                            f"**{title}**",
+                            str(row.get("Strategy", "")),
+                            f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}",
+                            f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}",
+                            f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}",
+                            f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}",
+                        ]
                         if same_as_recommended and title != "Recommended Strategy":
-                            st.caption("Same as recommended")
-                        st.write(row.get("Strategy", ""))
-                        st.write(f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
-                        st.write(f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
-                        st.write(f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
-                        st.write(f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
+                            lines.insert(1, "Same as recommended")
+                        st.markdown("  
+".join(lines))
 
                 st.subheader("Tradeoff Summary")
                 tc1, tc2, tc3 = st.columns(3)
@@ -7045,8 +7056,25 @@ def render_conversion_page() -> None:
                     ])
                 if tradeoff_rows:
                     st.subheader("Tradeoff Details")
-                    tradeoff_details_df = pd.DataFrame(tradeoff_rows)
-                    st.dataframe(tradeoff_details_df, use_container_width=True, hide_index=True)
+                    detail_lines = []
+                    if stable_strategy != str(recommended_row.get('Strategy', '')):
+                        detail_lines.extend([
+                            f"**Versus Most Stable ({stable_strategy})**",
+                            f"- Final Net Worth: {format_signed_dollars(stable_nw_delta)}",
+                            f"- Household Social Security Income: {format_signed_dollars(stable_ss_delta)}/year",
+                            f"- Ending Traditional IRA: {format_signed_dollars(stable_trad_delta)}",
+                        ])
+                    if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
+                        if detail_lines:
+                            detail_lines.append("")
+                        detail_lines.extend([
+                            f"**Versus Highest Net Worth ({highest_nw_strategy})**",
+                            f"- Final Net Worth: {format_signed_dollars(nw_nw_delta)}",
+                            f"- After-Tax Legacy: {format_signed_dollars(nw_legacy_delta)}",
+                            f"- Ending Traditional IRA: {format_signed_dollars(nw_trad_delta)}",
+                        ])
+                    st.markdown("
+".join(detail_lines))
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
