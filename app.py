@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v127"
+APP_VERSION = "v128"
 APP_STATE_VERSION = "v103"
 
 
@@ -4935,8 +4935,71 @@ def run_ss_optimizer(
             pass
 
 
+
 def render_ss_optimizer_results(result: dict):
-    st.subheader("Social Security Optimizer Summary")
+    st.subheader("Advanced SS Optimizer (81 combinations)")
+    st.caption("Use this section for exhaustive validation or to explore alternatives after you review the quick recommendation and Break-Even Governor results.")
+
+    quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+    best = result.get("best_result")
+
+    if quick_result is not None and best is not None:
+        ranked_rows = quick_result.get("ranked_rows", []) or []
+        quick_winner = ranked_rows[0] if ranked_rows else None
+
+        def _f(row: dict, key: str) -> float:
+            try:
+                return float(row.get(key, 0.0))
+            except Exception:
+                return 0.0
+
+        if quick_winner is not None:
+            quick_strategy = str(quick_winner.get("Strategy", ""))
+            best_strategy = f"{int(best.get('Owner SS Age', 0))}/{int(best.get('Spouse SS Age', 0))}"
+
+            if quick_strategy == best_strategy:
+                st.success(f"Exhaustive search confirms the recommended strategy ({quick_strategy}).")
+            else:
+                st.warning(f"Exhaustive search found a better strategy than the quick recommendation ({quick_strategy} → {best_strategy}).")
+
+            quick_net = _f(quick_winner, "Final Net Worth")
+            quick_legacy = _f(quick_winner, "After-Tax Legacy")
+            quick_ss = _f(quick_winner, "Final Household SS Income")
+            quick_trad = _f(quick_winner, "Ending Traditional IRA Balance")
+
+            best_net = float(best.get("Final Net Worth", 0.0))
+            best_legacy = float(best.get("After-Tax Legacy", 0.0))
+            best_ss = float(best.get("Final Household SS Income", 0.0))
+            best_trad = float(best.get("Ending Traditional IRA Balance", 0.0))
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Quick recommendation**")
+                st.write(quick_strategy)
+            with c2:
+                st.markdown("**Best exhaustive result**")
+                st.write(best_strategy)
+
+            st.markdown(
+                "\n".join([
+                    "**Difference summary**",
+                    f"- Final Net Worth: {format_signed_dollars(best_net - quick_net)}",
+                    f"- After-Tax Legacy: {format_signed_dollars(best_legacy - quick_legacy)}",
+                    f"- Household Social Security Income: {format_signed_dollars(best_ss - quick_ss)}/year",
+                    f"- Ending Traditional IRA: {format_signed_dollars(best_trad - quick_trad)}",
+                ])
+            )
+
+            materiality_score = max(
+                abs(best_net - quick_net),
+                abs(best_legacy - quick_legacy),
+                abs(best_ss - quick_ss) * 15.0,
+            )
+            if materiality_score < 100000:
+                st.info("Differences are small. The quick recommendation is already strong, so the exhaustive search is more of a confirmation than a reason to change course.")
+            else:
+                st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
+
     st.write(f"Scoring lambda (Trad IRA penalty): {result['trad_balance_penalty_lambda']:.2f}")
     if result.get("optimizer_is_profile_neutral", False):
         st.caption("The full 81-combination optimizer run is profile-neutral at the engine level. The Top 5 profile tabs below rescore that same 81-row result set independently for each planning profile using the same scoring logic as Quick Strategy Recommendation.")
@@ -4957,7 +5020,7 @@ def render_ss_optimizer_results(result: dict):
 
     if result.get("interrupted_partial_df") is not None or not result.get("completed", True):
         msg = result.get("error_message") or "A prior optimizer run was interrupted before all 81 combinations finished."
-        st.warning(f"{msg} Resume it to complete the full result set.")
+        st.warning(f"{msg} Resume it to complete the full run.")
 
     if not result.get("completed", True):
         return
@@ -4998,7 +5061,7 @@ def render_ss_optimizer_results(result: dict):
         use_container_width=True,
     )
 
-    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v124.json"
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v128.json"
     st.download_button(
         "Save SS Optimizer Results",
         data=build_ss_optimizer_export_payload(result),
@@ -5010,7 +5073,7 @@ def render_ss_optimizer_results(result: dict):
     profile_shortlists = result.get("profile_shortlists", {}) or {}
     if profile_shortlists:
         st.subheader("Top 5 combinations by planning profile")
-        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results. If you change ranking preferences later, use the rerank button below instead of rerunning the full 81-combination engine.")
+        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results. If you change ranking preferences later, use 'Re-rank Existing 81 Results' instead of rerunning the full engine.")
         tabs = st.tabs(list(profile_shortlists.keys()))
         for tab, profile_name in zip(tabs, profile_shortlists.keys()):
             with tab:
@@ -5087,7 +5150,6 @@ def render_ss_optimizer_results(result: dict):
             mime="text/csv",
             use_container_width=True,
         )
-
 
 
 def get_first_irmaa_cliff_threshold(year: int) -> float | None:
@@ -7450,65 +7512,72 @@ def render_conversion_page() -> None:
         optimizer_error = st.session_state.get("ss_optimizer_error")
         if optimizer_error:
             st.error(optimizer_error)
-        b1, b2, b3, b4 = st.columns(4)
-        with b1:
-            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=0,
-                    existing_results=[],
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b2:
-            resume_disabled = not partial_available
-            if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=progress_index,
-                    existing_results=partial_results,
-                    profile_name=planning_profile,
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b3:
-            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
-            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
-            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
-                reranked = rerank_existing_optimizer_result(
-                    last_result_for_rerank,
-                    preferences=extract_scoring_preferences(st.session_state),
-                )
-                reranked["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                st.rerun()
-        with b4:
-            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
-            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                st.rerun()
+        last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
+        button_specs = [("run", "Run All SS Strategies")]
+        if partial_available:
+            button_specs.append(("resume", "Resume SS Optimizer"))
+        if last_result_for_rerank is not None and last_result_for_rerank.get("completed", False):
+            button_specs.append(("rerank", "Re-rank Existing 81 Results"))
+        if partial_available or st.session_state.get("ss_optimizer_last_result") is not None:
+            button_specs.append(("reset", "Reset SS Optimizer Progress"))
+
+        button_cols = st.columns(len(button_specs))
+        for col, (action, label) in zip(button_cols, button_specs):
+            with col:
+                if action == "run":
+                    if st.button(label, disabled=False, use_container_width=True):
+                        clear_ss_optimizer_state(clear_last_result=True)
+                        optimizer_result = run_ss_optimizer(
+                            inputs=inputs,
+                            max_conversion=max_conversion,
+                            step_size=step_size,
+                            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                            integrity_mode=integrity_mode,
+                            validation_tolerance=validation_tolerance,
+                            start_index=0,
+                            existing_results=[],
+                        )
+                        optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                        optimizer_result["planning_profile_snapshot"] = planning_profile
+                        optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                        st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                        if optimizer_result.get("completed", False):
+                            mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                        st.rerun()
+                elif action == "resume":
+                    if st.button(label, disabled=False, use_container_width=True):
+                        optimizer_result = run_ss_optimizer(
+                            inputs=inputs,
+                            max_conversion=max_conversion,
+                            step_size=step_size,
+                            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                            integrity_mode=integrity_mode,
+                            validation_tolerance=validation_tolerance,
+                            start_index=progress_index,
+                            existing_results=partial_results,
+                            profile_name=planning_profile,
+                        )
+                        optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                        optimizer_result["planning_profile_snapshot"] = planning_profile
+                        optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                        st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                        if optimizer_result.get("completed", False):
+                            mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                        st.rerun()
+                elif action == "rerank":
+                    if st.button(label, disabled=False, use_container_width=True):
+                        reranked = rerank_existing_optimizer_result(
+                            last_result_for_rerank,
+                            preferences=extract_scoring_preferences(st.session_state),
+                        )
+                        reranked["planning_profile_snapshot"] = planning_profile
+                        optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                        st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                        st.rerun()
+                elif action == "reset":
+                    if st.button(label, disabled=False, use_container_width=True):
+                        clear_ss_optimizer_state(clear_last_result=True)
+                        st.rerun()
 
         last_result = get_current_result_payload("ss_optimizer_last_result")
         if last_result is not None:
