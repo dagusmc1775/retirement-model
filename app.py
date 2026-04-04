@@ -11,6 +11,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import html
 
 import streamlit as st
 import pandas as pd
@@ -7012,17 +7013,29 @@ def render_conversion_page() -> None:
 
                 def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
                     same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
+                    strategy = html.escape(str(row.get("Strategy", "")))
+                    lines = [
+                        f"After-Tax Legacy: {format_dollars(float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))))}",
+                        f"Ending Trad IRA: {format_dollars(float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))))}",
+                        f"Final Net Worth: {format_dollars(float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))))}",
+                        f"Household SS Income: {format_dollars(float(row.get('Final Household SS Income', row.get('final_net_worth', 0.0) if False else row.get('final_household_ss_income', 0.0))))}",
+                    ]
+                    body_html = "<br>".join(html.escape(line) for line in lines)
                     with col:
-                        st.markdown(f"**{title}**")
-                        if same_as_recommended and title != "Recommended Strategy":
-                            st.caption("Same as recommended")
-                        st.write(str(row.get("Strategy", "")))
-                        st.write(f"After-Tax Legacy: {format_dollars(float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))))}")
-                        st.write(f"Ending Trad IRA: {format_dollars(float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))))}")
-                        st.write(f"Final Net Worth: {format_dollars(float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))))}")
-                        st.write(f"Household SS Income: {format_dollars(float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))))}")
+                        same_note = "<div style='font-size:0.8rem;color:#6b7280;margin-bottom:0.3rem;'>Same as recommended</div>" if same_as_recommended and title != "Recommended Strategy" else ""
+                        st.markdown(
+                            f"""
+                            <div style="padding:0.1rem 0; line-height:1.3;">
+                              <div style="font-weight:600; margin-bottom:0.3rem;">{html.escape(title)}</div>
+                              {same_note}
+                              <div style="margin-bottom:0.3rem;">{strategy}</div>
+                              <div>{body_html}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
-                st.subheader("Tradeoff Summary")
+                st.markdown("**Tradeoff Summary**")
                 tc1, tc2, tc3 = st.columns(3)
                 _render_tradeoff_column(tc1, "Recommended Strategy", recommended_row, recommended_row)
                 _render_tradeoff_column(tc2, "Most Stable Strategy", most_stable_row, recommended_row)
@@ -7051,25 +7064,37 @@ def render_conversion_page() -> None:
                         {"Comparison": f"Versus Highest Net Worth ({highest_nw_strategy})", "Metric": "Ending Traditional IRA", "Delta": format_signed_dollars(nw_trad_delta)},
                     ])
                 if tradeoff_rows:
-                    st.subheader("Tradeoff Details")
-                    detail_lines = []
+                    detail_sections = []
                     if stable_strategy != str(recommended_row.get('Strategy', '')):
-                        detail_lines.extend([
-                            f"**Versus Most Stable ({stable_strategy})**",
-                            f"- Final Net Worth: {format_signed_dollars(stable_nw_delta)}",
-                            f"- Household Social Security Income: {format_signed_dollars(stable_ss_delta)}/year",
-                            f"- Ending Traditional IRA: {format_signed_dollars(stable_trad_delta)}",
-                        ])
+                        detail_sections.append({
+                            "title": f"Versus Most Stable ({stable_strategy})",
+                            "lines": [
+                                f"Final Net Worth: {format_signed_dollars(stable_nw_delta)}",
+                                f"Household Social Security Income: {format_signed_dollars(stable_ss_delta)}/year",
+                                f"Ending Traditional IRA: {format_signed_dollars(stable_trad_delta)}",
+                            ],
+                        })
                     if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
-                        if detail_lines:
-                            detail_lines.append("")
-                        detail_lines.extend([
-                            f"**Versus Highest Net Worth ({highest_nw_strategy})**",
-                            f"- Final Net Worth: {format_signed_dollars(nw_nw_delta)}",
-                            f"- After-Tax Legacy: {format_signed_dollars(nw_legacy_delta)}",
-                            f"- Ending Traditional IRA: {format_signed_dollars(nw_trad_delta)}",
-                        ])
-                    st.markdown("\n".join(detail_lines))
+                        detail_sections.append({
+                            "title": f"Versus Highest Net Worth ({highest_nw_strategy})",
+                            "lines": [
+                                f"Final Net Worth: {format_signed_dollars(nw_nw_delta)}",
+                                f"After-Tax Legacy: {format_signed_dollars(nw_legacy_delta)}",
+                                f"Ending Traditional IRA: {format_signed_dollars(nw_trad_delta)}",
+                            ],
+                        })
+                    st.markdown("**Tradeoff Details**")
+                    for section in detail_sections:
+                        body_html = "<br>".join(f"• {html.escape(line)}" for line in section["lines"])
+                        st.markdown(
+                            f"""
+                            <div style="margin:0.15rem 0 0.55rem 0; line-height:1.3;">
+                              <div style="font-weight:600; margin-bottom:0.2rem;">{html.escape(section['title'])}</div>
+                              <div>{body_html}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
