@@ -2165,54 +2165,53 @@ def build_break_even_export_payload(result: dict) -> str:
 
 
 def render_scenario_manager(current_page: str) -> None:
-    with st.expander("Scenario Open / Save / Reset", expanded=False):
-        st.caption("Open a saved scenario into this session, save the current scenario to a file, or reset all inputs back to zero-style defaults.")
-        upload_key = f"scenario_upload_{current_page}"
-        opened_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
-        open_col1, open_col2 = st.columns([1, 3])
-        with open_col1:
-            open_clicked = st.button("Open Scenario File", use_container_width=True, disabled=opened_file is None, key=f"open_scenario_{current_page}")
-        with open_col2:
-            if opened_file is not None:
-                st.caption(f"Selected file: {opened_file.name}")
-        if open_clicked and opened_file is not None:
-            try:
-                payload = json.loads(opened_file.getvalue().decode("utf-8"))
-                state = payload.get("state", payload)
-                if not isinstance(state, dict):
-                    raise ValueError("Opened JSON does not contain a valid scenario state.")
-                meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
-                scope = str(meta.get("scope", "full"))
-                if scope == "full":
-                    apply_scenario_state(state)
-                else:
-                    ensure_default_state()
-                    for key in get_page_specific_state_keys(scope):
-                        if key in state:
-                            st.session_state[key] = copy.deepcopy(state[key])
-                set_loaded_scenario_identity(meta.get("scenario_name", opened_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
-                st.session_state["app_page"] = current_page
-                st.success(f"Scenario opened ({scope}): {get_loaded_scenario_name()}")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Could not open scenario: {exc}")
-
-        st.divider()
-        sync_scenario_name_widget_default()
-        st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
-        export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
-        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v124"
-        st.download_button(
-            "Save Scenario",
-            data=build_scenario_export_payload("full", export_name),
-            file_name=f"{safe_filename}.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-        if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
-            reset_scenario_state()
-            st.success("Inputs reset to defaults.")
+    st.caption("Open a saved scenario, save the current scenario, or reset all inputs to defaults.")
+    upload_key = f"scenario_upload_{current_page}"
+    opened_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
+    open_col1, open_col2 = st.columns([1, 3])
+    with open_col1:
+        open_clicked = st.button("Open Scenario File", use_container_width=True, disabled=opened_file is None, key=f"open_scenario_{current_page}")
+    with open_col2:
+        if opened_file is not None:
+            st.caption(f"Selected file: {opened_file.name}")
+    if open_clicked and opened_file is not None:
+        try:
+            payload = json.loads(opened_file.getvalue().decode("utf-8"))
+            state = payload.get("state", payload)
+            if not isinstance(state, dict):
+                raise ValueError("Opened JSON does not contain a valid scenario state.")
+            meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+            scope = str(meta.get("scope", "full"))
+            if scope == "full":
+                apply_scenario_state(state)
+            else:
+                ensure_default_state()
+                for key in get_page_specific_state_keys(scope):
+                    if key in state:
+                        st.session_state[key] = copy.deepcopy(state[key])
+            set_loaded_scenario_identity(meta.get("scenario_name", opened_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
+            st.session_state["app_page"] = current_page
+            st.success(f"Scenario opened ({scope}): {get_loaded_scenario_name()}")
             st.rerun()
+        except Exception as exc:
+            st.error(f"Could not open scenario: {exc}")
+
+    st.divider()
+    sync_scenario_name_widget_default()
+    st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
+    export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
+    safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v124"
+    st.download_button(
+        "Save Scenario",
+        data=build_scenario_export_payload("full", export_name),
+        file_name=f"{safe_filename}.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
+        reset_scenario_state()
+        st.success("Inputs reset to defaults.")
+        st.rerun()
 
 
 
@@ -6611,64 +6610,41 @@ def get_app_page() -> str:
 
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
+    nav1, nav2, nav3 = st.columns([1, 1, 1])
+    with nav1:
+        st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
+    with nav2:
+        st.button(
+            "Annual Calculator",
+            on_click=go_to_page,
+            args=("annual",),
+            disabled=current_page == "annual",
+            use_container_width=True,
+        )
+    with nav3:
+        st.button(
+            "Conversion Optimizer",
+            on_click=go_to_page,
+            args=("conversion",),
+            disabled=current_page == "conversion",
+            use_container_width=True,
+        )
     render_scenario_identity_bar(current_page)
-    if current_page == "home":
-        nav1, nav2, nav3 = st.columns([1, 1, 1])
-        with nav1:
-            st.button("Home", on_click=go_to_page, args=("home",), disabled=True, use_container_width=True)
-        with nav2:
-            st.button(
-                "Annual Calculator",
-                on_click=go_to_page,
-                args=("annual",),
-                disabled=False,
-                use_container_width=True,
-            )
-        with nav3:
-            st.button(
-                "Conversion Optimizer",
-                on_click=go_to_page,
-                args=("conversion",),
-                disabled=False,
-                use_container_width=True,
-            )
-    else:
-        nav1, nav2, nav3 = st.columns([1, 1, 1])
-        with nav1:
-            st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
-        with nav2:
-            st.button(
-                "Annual Calculator",
-                on_click=go_to_page,
-                args=("annual",),
-                disabled=current_page == "annual",
-                use_container_width=True,
-            )
-        with nav3:
-            st.button(
-                "Conversion Optimizer",
-                on_click=go_to_page,
-                args=("conversion",),
-                disabled=current_page == "conversion",
-                use_container_width=True,
-            )
     st.divider()
-    render_scenario_manager(current_page)
-    with st.expander("Snapshot Open", expanded=False):
+    with st.expander("Session / Scenario", expanded=False):
+        render_scenario_manager(current_page)
+        st.divider()
         render_snapshot_open_controls()
 
 
 def render_home_page() -> None:
     ensure_default_state()
-    st.title("Retirement Model")
-    st.subheader("Choose a tool")
+    st.title("Retirement Optimizer")
     st.write(
-        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Break-Even Governor for the full lifetime governor and SS optimizer."
+        "Use the Annual Conversion Calculator for current-year analysis, or open the Conversion Optimizer for the lifetime governor and Social Security optimizer."
     )
     render_top_nav("home")
-    st.info(
-        "State is kept across pages. Annual current-year inputs stay in session and remain available when you switch tools."
-    )
+    st.caption("State is kept across pages. Annual-page inputs remain available when you switch tools.")
 
 
 
@@ -6844,10 +6820,13 @@ def render_conversion_page() -> None:
             quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
     applied_notice = st.session_state.get("governor_strategy_applied_notice")
     render_top_nav("conversion")
+    note_parts = []
     if applied_notice:
-        st.caption(applied_notice)
+        note_parts.append(str(applied_notice))
     if preset_note:
-        st.caption(preset_note)
+        note_parts.append(str(preset_note))
+    if note_parts:
+        st.caption(" | ".join(note_parts))
     
     inputs = render_shared_household_inputs()
 
@@ -6872,8 +6851,7 @@ def render_conversion_page() -> None:
 
     st.divider()
     with st.expander("SS Optimizer", expanded=False):
-        st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
-        st.caption("Workflow: change assumptions or modifiers, then run Quick Strategy Recommendation again. Any existing quick recommendation shown below is only valid for the inputs and modifiers used when it was generated.")
+        st.caption("Use this section to compare Social Security claiming strategies for the current planning profile. Quick Scan is the fast directional view. Full 81 is the slow confirmation run.")
         planning_profile = st.selectbox(
             "Optimize For",
             list(PROFILE_PRESETS.keys()),
@@ -6928,8 +6906,7 @@ def render_conversion_page() -> None:
                 st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
                 mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
         with rec_col2:
-            st.caption("Quick Scan compares 62/62, 67/67, 70/70, 70/67, and 67/70. It is the fast directional view. Use Full 81 only when you need exhaustive confirmation.")
-            st.caption("Changing assumptions or modifiers does not update an existing quick scan automatically. Run Quick Scan again after any change.")
+            st.caption("Quick Scan compares 62/62, 67/67, 70/70, 70/67, and 67/70. Re-run Quick Scan after any assumption or modifier change. Save Full 81 for times when you actually need exhaustive confirmation.")
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
         if quick_result is not None:
