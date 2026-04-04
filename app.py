@@ -6664,7 +6664,7 @@ def render_home_page() -> None:
 
 
 def render_shared_household_inputs() -> dict:
-    with st.expander("Household Inputs", expanded=True):
+    with st.expander("Household Inputs", expanded=False):
         owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
         spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
 
@@ -6701,7 +6701,7 @@ def render_shared_household_inputs() -> dict:
             owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
             spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
 
-    with st.expander("Retirement Smile Spending", expanded=True):
+    with st.expander("Retirement Smile Spending", expanded=False):
         sm1, sm2 = st.columns(2)
         with sm1:
             retirement_smile_enabled = st.checkbox(
@@ -6733,14 +6733,14 @@ def render_shared_household_inputs() -> dict:
 
         st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
 
-    with st.expander("ACA Coverage", expanded=True):
+    with st.expander("ACA Coverage", expanded=False):
         cov1, cov2 = st.columns(2)
         with cov1:
             primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
         with cov2:
             spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
 
-    with st.expander("Earned Income", expanded=True):
+    with st.expander("Earned Income", expanded=False):
         sync_conversion_earned_income_widget_state()
         earn1, earn2, earn3 = st.columns(3)
         with earn1:
@@ -6771,7 +6771,7 @@ def render_shared_household_inputs() -> dict:
                 on_change=on_conversion_earned_income_change,
             )
 
-    with st.expander("Tax Funding", expanded=True):
+    with st.expander("Tax Funding", expanded=False):
         conversion_tax_funding_policy = st.selectbox(
             "Preferred tax funding source",
             [
@@ -6881,7 +6881,8 @@ def render_conversion_page() -> None:
 
     st.divider()
     with st.expander("Quick Strategy Recommendation", expanded=False):
-        st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls should be read as recommendation settings, not Governor execution settings.")
+        st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
+        st.caption("Workflow: change assumptions or modifiers, then run Quick Strategy Recommendation again. Any existing quick recommendation shown below is only valid for the inputs and modifiers used when it was generated.")
         planning_profile = st.selectbox(
             "Optimize For",
             list(PROFILE_PRESETS.keys()),
@@ -6937,6 +6938,7 @@ def render_conversion_page() -> None:
                 mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
         with rec_col2:
             st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. It uses a clean recommendation context with a fixed internal conversion cap/step so current Governor execution settings do not distort the quick ranking. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
+            st.caption("Changing modifiers does not update an existing quick recommendation automatically. Run the quick recommendation again after any modifier change.")
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
         if quick_result is not None:
@@ -7518,11 +7520,12 @@ def render_conversion_page() -> None:
     st.caption("Use this section for exhaustive analysis or validation after you have reviewed the quick recommendation and Break-Even Governor results.")
     st.caption("This section lives below the Governor by design. It stays visible here even when the optimizer controls themselves are turned off.")
     st.subheader("Optimizer Workflow")
-    st.info(
-        "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
-        "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
-        "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
-        "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
+    st.markdown(
+        "**Optimizer workflow**  \n"
+        "1. Run Quick Strategy Recommendation first for the fast answer.  \n"
+        "2. Run SS Optimizer when you want to validate that answer across all 81 combinations.  \n"
+        "3. Top 10 shows the raw Traditional-IRA-penalty-weighted ranking. Top 5 by planning profile shows the same 81 rows interpreted using your current profile and current modifiers.  \n"
+        "4. Changing modifiers does not rerun the engine. It only changes how the saved 81-row fact set is interpreted in the profile shortlist view."
     )
     ss_opt1, ss_opt2 = st.columns(2)
     with ss_opt1:
@@ -7557,8 +7560,8 @@ def render_conversion_page() -> None:
     )
 
     if "annual_calc_year" in st.session_state:
-        st.markdown(
-            f"**Annual calculator snapshot in session:** year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, Social Security ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+        st.caption(
+            f"Annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, Social Security ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
         )
 
     if run_ss_optimizer_toggle:
