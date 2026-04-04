@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v132"
+APP_VERSION = "v128"
 APP_STATE_VERSION = "v103"
 
 
@@ -6836,6 +6836,16 @@ def render_conversion_page() -> None:
             quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
     applied_notice = st.session_state.get("governor_strategy_applied_notice")
     render_top_nav("conversion")
+    scenario_name_display = str(st.session_state.get("loaded_scenario_name", "Unsaved session"))
+    profile_name_display = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
+    banner_parts = [
+        f"**Scenario:** {scenario_name_display}",
+        f"**Active SS Strategy:** {active_strategy}",
+    ]
+    if quick_winner_strategy:
+        banner_parts.append(f"**Quick Winner:** {quick_winner_strategy}")
+    banner_parts.append(f"**Profile:** {profile_name_display}")
+    st.caption(" | ".join(banner_parts))
     if applied_notice:
         st.caption(applied_notice)
     if preset_note:
@@ -7030,23 +7040,19 @@ def render_conversion_page() -> None:
 
                 stable_strategy = str(most_stable_row.get('Strategy', ''))
                 highest_nw_strategy = str(highest_net_worth_row.get('Strategy', ''))
-                tradeoff_rows = []
+                tradeoff_lines = []
                 if stable_strategy != str(recommended_row.get('Strategy', '')):
-                    tradeoff_rows.extend([
-                        {"Comparison": f"Versus Most Stable ({stable_strategy})", "Metric": "Final Net Worth", "Delta": format_signed_dollars(stable_nw_delta)},
-                        {"Comparison": f"Versus Most Stable ({stable_strategy})", "Metric": "Household Social Security Income", "Delta": f"{format_signed_dollars(stable_ss_delta)}/year"},
-                        {"Comparison": f"Versus Most Stable ({stable_strategy})", "Metric": "Ending Traditional IRA", "Delta": format_signed_dollars(stable_trad_delta)},
-                    ])
+                    tradeoff_lines.append(
+                        f"- **Versus Most Stable ({stable_strategy})**: Final Net Worth {format_signed_dollars(stable_nw_delta)}, Household Social Security Income {format_signed_dollars(stable_ss_delta)}/year, Ending Traditional IRA {format_signed_dollars(stable_trad_delta)}."
+                    )
                 if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
-                    tradeoff_rows.extend([
-                        {"Comparison": f"Versus Highest Net Worth ({highest_nw_strategy})", "Metric": "Final Net Worth", "Delta": format_signed_dollars(nw_nw_delta)},
-                        {"Comparison": f"Versus Highest Net Worth ({highest_nw_strategy})", "Metric": "After-Tax Legacy", "Delta": format_signed_dollars(nw_legacy_delta)},
-                        {"Comparison": f"Versus Highest Net Worth ({highest_nw_strategy})", "Metric": "Ending Traditional IRA", "Delta": format_signed_dollars(nw_trad_delta)},
-                    ])
-                if tradeoff_rows:
-                    st.subheader("Tradeoff Details")
-                    tradeoff_details_df = pd.DataFrame(tradeoff_rows)
-                    st.dataframe(tradeoff_details_df, use_container_width=True, hide_index=True)
+                    tradeoff_lines.append(
+                        f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
+                    )
+                if tradeoff_lines:
+                    st.markdown("**Tradeoff Details**")
+                    for line in tradeoff_lines:
+                        st.write(line)
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
