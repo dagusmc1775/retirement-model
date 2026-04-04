@@ -7073,6 +7073,30 @@ def render_conversion_page() -> None:
                 help="Used in the unified scoring pipeline for both Quick Scan and Full 81. Higher values penalize strategies that finish with larger Traditional IRA balances.",
                 key="trad_balance_penalty_lambda",
             )
+        with lambda_col_right:
+            integrity_col1, integrity_col2 = st.columns([1, 1])
+            with integrity_col1:
+                st.checkbox(
+                    "Enable integrity / repeatability validation",
+                    key="integrity_mode",
+                    help="Runs extra validation checks so the exhaustive optimizer favors reliability over speed. Recommended while verifying behavior.",
+                )
+            with integrity_col2:
+                validation_tolerance = st.number_input(
+                    "Validation tolerance ($)",
+                    min_value=0.0,
+                    max_value=1000.0,
+                    value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
+                    step=0.01,
+                    format="%.2f",
+                    help="Allowed absolute difference for repeatability checks before the app flags a mismatch.",
+                    key="validation_tolerance",
+                )
+            integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+            if integrity_mode:
+                st.caption("Integrity validation is ON. Full 81 runs will be slower, but they will rerun and cross-check results for reliability.")
+            else:
+                st.caption("Integrity validation is OFF. Full 81 runs will be faster, but less defensively checked.")
         selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
         with st.container(border=True):
             st.markdown(f"**{selection_summary['title']}**")
