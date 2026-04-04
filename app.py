@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v134-unified-ss-optimizer"
+APP_VERSION = "v139-unified-ss-pipeline"
 APP_STATE_VERSION = "v103"
 
 
@@ -1000,7 +1000,7 @@ def optimize_spending_for_target_legacy(inputs: dict, max_conversion: float, ste
     }
 
 
-def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None) -> dict[str, pd.DataFrame]:
+def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None, trad_balance_penalty_lambda: float = 0.0) -> dict[str, pd.DataFrame]:
     if not results_rows:
         return {}
 
@@ -1037,7 +1037,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
 
     shortlists = {}
     for profile_name in PROFILE_PRESETS.keys():
-        ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
+        ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences, trad_balance_penalty_lambda=trad_balance_penalty_lambda)
         rows = []
         for idx, ranked_row in enumerate(ranked[:top_n], start=1):
             rows.append({
@@ -1111,10 +1111,116 @@ def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
     ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
     return df.loc[:, ordered].copy()
 
+def build_ranked_optimizer_results_df(
+    results_rows: list[dict],
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+) -> pd.DataFrame:
+    if not results_rows:
+        return pd.DataFrame()
 
-def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferences: dict | None = None) -> list[dict]:
+    metric_rows = []
+    for row in results_rows:
+        metric_rows.append({
+            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
+            "Owner SS Age": int(row["Owner SS Age"]),
+            "Spouse SS Age": int(row["Spouse SS Age"]),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+
+    ranked = score_strategy_metrics(
+        metric_rows,
+        profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+    )
+
+    rows = []
+    for idx, ranked_row in enumerate(ranked, start=1):
+        rows.append({
+            "Rank": idx,
+            "Owner SS Age": int(ranked_row["Owner SS Age"]),
+            "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
+            "Strategy": ranked_row["Strategy"],
+            "Final Net Worth": float(ranked_row["final_net_worth"]),
+            "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+            "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+            "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
+            "Ending Roth Balance": float(ranked_row["ending_roth_balance"]),
+            "Ending Traditional IRA Balance": float(ranked_row["ending_traditional_ira_balance"]),
+            "Ending Brokerage Balance": float(ranked_row["ending_brokerage_balance"]),
+            "Ending Cash Balance": float(ranked_row["ending_cash_balance"]),
+            "Stability Value": float(ranked_row["stability_value"]),
+            "Risk Value": float(ranked_row["risk_value"]),
+            "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
+            "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
+            "Social Security Present Value": float(ranked_row.get("social_security_present_value", 0.0)),
+            "Total Federal Tax": float(ranked_row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(ranked_row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(ranked_row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(ranked_row.get("Total IRMAA Cost", 0.0)),
+            "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+            "First IRMAA Year": ranked_row.get("First IRMAA Year"),
+            "Max MAGI": float(ranked_row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(ranked_row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(ranked_row.get("IRMAA Hit Years", 0)),
+            "Traditional IRA Penalty Applied": float(ranked_row.get("lambda_penalty_dollars", 0.0)),
+            "Score": float(ranked_row["score_100"]),
+            "Stability": ranked_row.get("stability_label", ""),
+            "Risk": ranked_row.get("risk_label", ""),
+            "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
+            "NW Score +": float(ranked_row.get("nw_component", 0.0) * 100.0),
+            "Legacy Score +": float(ranked_row.get("legacy_component", 0.0) * 100.0),
+            "Stability Score +": float(ranked_row.get("stability_component", 0.0) * 100.0),
+            "Trad Penalty -": float(ranked_row.get("trad_component", 0.0) * 100.0),
+            "Trad Share Penalty -": float(ranked_row.get("trad_share_component", 0.0) * 100.0),
+            "Gov Drag Penalty -": float(ranked_row.get("drag_component", 0.0) * 100.0),
+            "Heir Tax Penalty -": float(ranked_row.get("heir_tax_component", 0.0) * 100.0),
+            "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
+            "Preference Bonus +": float(ranked_row.get("preference_bonus_component", 0.0) * 100.0),
+            "Preference Penalty -": float(ranked_row.get("preference_penalty_component", 0.0) * 100.0),
+            "Lambda Penalty -": float(ranked_row.get("lambda_penalty_score", 0.0) * 100.0),
+        })
+
+    ranked_df = pd.DataFrame(rows)
+    if ranked_df.empty:
+        return ranked_df
+    return reorder_ss_optimizer_results_df(ranked_df)
+
+
+def score_strategy_metrics(
+    metrics_list: list[dict],
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+) -> list[dict]:
     weights = get_profile_summary(profile_name)["weights"]
     preferences = preferences or {}
+    trad_balance_penalty_lambda = max(0.0, float(trad_balance_penalty_lambda or 0.0))
 
     nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
     base_legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
@@ -1223,6 +1329,8 @@ def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferen
             **metrics,
             "score": float(score),
             "score_100": float(score * 100.0),
+            "lambda_penalty_dollars": float(lambda_penalty_dollars),
+            "lambda_penalty_score": float(lambda_penalty_score),
             "stability_label": qualitative_bucket(stability_adjusted),
             "risk_label": qualitative_bucket(risk_penalty, reverse=True),
             "nw_component": float((0.10 * weights["nw"] * nw_adjusted) if profile_name == "Legacy Focused" else (weights["nw"] * nw_adjusted)),
@@ -1525,7 +1633,12 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     metric_rows, errors = build_quick_recommendation_fact_rows(base_inputs, quick_max_conversion, quick_step_size)
     if not metric_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
-    ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
+    ranked = score_strategy_metrics(
+        metric_rows,
+        profile_name,
+        preferences=preferences,
+        trad_balance_penalty_lambda=float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+    )
     summary_rows = []
     for row in ranked[:10]:
         summary_rows.append({
@@ -4902,16 +5015,21 @@ def run_ss_optimizer(
             st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
             progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
 
-        results_df = pd.DataFrame(results).sort_values(
-            by=["Score", "Final Net Worth"],
-            ascending=[False, False],
-        ).reset_index(drop=True)
-        results_df.insert(0, "Rank", range(1, len(results_df) + 1))
-        results_df = reorder_ss_optimizer_results_df(results_df)
+        scoring_preferences = extract_scoring_preferences(inputs)
+        results_df = build_ranked_optimizer_results_df(
+            results,
+            profile_name,
+            preferences=scoring_preferences,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        )
 
         top_10_df = results_df.head(10).copy()
         top_3 = results_df.head(3).copy()
-        profile_shortlists = build_profile_shortlists_from_optimizer_rows(results, preferences=extract_scoring_preferences(inputs))
+        profile_shortlists = build_profile_shortlists_from_optimizer_rows(
+            results,
+            preferences=scoring_preferences,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        )
 
         compare_metrics = [
             ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
@@ -4973,6 +5091,7 @@ def run_ss_optimizer(
             "top_10_df": top_10_df,
             "comparison_df": comparison_df,
             "profile_shortlists": profile_shortlists,
+            "raw_results_df": pd.DataFrame(results),
             "best_result": best_result,
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
@@ -4993,6 +5112,7 @@ def run_ss_optimizer(
             "comparison_df": comparison_df,
             "comparison_display_df": comparison_df,
             "profile_shortlists": profile_shortlists,
+            "raw_results_df": pd.DataFrame(results),
             "best_result": best_result,
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
@@ -5024,6 +5144,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
         dynamic_shortlists = build_profile_shortlists_from_optimizer_rows(
             all_results_df.to_dict("records"),
             preferences=current_preferences or {},
+            trad_balance_penalty_lambda=float(result.get("trad_balance_penalty_lambda", 0.0)),
         )
     else:
         dynamic_shortlists = {}
@@ -5088,12 +5209,12 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
             else:
                 st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
 
-    st.markdown(f"**Raw optimizer penalty weight:** {result['trad_balance_penalty_lambda']:.2f}")
-    st.caption("The raw Top 10 table below is sorted by Final Net Worth minus the Traditional IRA penalty weight. It is a raw optimizer ranking, not the same thing as the current-profile shortlist.")
+    st.markdown(f"**Traditional IRA lambda weight:** {result['trad_balance_penalty_lambda']:.2f}")
+    st.caption("Full 81 results below are now ranked with the same scoring pipeline used everywhere else. The lambda weight is part of that unified score rather than a separate raw-only ranking.")
     if raw_best is not None:
         best = raw_best
-        st.write(f"Raw optimizer winner: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
-        st.write(f"Raw optimizer score: {format_dollars(best['Score'])}")
+        st.write(f"Current-profile exhaustive winner: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
+        st.write(f"Unified score: {best['Score']:.2f}")
         st.write(f"Final Net Worth: {format_dollars(best['Final Net Worth'])}")
         st.write(f"Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
 
@@ -5113,8 +5234,8 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
         return
 
     top_10_df = result.get("top_10_df", pd.DataFrame())
-    st.subheader("Raw Top 10 SS Strategies")
-    st.caption("This is the raw lambda-based ranking. Use it as an exploratory list, not as the final profile-aware recommendation.")
+    st.subheader(f"Top 10 SS Strategies for {planning_profile}")
+    st.caption("This table uses the same current-profile scoring pipeline as Quick Scan and the exhaustive shortlist below: profile weights, modifiers, and lambda penalty all flow through the same ranking logic.")
     st.dataframe(
         top_10_df.style.format({
             "Final Net Worth": "${:,.0f}",
@@ -5153,7 +5274,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
         use_container_width=True,
     )
 
-    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v138.json"
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v139.json"
     st.download_button(
         "Export SS Optimizer Results (JSON)",
         data=build_ss_optimizer_export_payload(result),
@@ -5172,7 +5293,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
 
     if dynamic_shortlists:
         st.subheader("Top 5 exhaustive combinations by planning profile")
-        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the currently selected profile and modifiers. They can differ from Quick Scan because Quick Scan only tests 7 anchor strategies, while this section searches all 81 combinations.")
+        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the same unified scoring pipeline. They can differ from Quick Scan because Quick Scan only tests 7 anchor strategies, while this section searches all 81 combinations.")
         st.caption(f"Active modifiers applied now: {describe_active_scoring_preferences(current_preferences)}")
         tabs = st.tabs(list(dynamic_shortlists.keys()))
         for tab, tab_profile_name in zip(tabs, dynamic_shortlists.keys()):
@@ -5226,6 +5347,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                 )
 
     with st.expander("All 81 SS combinations"):
+        st.caption("Full ranked universe using the current profile, active modifiers, and lambda penalty.")
         st.dataframe(
             all_results_df.style.format({
                 "Final Net Worth": "${:,.0f}",
