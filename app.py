@@ -4924,12 +4924,12 @@ def run_ss_optimizer(
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
 
-    # Freeze a clean snapshot for optimizer runs and force the optimizer path into fast mode.
-    # This 81-combination scan is intentionally profile-neutral at the engine level so the
-    # resulting raw combo table can be rescored independently for every planning profile.
-    base_snapshot = copy.deepcopy(inputs)
-    base_snapshot["integrity_mode"] = False
-    base_snapshot["strict_repeatability_check"] = False
+    # Build the same stateless, profile-adjusted optimizer input package used by Quick Scan.
+    # This keeps Quick Scan and Full 81 on the same engine assumptions; the only difference
+    # should be the size of the strategy universe being searched.
+    base_snapshot, _ = build_stateless_quick_recommendation_inputs(inputs, profile_name)
+    base_snapshot["integrity_mode"] = bool(integrity_mode)
+    base_snapshot["strict_repeatability_check"] = bool(integrity_mode)
     quick_max_conversion = sanitize_governor_max_conversion(
         float(base_snapshot.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION))
     )
@@ -5213,6 +5213,10 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                 st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
 
     st.markdown(f"**Traditional IRA lambda weight:** {result['trad_balance_penalty_lambda']:.2f}")
+    st.caption(
+        f"Scoring lens for this exhaustive ranking: Profile = {planning_profile} | "
+        f"Modifiers = {describe_active_scoring_preferences(current_preferences)}"
+    )
     st.caption("Full 81 results below are now ranked with the same scoring pipeline used everywhere else. The lambda weight is part of that unified score rather than a separate raw-only ranking.")
     if raw_best is not None:
         best = raw_best
@@ -7048,7 +7052,7 @@ def render_conversion_page() -> None:
             f"Tradeoff to expect: {profile_summary['tradeoff']}"
         )
 
-        st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
+        st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions. These shared controls apply to both Quick Scan and Full 81.")
         pref1, pref2, pref3 = st.columns(3)
         with pref1:
             st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
@@ -7066,7 +7070,7 @@ def render_conversion_page() -> None:
                 max_value=2.0,
                 value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
                 step=0.05,
-                help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
+                help="Used in the unified scoring pipeline for both Quick Scan and Full 81. Higher values penalize strategies that finish with larger Traditional IRA balances.",
                 key="trad_balance_penalty_lambda",
             )
         selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
@@ -7211,11 +7215,11 @@ def render_conversion_page() -> None:
                         st.markdown(f"**{title}**")
                         if same_as_recommended and title != "Recommended Strategy":
                             st.caption("Same as recommended")
-                        st.write(row.get("Strategy", ""))
-                        st.write(f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
-                        st.write(f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
-                        st.write(f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
-                        st.write(f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
+                        st.metric("Strategy", str(row.get("Strategy", "")))
+                        st.metric("After-Tax Legacy", f"${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
+                        st.metric("Ending Trad IRA", f"${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
+                        st.metric("Final Net Worth", f"${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
+                        st.metric("Household SS Income", f"${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
 
                 st.subheader("Tradeoff Summary")
                 tc1, tc2, tc3 = st.columns(3)
@@ -7243,8 +7247,7 @@ def render_conversion_page() -> None:
                     )
                 if tradeoff_lines:
                     st.subheader("Tradeoff Details")
-                    clean_lines = [str(line).replace("- **", "").replace("**", "") for line in tradeoff_lines]
-                    st.markdown("\n\n".join(clean_lines))
+                    st.markdown("\n".join(tradeoff_lines))
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
