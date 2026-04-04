@@ -1781,6 +1781,14 @@ def render_scenario_identity_bar(current_page: str) -> None:
     profile = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
     parts = [f"**Scenario:** {scenario_name}", f"**Active SS Strategy:** {active_strategy}"]
     if current_page == "conversion":
+        quick_result_snapshot = get_current_result_payload("quick_strategy_recommendation_result")
+        quick_winner_strategy = None
+        if quick_result_snapshot is not None:
+            ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
+            if ranked_rows:
+                quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
+        if quick_winner_strategy:
+            parts.append(f"**Quick Rec Winner:** {quick_winner_strategy}")
         parts.append(f"**Profile:** {profile}")
     st.caption(" | ".join(parts))
     if scenario_has_unsaved_changes():
@@ -5145,7 +5153,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
         use_container_width=True,
     )
 
-    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v129.json"
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v138.json"
     st.download_button(
         "Export SS Optimizer Results (JSON)",
         data=build_ss_optimizer_export_payload(result),
@@ -6853,7 +6861,7 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.header("Retirement Optimizer")
+    st.subheader("Retirement Optimizer")
     render_top_nav("conversion")
 
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
@@ -6861,17 +6869,9 @@ def render_conversion_page() -> None:
     selected_profile = st.session_state.get("selected_recommendation_profile")
     preset_note = st.session_state.get("break_even_governor_preset_note")
     active_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
-    quick_result_snapshot = get_current_result_payload("quick_strategy_recommendation_result")
-    quick_winner_strategy = None
-    if quick_result_snapshot is not None:
-        ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
-        if ranked_rows:
-            quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
     applied_notice = st.session_state.get("governor_strategy_applied_notice")
     if applied_notice:
         st.caption(applied_notice)
-    if quick_winner_strategy and quick_winner_strategy != active_strategy:
-        st.warning(f"Quick recommendation winner is {quick_winner_strategy}. Current active strategy is {active_strategy}.")
     elif selected_strategy and selected_strategy != active_strategy:
         source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
         profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
@@ -6903,7 +6903,10 @@ def render_conversion_page() -> None:
     validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
 
     st.divider()
-    with st.expander("SS Optimizer", expanded=False):
+    ss_optimizer_expanded = bool(st.session_state.get("ss_optimizer_expanded", False))
+    if get_current_result_payload("quick_strategy_recommendation_result") is not None or get_current_result_payload("ss_optimizer_last_result") is not None:
+        ss_optimizer_expanded = True
+    with st.expander("SS Optimizer", expanded=ss_optimizer_expanded):
         st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
         st.caption("Workflow: set assumptions first, then run Quick Scan for a fast answer or Full 81-Combination Scan for exhaustive validation.")
         planning_profile = st.selectbox(
@@ -6930,15 +6933,17 @@ def render_conversion_page() -> None:
             st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
         current_preferences = extract_scoring_preferences(st.session_state)
         st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
-        trad_balance_penalty_lambda = st.slider(
-            "Traditional IRA penalty weight (raw optimizer ranking)",
-            min_value=0.0,
-            max_value=2.0,
-            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-            step=0.05,
-            help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
-            key="trad_balance_penalty_lambda",
-        )
+        lambda_col_left, lambda_col_right = st.columns([1, 3])
+        with lambda_col_left:
+            trad_balance_penalty_lambda = st.number_input(
+                "Traditional IRA penalty weight",
+                min_value=0.0,
+                max_value=2.0,
+                value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+                step=0.05,
+                help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
+                key="trad_balance_penalty_lambda",
+            )
         selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
         with st.container(border=True):
             st.markdown(f"**{selection_summary['title']}**")
@@ -6955,6 +6960,7 @@ def render_conversion_page() -> None:
         rec_col1, rec_col2, rec_col3 = st.columns([1, 1, 2])
         with rec_col1:
             if st.button("Run Quick Scan", use_container_width=True):
+                st.session_state["ss_optimizer_expanded"] = True
                 with st.spinner("Running SS Optimizer quick scan..."):
                     recommendation_result = run_quick_strategy_recommendation(
                         inputs=inputs,
@@ -6970,6 +6976,7 @@ def render_conversion_page() -> None:
                 mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
         with rec_col2:
             if st.button("Run Full 81-Combination Scan", use_container_width=True):
+                st.session_state["ss_optimizer_expanded"] = True
                 clear_ss_optimizer_state(clear_last_result=True)
                 optimizer_result = run_ss_optimizer(
                     inputs=inputs,
@@ -7111,9 +7118,8 @@ def render_conversion_page() -> None:
                     )
                 if tradeoff_lines:
                     st.subheader("Tradeoff Details")
-                    for line in tradeoff_lines:
-                        clean_line = str(line).replace("- **", "").replace("**", "")
-                        st.write(clean_line)
+                    clean_lines = [str(line).replace("- **", "").replace("**", "") for line in tradeoff_lines]
+                    st.markdown("\n\n".join(clean_lines))
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
