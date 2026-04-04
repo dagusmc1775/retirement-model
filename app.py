@@ -7013,17 +7013,14 @@ def render_conversion_page() -> None:
                 def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
                     same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
                     with col:
-                        lines = [
-                            f"**{title}**",
-                            str(row.get("Strategy", "")),
-                            f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}",
-                            f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}",
-                            f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}",
-                            f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}",
-                        ]
+                        st.markdown(f"**{title}**")
                         if same_as_recommended and title != "Recommended Strategy":
-                            lines.insert(1, "Same as recommended")
-                        st.markdown("  \n".join(lines))
+                            st.caption("Same as recommended")
+                        st.write(str(row.get("Strategy", "")))
+                        st.write(f"After-Tax Legacy: {format_dollars(float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))))}")
+                        st.write(f"Ending Trad IRA: {format_dollars(float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))))}")
+                        st.write(f"Final Net Worth: {format_dollars(float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))))}")
+                        st.write(f"Household SS Income: {format_dollars(float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))))}")
 
                 st.subheader("Tradeoff Summary")
                 tc1, tc2, tc3 = st.columns(3)
