@@ -1005,6 +1005,44 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
     return shortlists
 
 
+def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    preferred = [
+        "Rank",
+        "Owner SS Age",
+        "Spouse SS Age",
+        "Strategy",
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Roth Balance",
+        "Ending Traditional IRA Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Stability Value",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Social Security Present Value",
+        "Total Federal Tax",
+        "Total State Tax",
+        "Total ACA Cost",
+        "Total IRMAA Cost",
+        "Total Government Drag",
+        "Total Conversions",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+        "Traditional IRA Penalty Applied",
+        "Risk Value",
+        "Score",
+    ]
+    ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    return df.loc[:, ordered].copy()
+
+
 def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferences: dict | None = None) -> list[dict]:
     weights = get_profile_summary(profile_name)["weights"]
     preferences = preferences or {}
@@ -4830,6 +4868,7 @@ def run_ss_optimizer(
             ascending=[False, False],
         ).reset_index(drop=True)
         results_df.insert(0, "Rank", range(1, len(results_df) + 1))
+        results_df = reorder_ss_optimizer_results_df(results_df)
 
         top_10_df = results_df.head(10).copy()
         top_3 = results_df.head(3).copy()
@@ -4936,14 +4975,25 @@ def run_ss_optimizer(
 
 
 
-def render_ss_optimizer_results(result: dict):
+def render_ss_optimizer_results(result: dict, planning_profile: str, current_preferences: dict):
     st.subheader("Advanced SS Optimizer (81 combinations)")
     st.caption("Use this section for exhaustive validation or to explore alternatives after you review the quick recommendation and Break-Even Governor results.")
 
     quick_result = get_current_result_payload("quick_strategy_recommendation_result")
-    best = result.get("best_result")
+    all_results_df = result.get("all_results_df", pd.DataFrame())
+    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty:
+        dynamic_shortlists = build_profile_shortlists_from_optimizer_rows(
+            all_results_df.to_dict("records"),
+            preferences=current_preferences or {},
+        )
+    else:
+        dynamic_shortlists = {}
 
-    if quick_result is not None and best is not None:
+    current_profile_shortlist = dynamic_shortlists.get(planning_profile, pd.DataFrame())
+    profile_best = current_profile_shortlist.iloc[0].to_dict() if isinstance(current_profile_shortlist, pd.DataFrame) and not current_profile_shortlist.empty else None
+    raw_best = result.get("best_result")
+
+    if quick_result is not None and profile_best is not None:
         ranked_rows = quick_result.get("ranked_rows", []) or []
         quick_winner = ranked_rows[0] if ranked_rows else None
 
@@ -4955,29 +5005,28 @@ def render_ss_optimizer_results(result: dict):
 
         if quick_winner is not None:
             quick_strategy = str(quick_winner.get("Strategy", ""))
-            best_strategy = f"{int(best.get('Owner SS Age', 0))}/{int(best.get('Spouse SS Age', 0))}"
-
+            best_strategy = str(profile_best.get("Strategy", ""))
             if quick_strategy == best_strategy:
-                st.success(f"Exhaustive search confirms the recommended strategy ({quick_strategy}).")
+                st.success(f"Exhaustive search across all 81 combinations confirms the current-profile recommendation ({quick_strategy}).")
             else:
-                st.warning(f"Exhaustive search found a better strategy than the quick recommendation ({quick_strategy} → {best_strategy}).")
+                st.warning(f"Exhaustive search across all 81 combinations found a stronger current-profile strategy than the quick recommendation ({quick_strategy} → {best_strategy}).")
 
             quick_net = _f(quick_winner, "Final Net Worth")
             quick_legacy = _f(quick_winner, "After-Tax Legacy")
             quick_ss = _f(quick_winner, "Final Household SS Income")
             quick_trad = _f(quick_winner, "Ending Traditional IRA Balance")
 
-            best_net = float(best.get("Final Net Worth", 0.0))
-            best_legacy = float(best.get("After-Tax Legacy", 0.0))
-            best_ss = float(best.get("Final Household SS Income", 0.0))
-            best_trad = float(best.get("Ending Traditional IRA Balance", 0.0))
+            best_net = _f(profile_best, "Net Worth")
+            best_legacy = _f(profile_best, "After-Tax Legacy")
+            best_ss = _f(profile_best, "Final Household SS Income")
+            best_trad = _f(profile_best, "Trad IRA @ End")
 
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**Quick recommendation**")
+                st.markdown("**Quick recommendation (5 anchor strategies)**")
                 st.write(quick_strategy)
             with c2:
-                st.markdown("**Best exhaustive result**")
+                st.markdown(f"**Best exhaustive result for {planning_profile}**")
                 st.write(best_strategy)
 
             st.markdown(
@@ -4996,19 +5045,18 @@ def render_ss_optimizer_results(result: dict):
                 abs(best_ss - quick_ss) * 15.0,
             )
             if materiality_score < 100000:
-                st.info("Differences are small. The quick recommendation is already strong, so the exhaustive search is more of a confirmation than a reason to change course.")
+                st.info("Differences are small. The quick recommendation is already strong, so the exhaustive search is mostly a confirmation.")
             else:
                 st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
 
-    st.write(f"Scoring lambda (Trad IRA penalty): {result['trad_balance_penalty_lambda']:.2f}")
-    if result.get("optimizer_is_profile_neutral", False):
-        st.caption("The full 81-combination optimizer run is profile-neutral at the engine level. The Top 5 profile tabs below rescore that same 81-row result set independently for each planning profile using the same scoring logic as Quick Strategy Recommendation.")
-    if result["best_result"] is not None:
-        best = result["best_result"]
-        st.write(f"Best SS Ages: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
-        st.write(f"Best Score: {format_dollars(best['Score'])}")
-        st.write(f"Best Final Net Worth: {format_dollars(best['Final Net Worth'])}")
-        st.write(f"Best Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
+    st.markdown(f"**Raw optimizer penalty weight:** {result['trad_balance_penalty_lambda']:.2f}")
+    st.caption("The raw Top 10 table below is sorted by Final Net Worth minus the Traditional IRA penalty weight. It is a raw optimizer ranking, not the same thing as the current-profile shortlist.")
+    if raw_best is not None:
+        best = raw_best
+        st.write(f"Raw optimizer winner: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
+        st.write(f"Raw optimizer score: {format_dollars(best['Score'])}")
+        st.write(f"Final Net Worth: {format_dollars(best['Final Net Worth'])}")
+        st.write(f"Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
 
     if result.get("best_validation") is not None:
         validation = result["best_validation"]
@@ -5025,26 +5073,31 @@ def render_ss_optimizer_results(result: dict):
     if not result.get("completed", True):
         return
 
-    st.subheader("Top 10 SS Strategies")
-    st.caption("This table is the raw optimizer ranking sorted by Final Net Worth minus the Traditional IRA penalty lambda. It is not a planning-profile ranking.")
+    top_10_df = result.get("top_10_df", pd.DataFrame())
+    st.subheader("Raw Top 10 SS Strategies")
+    st.caption("This is the raw lambda-based ranking. Use it as an exploratory list, not as the final profile-aware recommendation.")
     st.dataframe(
-        result["top_10_df"].style.format({
+        top_10_df.style.format({
             "Final Net Worth": "${:,.0f}",
+            "After-Tax Legacy": "${:,.0f}",
+            "Ending Roth Balance": "${:,.0f}",
+            "Ending Traditional IRA Balance": "${:,.0f}",
+            "Ending Brokerage Balance": "${:,.0f}",
             "Total Federal Tax": "${:,.0f}",
             "Total State Tax": "${:,.0f}",
             "Total ACA Cost": "${:,.0f}",
             "Total IRMAA Cost": "${:,.0f}",
             "Total Government Drag": "${:,.0f}",
             "Total Conversions": "${:,.0f}",
-            "Ending Traditional IRA Balance": "${:,.0f}",
             "Traditional IRA Penalty Applied": "${:,.0f}",
+            "Risk Value": "{:,.0f}",
             "Max MAGI": "${:,.0f}",
             "Score": "${:,.0f}",
         }),
         use_container_width=True,
     )
     st.download_button(
-        "Download Top 10 SS Strategies (CSV)",
+        "Download Raw Top 10 SS Strategies (CSV)",
         data=result["top_10_export_df"].to_csv(index=False),
         file_name="top_10_ss_strategies.csv",
         mime="text/csv",
@@ -5061,27 +5114,34 @@ def render_ss_optimizer_results(result: dict):
         use_container_width=True,
     )
 
-    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v128.json"
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v129.json"
     st.download_button(
-        "Save SS Optimizer Results",
+        "Export SS Optimizer Results (JSON)",
         data=build_ss_optimizer_export_payload(result),
         file_name=ss_export_name,
         mime="application/json",
         use_container_width=True,
     )
+    st.caption("This JSON is an export for outside review. It does not open in Snapshot Viewer.")
 
-    profile_shortlists = result.get("profile_shortlists", {}) or {}
-    if profile_shortlists:
-        st.subheader("Top 5 combinations by planning profile")
-        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results. If you change ranking preferences later, use 'Re-rank Existing 81 Results' instead of rerunning the full engine.")
-        tabs = st.tabs(list(profile_shortlists.keys()))
-        for tab, profile_name in zip(tabs, profile_shortlists.keys()):
+    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
+        try:
+            if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
+                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only.")
+        except Exception:
+            pass
+
+    if dynamic_shortlists:
+        st.subheader("Top 5 exhaustive combinations by planning profile")
+        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the currently selected profile and modifiers. They can differ from Quick Recommendation because quick rec only tests 5 anchor strategies, while this section searches all 81 combinations.")
+        st.caption(f"Active modifiers applied now: {describe_active_scoring_preferences(current_preferences)}")
+        tabs = st.tabs(list(dynamic_shortlists.keys()))
+        for tab, tab_profile_name in zip(tabs, dynamic_shortlists.keys()):
             with tab:
-                shortlist_df = profile_shortlists.get(profile_name, pd.DataFrame())
+                shortlist_df = dynamic_shortlists.get(tab_profile_name, pd.DataFrame())
                 if shortlist_df.empty:
                     st.info("No shortlist available for this profile yet.")
                     continue
-                st.caption("Score breakdown columns show which forces are helping or hurting each strategy for this profile. Positive columns help the score. Penalty columns subtract from it.")
                 st.dataframe(
                     shortlist_df.style.format({
                         "Score": "{:.2f}",
@@ -5109,48 +5169,51 @@ def render_ss_optimizer_results(result: dict):
                     use_container_width=True,
                 )
                 top_row = shortlist_df.iloc[0]
-                st.caption("This button loads the selected optimizer shortlist winner into the Governor below. It does not rerun the optimizer.")
+                st.caption("This button loads the selected exhaustive shortlist winner into the Governor below. It does not rerun the optimizer.")
                 st.button(
-                    f"Apply {profile_name} winner {top_row['Strategy']} to Governor",
-                    key=f"profile_shortlist_open_{profile_name}_{top_row['Strategy']}",
+                    f"Apply {tab_profile_name} winner {top_row['Strategy']} to Governor",
+                    key=f"profile_shortlist_open_{tab_profile_name}_{top_row['Strategy']}",
                     on_click=launch_conversion_optimizer_from_strategy,
-                    args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", profile_name),
+                    args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", tab_profile_name),
                     use_container_width=True,
                 )
                 st.download_button(
-                    f"Download {profile_name} Top 5 (CSV)",
+                    f"Download {tab_profile_name} Top 5 (CSV)",
                     data=shortlist_df.to_csv(index=False),
-                    file_name=f"ss_optimizer_top5_{profile_name.lower().replace(' ', '_').replace('-', '_')}.csv",
+                    file_name=f"ss_optimizer_top5_{tab_profile_name.lower().replace(' ', '_').replace('-', '_')}.csv",
                     mime="text/csv",
                     use_container_width=True,
-                    key=f"download_profile_shortlist_{profile_name}",
+                    key=f"download_profile_shortlist_{tab_profile_name}",
                 )
 
     with st.expander("All 81 SS combinations"):
         st.dataframe(
-            result["all_results_df"].style.format({
+            all_results_df.style.format({
                 "Final Net Worth": "${:,.0f}",
+                "After-Tax Legacy": "${:,.0f}",
+                "Ending Roth Balance": "${:,.0f}",
+                "Ending Traditional IRA Balance": "${:,.0f}",
+                "Ending Brokerage Balance": "${:,.0f}",
                 "Total Federal Tax": "${:,.0f}",
                 "Total State Tax": "${:,.0f}",
                 "Total ACA Cost": "${:,.0f}",
                 "Total IRMAA Cost": "${:,.0f}",
                 "Total Government Drag": "${:,.0f}",
                 "Total Conversions": "${:,.0f}",
-                "Ending Traditional IRA Balance": "${:,.0f}",
                 "Traditional IRA Penalty Applied": "${:,.0f}",
+                "Risk Value": "{:,.0f}",
                 "Max MAGI": "${:,.0f}",
                 "Score": "${:,.0f}",
             }),
             use_container_width=True,
         )
         st.download_button(
-            "Download All SS Results (CSV)",
+            "Download All 81 SS Results (CSV)",
             data=result["all_results_export_df"].to_csv(index=False),
             file_name="all_ss_results.csv",
             mime="text/csv",
             use_container_width=True,
         )
-
 
 def get_first_irmaa_cliff_threshold(year: int) -> float | None:
     table = get_irmaa_table(year)
@@ -7471,12 +7534,12 @@ def render_conversion_page() -> None:
         )
     with ss_opt2:
         trad_balance_penalty_lambda = st.number_input(
-            "SS Optimizer Traditional IRA Penalty Lambda",
+            "Raw Optimizer Traditional IRA Penalty Weight",
             min_value=0.0,
             value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
             step=0.05,
             format="%.2f",
-            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
+            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - weight x Ending Traditional IRA Balance. This does not control Quick Recommendation and does not change the exhaustive profile shortlists below.",
             key="trad_balance_penalty_lambda",
         )
 
@@ -7494,8 +7557,8 @@ def render_conversion_page() -> None:
     )
 
     if "annual_calc_year" in st.session_state:
-        st.info(
-            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+        st.markdown(
+            f"**Annual calculator snapshot in session:** year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, Social Security ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
         )
 
     if run_ss_optimizer_toggle:
@@ -7516,8 +7579,6 @@ def render_conversion_page() -> None:
         button_specs = [("run", "Run All SS Strategies")]
         if partial_available:
             button_specs.append(("resume", "Resume SS Optimizer"))
-        if last_result_for_rerank is not None and last_result_for_rerank.get("completed", False):
-            button_specs.append(("rerank", "Re-rank Existing 81 Results"))
         if partial_available or st.session_state.get("ss_optimizer_last_result") is not None:
             button_specs.append(("reset", "Reset SS Optimizer Progress"))
 
@@ -7564,16 +7625,6 @@ def render_conversion_page() -> None:
                         if optimizer_result.get("completed", False):
                             mark_result_state("ss_optimizer", optimizer_hash_inputs)
                         st.rerun()
-                elif action == "rerank":
-                    if st.button(label, disabled=False, use_container_width=True):
-                        reranked = rerank_existing_optimizer_result(
-                            last_result_for_rerank,
-                            preferences=extract_scoring_preferences(st.session_state),
-                        )
-                        reranked["planning_profile_snapshot"] = planning_profile
-                        optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                        st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                        st.rerun()
                 elif action == "reset":
                     if st.button(label, disabled=False, use_container_width=True):
                         clear_ss_optimizer_state(clear_last_result=True)
@@ -7586,7 +7637,7 @@ def render_conversion_page() -> None:
                     f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
                     f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
                 )
-            render_ss_optimizer_results(last_result)
+            render_ss_optimizer_results(last_result, planning_profile, extract_scoring_preferences(st.session_state))
     else:
         st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
 
