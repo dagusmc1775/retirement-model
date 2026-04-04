@@ -7023,8 +7023,7 @@ def render_conversion_page() -> None:
                         ]
                         if same_as_recommended and title != "Recommended Strategy":
                             lines.insert(1, "Same as recommended")
-                        st.markdown("  
-".join(lines))
+                        st.markdown("  \n".join(lines))
 
                 st.subheader("Tradeoff Summary")
                 tc1, tc2, tc3 = st.columns(3)
@@ -7073,8 +7072,7 @@ def render_conversion_page() -> None:
                             f"- After-Tax Legacy: {format_signed_dollars(nw_legacy_delta)}",
                             f"- Ending Traditional IRA: {format_signed_dollars(nw_trad_delta)}",
                         ])
-                    st.markdown("
-".join(detail_lines))
+                    st.markdown("\n".join(detail_lines))
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
