@@ -7560,9 +7560,15 @@ def render_conversion_page() -> None:
     )
 
     if "annual_calc_year" in st.session_state:
-        st.caption(
-            f"Annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, Social Security ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+        annual_snapshot_text = (
+            f"Annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, "
+            f"filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, "
+            f"earned income \\${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, "
+            f"other ordinary income \\${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, "
+            f"LTCG \\${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, "
+            f"Social Security \\${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
         )
+        st.caption(annual_snapshot_text)
 
     if run_ss_optimizer_toggle:
         total_combos = get_ss_optimizer_combo_count()
