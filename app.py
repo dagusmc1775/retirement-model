@@ -181,6 +181,8 @@ PAGE_STATE_KEY_PREFIXES = {
     ],
 }
 
+SCENARIO_WARNING_IGNORE_KEYS = {"integrity_mode", "validation_tolerance", "strict_repeatability_check", "run_ss_optimizer_toggle"}
+
 
 def format_dollars(value: float) -> str:
     try:
@@ -1697,16 +1699,22 @@ def get_current_scenario_fingerprint() -> str:
     return build_scenario_fingerprint(collect_scenario_state())
 
 
+def get_current_scenario_warning_fingerprint() -> str:
+    state = collect_scenario_state()
+    filtered = {k: v for k, v in state.items() if k not in SCENARIO_WARNING_IGNORE_KEYS}
+    return build_scenario_fingerprint(filtered)
+
+
 def get_loaded_scenario_name() -> str:
     name = str(st.session_state.get("loaded_scenario_name", "") or "").strip()
     return name if name else "Unsaved session"
 
 
 def scenario_has_unsaved_changes() -> bool:
-    loaded_fp = st.session_state.get("loaded_scenario_fingerprint")
+    loaded_fp = st.session_state.get("loaded_scenario_warning_fingerprint")
     if not loaded_fp:
         return False
-    return str(loaded_fp) != get_current_scenario_fingerprint()
+    return str(loaded_fp) != get_current_scenario_warning_fingerprint()
 
 
 def set_loaded_scenario_identity(name: str | None, scope: str = "full", app_version: str | None = None) -> None:
@@ -1715,6 +1723,7 @@ def set_loaded_scenario_identity(name: str | None, scope: str = "full", app_vers
     st.session_state["loaded_scenario_scope"] = str(scope or "full")
     st.session_state["loaded_scenario_app_version"] = str(app_version or APP_VERSION)
     st.session_state["loaded_scenario_fingerprint"] = get_current_scenario_fingerprint()
+    st.session_state["loaded_scenario_warning_fingerprint"] = get_current_scenario_warning_fingerprint()
 
 
 def clear_loaded_scenario_identity() -> None:
@@ -1722,6 +1731,7 @@ def clear_loaded_scenario_identity() -> None:
     st.session_state["loaded_scenario_scope"] = "full"
     st.session_state["loaded_scenario_app_version"] = APP_VERSION
     st.session_state["loaded_scenario_fingerprint"] = None
+    st.session_state["loaded_scenario_warning_fingerprint"] = None
 
 
 def clear_transient_recommendation_state() -> None:
@@ -6610,7 +6620,7 @@ def get_app_page() -> str:
 
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
-    nav1, nav2, nav3 = st.columns([1, 1, 1])
+    nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
     with nav1:
         st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
     with nav2:
@@ -6629,6 +6639,13 @@ def render_top_nav(current_page: str) -> None:
             disabled=current_page == "conversion",
             use_container_width=True,
         )
+    with nav4:
+        if st.button("Reset App State", key=f"reset_app_state_top_nav_{current_page}", use_container_width=True):
+            preserved_page = st.session_state.get("app_page", "home")
+            st.session_state.clear()
+            st.session_state["app_state_version"] = APP_STATE_VERSION
+            st.session_state["app_page"] = preserved_page
+            st.rerun()
     render_scenario_identity_bar(current_page)
     st.divider()
     with st.expander("Session / Scenario", expanded=False):
