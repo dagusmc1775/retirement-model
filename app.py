@@ -821,7 +821,9 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
 
     metric_rows: list[dict] = []
     errors: list[str] = []
-    for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
+    total_quick_combos = len(QUICK_STRATEGY_COMBOS)
+    quick_progress = st.progress(0.0, text=f"Running Quick Scan... 0/{total_quick_combos}")
+    for idx, (owner_age, spouse_age) in enumerate(QUICK_STRATEGY_COMBOS, start=1):
             try:
                 scenario_inputs = copy.deepcopy(base_inputs)
                 scenario_inputs["owner_claim_age"] = int(owner_age)
@@ -861,7 +863,10 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
                 })
             except Exception as exc:
                 errors.append(f"{owner_age}/{spouse_age}: {exc}")
+            finally:
+                quick_progress.progress(idx / total_quick_combos, text=f"Running Quick Scan... {idx}/{total_quick_combos}")
 
+    quick_progress.empty()
     cache[fact_key] = {"metric_rows": copy.deepcopy(metric_rows), "errors": copy.deepcopy(errors)}
     if len(cache) > 6:
         while len(cache) > 6:
@@ -6894,6 +6899,8 @@ def render_conversion_page() -> None:
     target_trad_override_max_rate = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"]))
     post_aca_target_bracket = str(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
     rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
+    integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+    validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
 
     st.divider()
     with st.expander("SS Optimizer", expanded=False):
@@ -7103,8 +7110,10 @@ def render_conversion_page() -> None:
                         f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
                     )
                 if tradeoff_lines:
-                    tradeoff_block = "**Tradeoff Details**\n\n" + "\n\n".join(tradeoff_lines)
-                    st.markdown(tradeoff_block)
+                    st.subheader("Tradeoff Details")
+                    for line in tradeoff_lines:
+                        clean_line = str(line).replace("- **", "").replace("**", "")
+                        st.write(clean_line)
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
@@ -7270,24 +7279,6 @@ def render_conversion_page() -> None:
                     f"ending Traditional IRA by {format_dollars(delta_trad)}, government drag by {format_dollars(delta_drag)}, "
                     f"and final household Social Security income by {format_dollars(delta_ss)}."
                 )
-
-    with st.expander("Integrity / Speed", expanded=False):
-        integrity_mode = st.checkbox(
-            "Enable Integrity Mode",
-            value=bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"])),
-            help="When enabled, the app runs slower but adds repeatability and accounting checks. Leave this off for faster day-to-day use.",
-            key="integrity_mode",
-        )
-        validation_tolerance = st.number_input(
-            "Validation Tolerance ($)",
-            min_value=0.0,
-            value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
-            step=0.01,
-            format="%.2f",
-            help="Used only when Integrity Mode is enabled.",
-            key="validation_tolerance",
-            disabled=not integrity_mode,
-        )
 
     with st.expander("Break-Even Governor", expanded=False):
         st.caption("These settings control the Governor only. They do not change the quick recommendation ranking section above.")
