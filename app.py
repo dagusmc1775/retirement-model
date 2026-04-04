@@ -6680,7 +6680,7 @@ def render_home_page() -> None:
     st.title("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
-        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Break-Even Governor for the full lifetime governor and SS optimizer."
+        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
     )
     render_top_nav("home")
     st.info(
@@ -6848,7 +6848,9 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.title("Conversion Optimizer")
+    st.header("Retirement Optimizer")
+    render_top_nav("conversion")
+
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
@@ -6860,20 +6862,18 @@ def render_conversion_page() -> None:
         ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
         if ranked_rows:
             quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
-    st.success(f"Active SS Strategy in Governor: {active_strategy}")
     applied_notice = st.session_state.get("governor_strategy_applied_notice")
     if applied_notice:
         st.caption(applied_notice)
     if quick_winner_strategy and quick_winner_strategy != active_strategy:
-        st.warning(f"Quick recommendation winner is {quick_winner_strategy}. Governor is currently set to {active_strategy}.")
-    if selected_strategy:
+        st.warning(f"Quick recommendation winner is {quick_winner_strategy}. Current active strategy is {active_strategy}.")
+    elif selected_strategy and selected_strategy != active_strategy:
         source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
         profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
-        st.info(f"Using Social Security claim ages {selected_strategy}{source_text}{profile_text}. You can adjust them below before running the Break-Even Governor.")
+        st.caption(f"Selected strategy context: {selected_strategy}{source_text}{profile_text}.")
     if preset_note:
         st.caption(preset_note)
-    render_top_nav("conversion")
-    
+
     inputs = render_shared_household_inputs()
 
     current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
@@ -6894,16 +6894,6 @@ def render_conversion_page() -> None:
     target_trad_override_max_rate = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"]))
     post_aca_target_bracket = str(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
     rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
-
-    st.subheader("Scenario / Profile Context")
-    scenario_name_display = str(st.session_state.get("loaded_scenario_name", "Unsaved session"))
-    profile_name_display = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
-    with st.container(border=True):
-        st.markdown(
-            f"**Scenario:** {scenario_name_display} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; "
-            f"**Active SS Strategy:** {active_strategy} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; "
-            f"**Profile:** {profile_name_display}"
-        )
 
     st.divider()
     with st.expander("SS Optimizer", expanded=False):
@@ -6933,6 +6923,15 @@ def render_conversion_page() -> None:
             st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
         current_preferences = extract_scoring_preferences(st.session_state)
         st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
+        trad_balance_penalty_lambda = st.slider(
+            "Traditional IRA penalty weight (raw optimizer ranking)",
+            min_value=0.0,
+            max_value=2.0,
+            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+            step=0.05,
+            help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
+            key="trad_balance_penalty_lambda",
+        )
         selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
         with st.container(border=True):
             st.markdown(f"**{selection_summary['title']}**")
@@ -7142,12 +7141,12 @@ def render_conversion_page() -> None:
                 current_governor_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
                 recommended_strategy_label = str(top_strategy['Strategy'])
                 if current_governor_strategy == recommended_strategy_label:
-                    st.success(f"Governor currently matches the recommended quick strategy: {recommended_strategy_label}")
+                    st.success(f"Current active strategy matches the recommended quick scan strategy: {recommended_strategy_label}")
                 else:
-                    st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Governor is currently set to {current_governor_strategy}.")
+                    st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Current active strategy is {current_governor_strategy}.")
                 st.caption("Quick Scan is the fast directional answer from the 7 anchor strategies above. Use the button below to load this result into the Governor, or run the full 81-combination scan first if you want exhaustive confirmation.")
                 st.button(
-                    "Apply Quick Scan Winner to Governor",
+                    "Apply Quick Scan Winner to Retirement Optimizer",
                     on_click=launch_conversion_optimizer_from_strategy,
                     args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
                     use_container_width=True,
