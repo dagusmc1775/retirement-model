@@ -6822,7 +6822,7 @@ def render_shared_household_inputs() -> dict:
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.title("Conversion Optimizer")
+    st.title("Retirement Optimizer")
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
@@ -6834,19 +6834,22 @@ def render_conversion_page() -> None:
         ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
         if ranked_rows:
             quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
-    st.success(f"Active SS Strategy in Governor: {active_strategy}")
     applied_notice = st.session_state.get("governor_strategy_applied_notice")
+    render_top_nav("conversion")
+    scenario_name_display = str(st.session_state.get("loaded_scenario_name", "Unsaved session"))
+    profile_name_display = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
+    banner_parts = [
+        f"**Scenario:** {scenario_name_display}",
+        f"**Active SS Strategy:** {active_strategy}",
+    ]
+    if quick_winner_strategy:
+        banner_parts.append(f"**Quick Winner:** {quick_winner_strategy}")
+    banner_parts.append(f"**Profile:** {profile_name_display}")
+    st.caption(" | ".join(banner_parts))
     if applied_notice:
         st.caption(applied_notice)
-    if quick_winner_strategy and quick_winner_strategy != active_strategy:
-        st.warning(f"Quick recommendation winner is {quick_winner_strategy}. Governor is currently set to {active_strategy}.")
-    if selected_strategy:
-        source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
-        profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
-        st.info(f"Using Social Security claim ages {selected_strategy}{source_text}{profile_text}. You can adjust them below before running the Break-Even Governor.")
     if preset_note:
         st.caption(preset_note)
-    render_top_nav("conversion")
     
     inputs = render_shared_household_inputs()
 
@@ -6869,18 +6872,8 @@ def render_conversion_page() -> None:
     post_aca_target_bracket = str(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
     rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
 
-    st.subheader("Scenario / Profile Context")
-    scenario_name_display = str(st.session_state.get("loaded_scenario_name", "Unsaved session"))
-    profile_name_display = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
-    with st.container(border=True):
-        st.markdown(
-            f"**Scenario:** {scenario_name_display} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; "
-            f"**Active SS Strategy:** {active_strategy} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; "
-            f"**Profile:** {profile_name_display}"
-        )
-
     st.divider()
-    with st.expander("Quick Strategy Recommendation", expanded=False):
+    with st.expander("SS Optimizer", expanded=False):
         st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
         st.caption("Workflow: change assumptions or modifiers, then run Quick Strategy Recommendation again. Any existing quick recommendation shown below is only valid for the inputs and modifiers used when it was generated.")
         planning_profile = st.selectbox(
@@ -6922,8 +6915,8 @@ def render_conversion_page() -> None:
 
         rec_col1, rec_col2 = st.columns([1, 2])
         with rec_col1:
-            if st.button("Run Quick Strategy Recommendation", use_container_width=True):
-                with st.spinner("Running quick strategy recommendation..."):
+            if st.button("Run Quick Scan", use_container_width=True):
+                with st.spinner("Running Quick Scan..."):
                     recommendation_result = run_quick_strategy_recommendation(
                         inputs=inputs,
                         max_conversion=max_conversion,
@@ -6937,8 +6930,8 @@ def render_conversion_page() -> None:
                 st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
                 mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
         with rec_col2:
-            st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. It uses a clean recommendation context with a fixed internal conversion cap/step so current Governor execution settings do not distort the quick ranking. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
-            st.caption("Changing modifiers does not update an existing quick recommendation automatically. Run the quick recommendation again after any modifier change.")
+            st.caption("Quick Scan compares 62/62, 67/67, 70/70, 70/67, and 67/70. It is the fast directional view. Use Full 81 only when you need exhaustive confirmation.")
+            st.caption("Changing assumptions or modifiers does not update an existing quick scan automatically. Run Quick Scan again after any change.")
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
         if quick_result is not None:
@@ -7057,8 +7050,9 @@ def render_conversion_page() -> None:
                         f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
                     )
                 if tradeoff_lines:
-                    tradeoff_block = "**Tradeoff Details**\n\n" + "\n\n".join(tradeoff_lines)
-                    st.markdown(tradeoff_block)
+                    st.markdown("**Tradeoff Details**")
+                    for line in tradeoff_lines:
+                        st.write(line)
             with st.expander("Quick Recommendation Snapshot", expanded=False):
                 default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
@@ -7560,8 +7554,14 @@ def render_conversion_page() -> None:
     )
 
     if "annual_calc_year" in st.session_state:
-        st.caption(
-            f"Annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, Social Security ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+        st.markdown(
+            f"**Annual calculator snapshot in session**  \n"
+            f"Year: {int(st.session_state['annual_calc_year'])} | "
+            f"Filing: {st.session_state.get('annual_calc_filing_status', 'MFJ')} | "
+            f"Earned income: ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f} | "
+            f"Other ordinary income: ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f} | "
+            f"LTCG: ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f} | "
+            f"Social Security: ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}"
         )
 
     if run_ss_optimizer_toggle:
