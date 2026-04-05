@@ -1329,7 +1329,7 @@ def score_strategy_metrics(
             **metrics,
             "score": float(score),
             "score_100": float(score * 100.0),
-            "lambda_penalty_dollars": float(lambda_penalty_dollars),
+            "lambda_penalty_dollars": float((locals().get("lambda_penalty_trad",0) + locals().get("lambda_penalty_ss",0))),
             "lambda_penalty_score": float(lambda_penalty_score),
             "stability_label": qualitative_bucket(stability_adjusted),
             "risk_label": qualitative_bucket(risk_penalty, reverse=True),
