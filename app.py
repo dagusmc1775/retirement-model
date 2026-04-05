@@ -1,4 +1,3 @@
-
 # version: hard-target-depletion-v22
 # version: override-valuation-columns
 # version: target-trad-override-v3-relaxed-cap
@@ -2311,6 +2310,8 @@ def build_break_even_export_payload(result: dict) -> str:
 def render_scenario_manager(current_page: str) -> None:
     with st.expander("Scenarios / Snapshots", expanded=False):
         st.caption("Open or save scenarios, and open saved recommendation snapshots from the same section.")
+
+        st.markdown("**Scenarios**")
         upload_key = f"scenario_upload_{current_page}"
         opened_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
         open_col1, open_col2 = st.columns([1, 3])
@@ -2341,7 +2342,6 @@ def render_scenario_manager(current_page: str) -> None:
             except Exception as exc:
                 st.error(f"Could not open scenario: {exc}")
 
-        st.divider()
         sync_scenario_name_widget_default()
         st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
@@ -2353,10 +2353,10 @@ def render_scenario_manager(current_page: str) -> None:
             mime="application/json",
             use_container_width=True,
         )
-        if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
-            reset_scenario_state()
-            st.success("Inputs reset to defaults.")
-            st.rerun()
+
+        st.divider()
+        st.markdown("**Snapshots**")
+        render_snapshot_open_controls()
 
 
 
@@ -6764,51 +6764,35 @@ def get_app_page() -> str:
 
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
+    nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
+    with nav1:
+        st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
+    with nav2:
+        st.button(
+            "Annual Calculator",
+            on_click=go_to_page,
+            args=("annual",),
+            disabled=current_page == "annual",
+            use_container_width=True,
+        )
+    with nav3:
+        st.button(
+            "Conversion Optimizer",
+            on_click=go_to_page,
+            args=("conversion",),
+            disabled=current_page == "conversion",
+            use_container_width=True,
+        )
+    with nav4:
+        if st.button("Reset App State", key=f"reset_app_state_nav_{current_page}", use_container_width=True):
+            preserved_page = st.session_state.get("app_page", "home")
+            st.session_state.clear()
+            st.session_state["app_state_version"] = APP_STATE_VERSION
+            st.session_state["app_page"] = preserved_page
+            st.rerun()
     render_scenario_identity_bar(current_page)
-    if current_page == "home":
-        nav1, nav2, nav3 = st.columns([1, 1, 1])
-        with nav1:
-            st.button("Home", on_click=go_to_page, args=("home",), disabled=True, use_container_width=True)
-        with nav2:
-            st.button(
-                "Annual Calculator",
-                on_click=go_to_page,
-                args=("annual",),
-                disabled=False,
-                use_container_width=True,
-            )
-        with nav3:
-            st.button(
-                "Conversion Optimizer",
-                on_click=go_to_page,
-                args=("conversion",),
-                disabled=False,
-                use_container_width=True,
-            )
-    else:
-        nav1, nav2, nav3 = st.columns([1, 1, 1])
-        with nav1:
-            st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
-        with nav2:
-            st.button(
-                "Annual Calculator",
-                on_click=go_to_page,
-                args=("annual",),
-                disabled=current_page == "annual",
-                use_container_width=True,
-            )
-        with nav3:
-            st.button(
-                "Conversion Optimizer",
-                on_click=go_to_page,
-                args=("conversion",),
-                disabled=current_page == "conversion",
-                use_container_width=True,
-            )
     st.divider()
     render_scenario_manager(current_page)
-    with st.expander("Snapshot Open", expanded=False):
-        render_snapshot_open_controls()
 
 
 def render_home_page() -> None:
@@ -7899,7 +7883,6 @@ def main() -> None:
     apply_app_state_version_guard()
     ensure_default_state()
     preserve_session_state_across_pages()
-    render_app_state_controls()
     current_page = get_app_page()
     if current_page == "home":
         render_home_page()
