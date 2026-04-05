@@ -755,69 +755,152 @@ def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict
 
 def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_name: str) -> tuple[dict, dict]:
     """
-    Build a clean quick-recommendation input package from current visible inputs only.
-    This deliberately ignores live governor execution controls like the currently selected
-    SS pair, max conversion cap to test, and any mutated downstream session state.
+    Build a clean quick-recommendation input package from the live scenario inputs.
+    Quick Scan should use the same core engine inputs as the Full 81 scan; the only
+    intended difference is the reduced SS-claim candidate universe.
     """
-    base = {
-        "trad": float(current_inputs.get("trad", 0.0)),
-        "roth": float(current_inputs.get("roth", 0.0)),
-        "brokerage": float(current_inputs.get("brokerage", 0.0)),
-        "brokerage_basis": float(min(current_inputs.get("brokerage_basis", current_inputs.get("brokerage", 0.0)), current_inputs.get("brokerage", 0.0))),
-        "cash": float(current_inputs.get("cash", 0.0)),
-        "growth": float(current_inputs.get("growth", 0.0)),
-        "annual_spending": float(current_inputs.get("annual_spending", 0.0)),
-        "spending_inflation_rate": float(current_inputs.get("spending_inflation_rate", 0.0)),
-        "retirement_smile_enabled": bool(current_inputs.get("retirement_smile_enabled", False)),
-        "go_go_end_age": int(current_inputs.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
-        "slow_go_end_age": int(current_inputs.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
-        "go_go_multiplier": float(current_inputs.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
-        "slow_go_multiplier": float(current_inputs.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
-        "no_go_multiplier": float(current_inputs.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
-        "annual_conversion": 0.0,
-        "conversion_tax_funding_policy": str(current_inputs.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"])),
-        "owner_current_age": int(current_inputs.get("owner_current_age", 0)),
-        "spouse_current_age": int(current_inputs.get("spouse_current_age", 0)),
-        "owner_claim_age": 62,
-        "spouse_claim_age": 62,
-        "owner_ss_base": float(current_inputs.get("owner_ss_base", 0.0)),
-        "spouse_ss_base": float(current_inputs.get("spouse_ss_base", 0.0)),
-        "earned_income_annual": float(current_inputs.get("earned_income_annual", 0.0)),
-        "earned_income_start_year": int(current_inputs.get("earned_income_start_year", START_YEAR)),
-        "earned_income_end_year": int(current_inputs.get("earned_income_end_year", START_YEAR)),
-        "primary_aca_end_year": int(current_inputs.get("primary_aca_end_year", START_YEAR)),
-        "spouse_aca_end_year": int(current_inputs.get("spouse_aca_end_year", START_YEAR)),
-        "preference_maximize_social_security": bool(current_inputs.get("preference_maximize_social_security", False)),
-        "preference_minimize_trad_ira_for_heirs": bool(current_inputs.get("preference_minimize_trad_ira_for_heirs", False)),
-        "preference_income_stability_focus": bool(current_inputs.get("preference_income_stability_focus", False)),
-        "cash_sweep_threshold": float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
-        "state_tax_rate": float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])),
-        "post_aca_target_bracket": DEFAULT_APP_STATE["post_aca_target_bracket"],
-        "rmd_era_target_bracket": DEFAULT_APP_STATE["rmd_era_target_bracket"],
-        "target_trad_balance_enabled": False,
-        "target_trad_balance": 0.0,
-        "target_trad_override_enabled": False,
-        "target_trad_override_max_rate": 0.0,
+    adjusted = copy.deepcopy(current_inputs)
+    adjusted["planning_profile"] = profile_name
+    adjusted["selected_recommendation_profile"] = profile_name
+    return adjusted, {"preset_note": ""}
+
+
+def build_ss_optimizer_result_row(
+    run_result: dict,
+    owner_age: int,
+    spouse_age: int,
+    trad_balance_penalty_lambda: float = 1.00,
+) -> dict:
+    metrics = build_strategy_metrics(run_result)
+    trad_penalty_applied = float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"])
+    return {
+        "Owner SS Age": int(owner_age),
+        "Spouse SS Age": int(spouse_age),
+        "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
+        "Final Net Worth": float(run_result["final_net_worth"]),
+        "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+        "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+        "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+        "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+        "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+        "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+        "Stability Value": float(metrics["stability_value"]),
+        "Risk Value": float(metrics["risk_value"]),
+        "Final Household SS Income": float(metrics["final_household_ss_income"]),
+        "Survivor SS Income": float(metrics["survivor_ss_income"]),
+        "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+        "Total Federal Tax": float(run_result["total_federal_taxes"]),
+        "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+        "Total ACA Cost": float(run_result["total_aca_cost"]),
+        "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
+        "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+        "Total Conversions": float(run_result["total_conversions"]),
+        "Ending Traditional IRA Balance": float(run_result["ending_trad_balance"]),
+        "First IRMAA Year": run_result["first_irmaa_year"],
+        "Max MAGI": float(run_result["max_magi"]),
+        "ACA Hit Years": int(run_result["aca_hit_years"]),
+        "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
+        "Traditional IRA Penalty Applied": trad_penalty_applied,
+        "Score": float(run_result["final_net_worth"]) - trad_penalty_applied,
     }
-    adjusted, preset = build_profile_adjusted_inputs(profile_name, base)
-    adjusted["quick_recommendation_max_conversion"] = QUICK_RECOMMENDATION_MAX_CONVERSION
-    adjusted["quick_recommendation_step_size"] = QUICK_RECOMMENDATION_STEP_SIZE
-    return adjusted, preset
+
+
+def build_ss_optimizer_fact_rows(
+    inputs: dict,
+    combos: list[tuple[int, int]],
+    max_conversion: float,
+    step_size: float,
+    trad_balance_penalty_lambda: float = 1.00,
+    progress_text: str | None = None,
+    cache_namespace: str = "_ss_optimizer_fact_rows_cache",
+) -> tuple[list[dict], list[str]]:
+    cache = st.session_state.setdefault(cache_namespace, {})
+    base_snapshot = copy.deepcopy(inputs)
+    base_snapshot["integrity_mode"] = False
+    base_snapshot["strict_repeatability_check"] = False
+    fact_key = build_scenario_fingerprint(
+        {**base_snapshot, "combos": [(int(a), int(b)) for a, b in combos], "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda)},
+        max_conversion,
+        step_size,
+    )
+    cached = cache.get(fact_key)
+    if isinstance(cached, dict):
+        cached_rows = copy.deepcopy(cached.get("rows", []))
+        cached_errors = copy.deepcopy(cached.get("errors", []))
+        if cached_rows:
+            return cached_rows, cached_errors
+
+    rows: list[dict] = []
+    errors: list[str] = []
+    total = len(combos)
+    progress_bar = st.progress(0.0, text=progress_text or "Running optimizer...") if total else None
+    for idx, (owner_age, spouse_age) in enumerate(combos, start=1):
+        scenario_inputs = dict(base_snapshot)
+        scenario_inputs["owner_claim_age"] = int(owner_age)
+        scenario_inputs["spouse_claim_age"] = int(spouse_age)
+        try:
+            run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+            rows.append(build_ss_optimizer_result_row(run_result, owner_age, spouse_age, trad_balance_penalty_lambda=trad_balance_penalty_lambda))
+        except Exception as exc:
+            errors.append(f"{owner_age}/{spouse_age}: {exc}")
+        finally:
+            if progress_bar is not None:
+                progress_bar.progress(idx / total, text=(progress_text or "Running optimizer...").split('...')[0] + f"... {idx}/{total}")
+    if progress_bar is not None:
+        progress_bar.empty()
+    cache[fact_key] = {"rows": copy.deepcopy(rows), "errors": copy.deepcopy(errors)}
+    if len(cache) > 6:
+        while len(cache) > 6:
+            cache.pop(next(iter(cache)))
+    return rows, errors
 
 
 def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion: float, quick_step_size: float) -> tuple[list[dict], list[str]]:
     """
     Build or reuse the quick-scan fact set used by SS Optimizer Quick Scan.
     This intentionally tests only a small anchor set so the quick scan stays fast.
+    The underlying per-strategy evaluation path must match the Full 81 scan.
     """
-    cache = st.session_state.setdefault("_quick_recommendation_factset_cache", {})
-    fact_key = build_scenario_fingerprint(base_inputs, quick_max_conversion, quick_step_size)
-    cached = cache.get(fact_key)
-    if isinstance(cached, dict):
-        metric_rows = copy.deepcopy(cached.get("metric_rows", []))
-        errors = copy.deepcopy(cached.get("errors", []))
-        if metric_rows:
-            return metric_rows, errors
+    result_rows, errors = build_ss_optimizer_fact_rows(
+        base_inputs,
+        QUICK_STRATEGY_COMBOS,
+        quick_max_conversion,
+        quick_step_size,
+        trad_balance_penalty_lambda=float(base_inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+        progress_text="Running Quick Scan... 0/7",
+        cache_namespace="_quick_recommendation_factset_cache",
+    )
+    metric_rows: list[dict] = []
+    for row in result_rows:
+        metric_rows.append({
+            "Strategy": str(row.get("Strategy", "")),
+            "Owner SS Age": int(row.get("Owner SS Age", 0)),
+            "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", 0.0)),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+    return metric_rows, errors
 
     metric_rows: list[dict] = []
     errors: list[str] = []
@@ -1572,8 +1655,8 @@ def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
 def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
     if len(ranked_rows) < 2:
         return False
-    top_score = float(ranked_rows[0].get("score", 0.0))
-    second_score = float(ranked_rows[1].get("score", 0.0))
+    top_score = float(ranked_rows[0].get("score", ranked_rows[0].get("Score", 0.0)))
+    second_score = float(ranked_rows[1].get("score", ranked_rows[1].get("Score", 0.0)))
     denom = max(abs(top_score), 1e-9)
     return abs(top_score - second_score) / denom <= tolerance_pct
 
@@ -1629,35 +1712,47 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
 
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
-    _ = max_conversion
-    _ = step_size
     preferences = extract_scoring_preferences(inputs)
     base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
-    quick_max_conversion = sanitize_governor_max_conversion(float(base_inputs.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION)))
-    quick_step_size = sanitize_governor_step_size(float(base_inputs.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE)))
-    metric_rows, errors = build_quick_recommendation_fact_rows(base_inputs, quick_max_conversion, quick_step_size)
-    if not metric_rows:
+    quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
+    quick_step_size = sanitize_governor_step_size(float(step_size))
+
+    quick_rows, errors = build_ss_optimizer_fact_rows(
+        base_inputs,
+        QUICK_STRATEGY_COMBOS,
+        quick_max_conversion,
+        quick_step_size,
+        trad_balance_penalty_lambda=float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+        progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
+        cache_namespace="_quick_recommendation_result_rows_cache",
+    )
+    if not quick_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
-    ranked = score_strategy_metrics(
-        metric_rows,
+
+    ranked_df = build_ranked_optimizer_results_df(
+        quick_rows,
         profile_name,
         preferences=preferences,
         trad_balance_penalty_lambda=float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
     )
+    ranked = ranked_df.to_dict("records")
+
     summary_rows = []
-    for row in ranked[:10]:
+    for _, row in ranked_df.head(10).iterrows():
         summary_rows.append({
             "Strategy": row["Strategy"],
-            "Score": row["score_100"],
-            "Net Worth": row["Final Net Worth"],
-            "After-Tax Legacy": row["After-Tax Legacy"],
-            "Trad IRA @ End": row["Ending Traditional IRA Balance"],
-            "Roth @ End": row["Roth @ End"],
-            "Brokerage @ End": row["Brokerage @ End"],
-            "Stability": row["stability_label"],
-            "Risk": row["risk_label"],
-            "Final Household SS Income": row["Final Household SS Income"],
-            "Survivor SS Income": row["Survivor SS Income"],
+            "Score": float(row.get("Score", 0.0)),
+            "Net Worth": float(row.get("Final Net Worth", 0.0)),
+            "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "Trad IRA @ End": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "Roth @ End": float(row.get("Ending Roth Balance", 0.0)),
+            "Brokerage @ End": float(row.get("Ending Brokerage Balance", 0.0)),
+            "Stability": row.get("Stability", ""),
+            "Risk": row.get("Risk", ""),
+            "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
+            "Survivor SS Income": float(row.get("Survivor SS Income", 0.0)),
+            "Owner SS Age": int(row.get("Owner SS Age", 0)),
+            "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
         })
     summary_df = pd.DataFrame(summary_rows)
     explanation = generate_advisor_interpretation(profile_name, ranked)
@@ -1669,10 +1764,10 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
-        "data_source": "full_81_quick_recommendation",
+        "data_source": "quick_subset_same_engine",
         "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
-        "strategy_universe_size": len(metric_rows),
+        "strategy_universe_size": len(quick_rows),
     }
 
 
@@ -4983,38 +5078,12 @@ def run_ss_optimizer(
                     "error_message": st.session_state["ss_optimizer_error"],
                 }, engine="ss_optimizer")
 
-            trad_penalty_applied = float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"])
-            metrics = build_strategy_metrics(run_result)
-            row = {
-                "Owner SS Age": int(owner_age),
-                "Spouse SS Age": int(spouse_age),
-                "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
-                "Final Net Worth": float(run_result["final_net_worth"]),
-                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
-                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
-                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
-                "Ending Roth Balance": float(metrics["ending_roth_balance"]),
-                "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
-                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
-                "Stability Value": float(metrics["stability_value"]),
-                "Risk Value": float(metrics["risk_value"]),
-                "Final Household SS Income": float(metrics["final_household_ss_income"]),
-                "Survivor SS Income": float(metrics["survivor_ss_income"]),
-                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
-                "Total Federal Tax": float(run_result["total_federal_taxes"]),
-                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
-                "Total ACA Cost": float(run_result["total_aca_cost"]),
-                "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
-                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
-                "Total Conversions": float(run_result["total_conversions"]),
-                "Ending Traditional IRA Balance": float(run_result["ending_trad_balance"]),
-                "First IRMAA Year": run_result["first_irmaa_year"],
-                "Max MAGI": float(run_result["max_magi"]),
-                "ACA Hit Years": int(run_result["aca_hit_years"]),
-                "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
-                "Traditional IRA Penalty Applied": trad_penalty_applied,
-                "Score": float(run_result["final_net_worth"]) - trad_penalty_applied,
-            }
+            row = build_ss_optimizer_result_row(
+                run_result,
+                owner_age,
+                spouse_age,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            )
             results.append(row)
             st.session_state["ss_optimizer_partial_results"] = results
             st.session_state["ss_optimizer_progress_index"] = combo_index + 1
@@ -7056,6 +7125,25 @@ def render_conversion_page() -> None:
                 help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
                 key="trad_balance_penalty_lambda",
             )
+        integrity_col1, integrity_col2 = st.columns([1, 1])
+        with integrity_col1:
+            st.checkbox(
+                "Enable integrity check",
+                key="integrity_mode",
+                help="When enabled, the optimizer reruns and validates the selected best result for repeatability.",
+            )
+        with integrity_col2:
+            st.number_input(
+                "Validation tolerance",
+                min_value=0.0,
+                value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
+                step=0.01,
+                key="validation_tolerance",
+                help="Absolute tolerance used by the integrity rerun comparison.",
+            )
+        integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+        validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
+
         selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
         with st.container(border=True):
             st.markdown(f"**{selection_summary['title']}**")
@@ -7109,7 +7197,7 @@ def render_conversion_page() -> None:
                     mark_result_state("ss_optimizer", optimizer_hash_inputs)
                 st.rerun()
         with rec_col3:
-            st.caption("Run Quick Scan for a fast directional answer using 7 anchor strategies: 62/62, 67/67, 70/70, 70/67, 67/70, 62/67, and 67/62.")
+            st.caption("Run Quick Scan for a fast directional answer using the same core engine as the Full 81 scan, but limited to 7 anchor strategies: 62/62, 67/67, 70/70, 70/67, 67/70, 62/67, and 67/62.")
             st.caption("Run Full 81-Combination Scan when you want exhaustive confirmation and progress feedback. Changing modifiers does not update an existing quick scan automatically. Run the quick scan again after any modifier change.")
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
@@ -7122,7 +7210,7 @@ def render_conversion_page() -> None:
             else:
                 render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick scan results")
             st.subheader("Quick Scan Summary")
-            st.caption("These strategy rows come from the full 81-combination recommendation universe, scored using the selected planning profile and current modifiers in a clean recommendation context. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+            st.caption("These strategy rows use the same core engine and ranking path as the Full 81 scan, but only over the 7 quick-scan anchor strategies. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
             if quick_result.get("applied_preset_note"):
                 st.caption(quick_result["applied_preset_note"])
             st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
