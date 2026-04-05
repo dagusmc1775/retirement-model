@@ -1213,12 +1213,11 @@ def build_ranked_optimizer_results_df(
 
 
 def score_strategy_metrics(
-
-    # --- Ensure penalty variables always initialized ---
     lambda_penalty_trad = 0.0
     lambda_penalty_ss = 0.0
     lambda_penalty_dollars = 0.0
     lambda_penalty_score = 0.0
+
     metrics_list: list[dict],
     profile_name: str,
     preferences: dict | None = None,
