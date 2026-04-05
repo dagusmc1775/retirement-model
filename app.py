@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v142-unified-ss-pipeline"
+APP_VERSION = "v139-unified-ss-pipeline"
 APP_STATE_VERSION = "v103"
 
 
@@ -755,53 +755,60 @@ def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict
 
 def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_name: str) -> tuple[dict, dict]:
     """
-    Build the quick-scan input package from the same live scenario inputs used by the
-    full 81-combination optimizer. Quick and Full must evaluate the same scenario facts;
-    only the presentation layer is allowed to differ.
+    Build a clean quick-recommendation input package from current visible inputs only.
+    This deliberately ignores live governor execution controls like the currently selected
+    SS pair, max conversion cap to test, and any mutated downstream session state.
     """
-    base = copy.deepcopy(current_inputs)
-    base["trad"] = float(base.get("trad", 0.0))
-    base["roth"] = float(base.get("roth", 0.0))
-    base["brokerage"] = float(base.get("brokerage", 0.0))
-    base["brokerage_basis"] = float(min(base.get("brokerage_basis", base.get("brokerage", 0.0)), base.get("brokerage", 0.0)))
-    base["cash"] = float(base.get("cash", 0.0))
-    base["growth"] = float(base.get("growth", 0.0))
-    base["annual_spending"] = float(base.get("annual_spending", 0.0))
-    base["spending_inflation_rate"] = float(base.get("spending_inflation_rate", 0.0))
-    base["retirement_smile_enabled"] = bool(base.get("retirement_smile_enabled", False))
-    base["go_go_end_age"] = int(base.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"]))
-    base["slow_go_end_age"] = int(base.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"]))
-    base["go_go_multiplier"] = float(base.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"]))
-    base["slow_go_multiplier"] = float(base.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"]))
-    base["no_go_multiplier"] = float(base.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"]))
-    base["conversion_tax_funding_policy"] = str(base.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"]))
-    base["owner_current_age"] = int(base.get("owner_current_age", 0))
-    base["spouse_current_age"] = int(base.get("spouse_current_age", 0))
-    base["owner_ss_base"] = float(base.get("owner_ss_base", 0.0))
-    base["spouse_ss_base"] = float(base.get("spouse_ss_base", 0.0))
-    base["earned_income_annual"] = float(base.get("earned_income_annual", 0.0))
-    base["earned_income_start_year"] = int(base.get("earned_income_start_year", START_YEAR))
-    base["earned_income_end_year"] = int(base.get("earned_income_end_year", START_YEAR))
-    base["primary_aca_end_year"] = int(base.get("primary_aca_end_year", START_YEAR))
-    base["spouse_aca_end_year"] = int(base.get("spouse_aca_end_year", START_YEAR))
-    base["cash_sweep_threshold"] = float(base.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"]))
-    base["state_tax_rate"] = float(base.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"]))
-    base["post_aca_target_bracket"] = str(base.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
-    base["rmd_era_target_bracket"] = str(base.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
-    base["target_trad_balance_enabled"] = bool(base.get("target_trad_balance_enabled", False))
-    base["target_trad_balance"] = float(base.get("target_trad_balance", 0.0))
-    base["target_trad_override_enabled"] = bool(base.get("target_trad_override_enabled", False))
-    base["target_trad_override_max_rate"] = float(base.get("target_trad_override_max_rate", 0.0))
-    base["planning_profile"] = profile_name
-    base["selected_recommendation_profile"] = profile_name
-    return base, {"preset_note": "Quick Scan uses the same live scenario inputs and governor settings as the full 81-combination scan."}
+    base = {
+        "trad": float(current_inputs.get("trad", 0.0)),
+        "roth": float(current_inputs.get("roth", 0.0)),
+        "brokerage": float(current_inputs.get("brokerage", 0.0)),
+        "brokerage_basis": float(min(current_inputs.get("brokerage_basis", current_inputs.get("brokerage", 0.0)), current_inputs.get("brokerage", 0.0))),
+        "cash": float(current_inputs.get("cash", 0.0)),
+        "growth": float(current_inputs.get("growth", 0.0)),
+        "annual_spending": float(current_inputs.get("annual_spending", 0.0)),
+        "spending_inflation_rate": float(current_inputs.get("spending_inflation_rate", 0.0)),
+        "retirement_smile_enabled": bool(current_inputs.get("retirement_smile_enabled", False)),
+        "go_go_end_age": int(current_inputs.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+        "slow_go_end_age": int(current_inputs.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+        "go_go_multiplier": float(current_inputs.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
+        "slow_go_multiplier": float(current_inputs.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
+        "no_go_multiplier": float(current_inputs.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
+        "annual_conversion": 0.0,
+        "conversion_tax_funding_policy": str(current_inputs.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"])),
+        "owner_current_age": int(current_inputs.get("owner_current_age", 0)),
+        "spouse_current_age": int(current_inputs.get("spouse_current_age", 0)),
+        "owner_claim_age": 62,
+        "spouse_claim_age": 62,
+        "owner_ss_base": float(current_inputs.get("owner_ss_base", 0.0)),
+        "spouse_ss_base": float(current_inputs.get("spouse_ss_base", 0.0)),
+        "earned_income_annual": float(current_inputs.get("earned_income_annual", 0.0)),
+        "earned_income_start_year": int(current_inputs.get("earned_income_start_year", START_YEAR)),
+        "earned_income_end_year": int(current_inputs.get("earned_income_end_year", START_YEAR)),
+        "primary_aca_end_year": int(current_inputs.get("primary_aca_end_year", START_YEAR)),
+        "spouse_aca_end_year": int(current_inputs.get("spouse_aca_end_year", START_YEAR)),
+        "preference_maximize_social_security": bool(current_inputs.get("preference_maximize_social_security", False)),
+        "preference_minimize_trad_ira_for_heirs": bool(current_inputs.get("preference_minimize_trad_ira_for_heirs", False)),
+        "preference_income_stability_focus": bool(current_inputs.get("preference_income_stability_focus", False)),
+        "cash_sweep_threshold": float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
+        "state_tax_rate": float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])),
+        "post_aca_target_bracket": DEFAULT_APP_STATE["post_aca_target_bracket"],
+        "rmd_era_target_bracket": DEFAULT_APP_STATE["rmd_era_target_bracket"],
+        "target_trad_balance_enabled": False,
+        "target_trad_balance": 0.0,
+        "target_trad_override_enabled": False,
+        "target_trad_override_max_rate": 0.0,
+    }
+    adjusted, preset = build_profile_adjusted_inputs(profile_name, base)
+    adjusted["quick_recommendation_max_conversion"] = QUICK_RECOMMENDATION_MAX_CONVERSION
+    adjusted["quick_recommendation_step_size"] = QUICK_RECOMMENDATION_STEP_SIZE
+    return adjusted, preset
 
 
 def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion: float, quick_step_size: float) -> tuple[list[dict], list[str]]:
     """
-    Build or reuse the exact same 81-combination fact universe used by the full optimizer.
-    Quick Scan must share the same candidate set and scenario inputs as Full Scan so the
-    ranking pipeline can produce the same winner under the same profile and modifiers.
+    Build or reuse the quick-scan fact set used by SS Optimizer Quick Scan.
+    This intentionally tests only a small anchor set so the quick scan stays fast.
     """
     cache = st.session_state.setdefault("_quick_recommendation_factset_cache", {})
     fact_key = build_scenario_fingerprint(base_inputs, quick_max_conversion, quick_step_size)
@@ -812,99 +819,52 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
         if metric_rows:
             return metric_rows, errors
 
-    optimizer_inputs_snapshot = {
-        **copy.deepcopy(base_inputs),
-        "max_conversion": float(quick_max_conversion),
-        "step_size": float(quick_step_size),
-        "trad_balance_penalty_lambda": float(base_inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-        "optimizer_is_profile_neutral": True,
-    }
-    optimizer_result = get_current_result_payload("ss_optimizer_last_result")
-    if optimizer_result is not None and optimizer_result.get("completed", False):
-        optimizer_hash = build_scenario_fingerprint(optimizer_inputs_snapshot)
-        if optimizer_result.get("input_hash") == optimizer_hash:
-            raw_results_df = optimizer_result.get("raw_results_df")
-            if isinstance(raw_results_df, pd.DataFrame) and not raw_results_df.empty:
-                metric_rows = []
-                for row in raw_results_df.to_dict("records"):
-                    metric_rows.append({
-                        "Strategy": str(row.get("Strategy", "")),
-                        "Owner SS Age": int(row.get("Owner SS Age", 0)),
-                        "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
-                        "final_net_worth": float(row.get("Final Net Worth", 0.0)),
-                        "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
-                        "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
-                        "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
-                        "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
-                        "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
-                        "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
-                        "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
-                        "stability_value": float(row.get("Stability Value", 0.0)),
-                        "risk_value": float(row.get("Risk Value", 0.0)),
-                        "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
-                        "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
-                        "social_security_present_value": float(row.get("Social Security Present Value", 0.0)),
-                        "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
-                        "Total State Tax": float(row.get("Total State Tax", 0.0)),
-                        "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
-                        "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
-                        "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
-                        "Total Conversions": float(row.get("Total Conversions", 0.0)),
-                        "Max MAGI": float(row.get("Max MAGI", 0.0)),
-                        "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
-                        "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
-                        "First IRMAA Year": row.get("First IRMAA Year"),
-                    })
-                cache[fact_key] = {"metric_rows": copy.deepcopy(metric_rows), "errors": []}
-                return metric_rows, []
-
     metric_rows: list[dict] = []
     errors: list[str] = []
-    all_combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
-    total_quick_combos = len(all_combos)
+    total_quick_combos = len(QUICK_STRATEGY_COMBOS)
     quick_progress = st.progress(0.0, text=f"Running Quick Scan... 0/{total_quick_combos}")
-    for idx, (owner_age, spouse_age) in enumerate(all_combos, start=1):
-        try:
-            scenario_inputs = copy.deepcopy(base_inputs)
-            scenario_inputs["owner_claim_age"] = int(owner_age)
-            scenario_inputs["spouse_claim_age"] = int(spouse_age)
-            run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
-            metrics = build_strategy_metrics(run_result)
-            metric_rows.append({
-                **metrics,
-                "Strategy": f"{owner_age}/{spouse_age}",
-                "Owner SS Age": int(owner_age),
-                "Spouse SS Age": int(spouse_age),
-                "Final Net Worth": float(metrics["final_net_worth"]),
-                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
-                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
-                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
-                "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
-                "Roth @ End": float(metrics["ending_roth_balance"]),
-                "Ending Roth Balance": float(metrics["ending_roth_balance"]),
-                "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
-                "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
-                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
-                "Stability Value": float(metrics["stability_value"]),
-                "Risk Value": float(metrics["risk_value"]),
-                "Final Household SS Income": float(metrics["final_household_ss_income"]),
-                "Survivor SS Income": float(metrics["survivor_ss_income"]),
-                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
-                "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
-                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
-                "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
-                "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
-                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
-                "Total Conversions": float(run_result.get("total_conversions", 0.0)),
-                "Max MAGI": float(run_result.get("max_magi", 0.0)),
-                "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
-                "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
-                "First IRMAA Year": run_result.get("first_irmaa_year"),
-            })
-        except Exception as exc:
-            errors.append(f"{owner_age}/{spouse_age}: {exc}")
-        finally:
-            quick_progress.progress(idx / total_quick_combos, text=f"Running Quick Scan... {idx}/{total_quick_combos}")
+    for idx, (owner_age, spouse_age) in enumerate(QUICK_STRATEGY_COMBOS, start=1):
+            try:
+                scenario_inputs = copy.deepcopy(base_inputs)
+                scenario_inputs["owner_claim_age"] = int(owner_age)
+                scenario_inputs["spouse_claim_age"] = int(spouse_age)
+                run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
+                metrics = build_strategy_metrics(run_result)
+                metric_rows.append({
+                    **metrics,
+                    "Strategy": f"{owner_age}/{spouse_age}",
+                    "Owner SS Age": int(owner_age),
+                    "Spouse SS Age": int(spouse_age),
+                    "Final Net Worth": float(metrics["final_net_worth"]),
+                    "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                    "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                    "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+                    "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+                    "Roth @ End": float(metrics["ending_roth_balance"]),
+                    "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+                    "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
+                    "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+                    "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+                    "Stability Value": float(metrics["stability_value"]),
+                    "Risk Value": float(metrics["risk_value"]),
+                    "Final Household SS Income": float(metrics["final_household_ss_income"]),
+                    "Survivor SS Income": float(metrics["survivor_ss_income"]),
+                    "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+                    "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
+                    "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                    "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
+                    "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
+                    "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                    "Total Conversions": float(run_result.get("total_conversions", 0.0)),
+                    "Max MAGI": float(run_result.get("max_magi", 0.0)),
+                    "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
+                    "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
+                    "First IRMAA Year": run_result.get("first_irmaa_year"),
+                })
+            except Exception as exc:
+                errors.append(f"{owner_age}/{spouse_age}: {exc}")
+            finally:
+                quick_progress.progress(idx / total_quick_combos, text=f"Running Quick Scan... {idx}/{total_quick_combos}")
 
     quick_progress.empty()
     cache[fact_key] = {"metric_rows": copy.deepcopy(metric_rows), "errors": copy.deepcopy(errors)}
@@ -1263,7 +1223,6 @@ def score_strategy_metrics(
     trad_balance_penalty_lambda = max(0.0, float(trad_balance_penalty_lambda or 0.0))
 
     nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
-    max_ending_trad_balance = max([float(m.get("ending_traditional_ira_balance", 0.0)) for m in metrics_list] + [1.0])
     base_legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
     effective_legacy_norm = normalize_series([float(m.get("effective_legacy_value", m["after_tax_legacy"])) for m in metrics_list])
     heir_tax_drag_norm = normalize_series([float(m.get("heir_tax_drag", 0.0)) for m in metrics_list])
@@ -1362,11 +1321,8 @@ def score_strategy_metrics(
                 heir_structure_penalty *= 1.40
             preference_penalty += heir_structure_penalty
 
-        lambda_penalty_dollars = float(trad_balance_penalty_lambda) * float(metrics.get("ending_traditional_ira_balance", 0.0))
-        lambda_penalty_score = float(trad_balance_penalty_lambda) * (float(metrics.get("ending_traditional_ira_balance", 0.0)) / max_ending_trad_balance)
-
         positive_score += preference_bonus
-        negative_score += preference_penalty + lambda_penalty_score
+        negative_score += preference_penalty
         score = positive_score - negative_score
 
         scored.append({
@@ -1672,8 +1628,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     _ = step_size
     preferences = extract_scoring_preferences(inputs)
     base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
-    quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
-    quick_step_size = sanitize_governor_step_size(float(step_size))
+    quick_max_conversion = sanitize_governor_max_conversion(float(base_inputs.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION)))
+    quick_step_size = sanitize_governor_step_size(float(base_inputs.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE)))
     metric_rows, errors = build_quick_recommendation_fact_rows(base_inputs, quick_max_conversion, quick_step_size)
     if not metric_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
@@ -7120,7 +7076,7 @@ def render_conversion_page() -> None:
                         profile_name=planning_profile,
                     )
                 quick_hash_inputs, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
-                quick_hash_inputs.update({"max_conversion": sanitize_governor_max_conversion(float(max_conversion)), "step_size": sanitize_governor_step_size(float(step_size)), "planning_profile": planning_profile, "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda), "optimizer_is_profile_neutral": True})
+                quick_hash_inputs.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
                 recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
                 recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
                 st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
@@ -7148,8 +7104,8 @@ def render_conversion_page() -> None:
                     mark_result_state("ss_optimizer", optimizer_hash_inputs)
                 st.rerun()
         with rec_col3:
-            st.caption("Run Quick Scan to score the same full 81-strategy universe used by the exhaustive optimizer, using the same live scenario inputs, governor settings, profile, and modifiers.")
-            st.caption("Run Full 81-Combination Scan when you want the stored exhaustive result set, progress feedback, and reusable cached facts. Changing modifiers does not update an existing quick scan automatically. Run the quick scan again after any modifier change.")
+            st.caption("Run Quick Scan for a fast directional answer using 7 anchor strategies: 62/62, 67/67, 70/70, 70/67, 67/70, 62/67, and 67/62.")
+            st.caption("Run Full 81-Combination Scan when you want exhaustive confirmation and progress feedback. Changing modifiers does not update an existing quick scan automatically. Run the quick scan again after any modifier change.")
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
         if quick_result is not None:
