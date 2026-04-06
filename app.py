@@ -2095,6 +2095,46 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
     return guidance
 
 
+def build_strategy_scan_payload(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+    include_profile_shortlists: bool = True,
+) -> dict:
+    """
+    Shared post-candidate pipeline for BOTH Quick and Full.
+    After candidate generation, both scan types should call this same function so the
+    code path for evaluation outputs, scoring, ranking, primary rows, and comparison
+    rows is identical.
+    """
+    shared_outputs = build_scored_strategy_outputs(
+        results_rows,
+        inputs=inputs,
+        selected_profile_name=selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=shortlist_top_n,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "strategy scan ranked results")
+    primary_table_df = build_primary_strategy_table_df(ranked_df, top_n=primary_table_top_n)
+    comparison_df = build_top_strategy_comparison_df(ranked_df, top_n=comparison_top_n)
+    best_result = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
+    return {
+        "scoring_context": shared_outputs["scoring_context"],
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+        "best_result": best_result,
+        "profile_shortlists": shared_outputs["profile_shortlists"] if include_profile_shortlists else {},
+    }
+
+
+
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     preferences = extract_scoring_preferences(inputs)
     base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
@@ -8385,10 +8425,6 @@ def main() -> None:
     else:
         render_conversion_page()
 
-
-if __name__ == "__main__":
-    main()
-
 def get_shared_household_inputs_from_state() -> dict:
     """Read the same household/planning inputs from session state without rendering the full UI."""
     return {
@@ -8471,41 +8507,6 @@ def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.Dat
     return pd.DataFrame(compare_rows)
 
 
-def build_strategy_scan_payload(
-    results_rows: list[dict],
-    inputs: dict,
-    selected_profile_name: str,
-    preferences: dict | None = None,
-    trad_balance_penalty_lambda: float = 0.0,
-    shortlist_top_n: int = 10,
-    primary_table_top_n: int = 10,
-    comparison_top_n: int = 3,
-    include_profile_shortlists: bool = True,
-) -> dict:
-    """
-    Shared post-candidate pipeline for BOTH Quick and Full.
-    After candidate generation, both scan types should call this same function so the
-    code path for evaluation outputs, scoring, ranking, primary rows, and comparison
-    rows is identical.
-    """
-    shared_outputs = build_scored_strategy_outputs(
-        results_rows,
-        inputs=inputs,
-        selected_profile_name=selected_profile_name,
-        preferences=preferences or {},
-        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-        shortlist_top_n=shortlist_top_n,
-    )
-    ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "strategy scan ranked results")
-    primary_table_df = build_primary_strategy_table_df(ranked_df, top_n=primary_table_top_n)
-    comparison_df = build_top_strategy_comparison_df(ranked_df, top_n=comparison_top_n)
-    best_result = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
-    return {
-        "scoring_context": shared_outputs["scoring_context"],
-        "ranked_df": ranked_df,
-        "primary_table_df": primary_table_df,
-        "comparison_df": comparison_df,
-        "best_result": best_result,
-        "profile_shortlists": shared_outputs["profile_shortlists"] if include_profile_shortlists else {},
-    }
 
+if __name__ == "__main__":
+    main()
