@@ -215,6 +215,74 @@ def format_percent(value: float) -> str:
     except Exception:
         return str(value)
 
+OPTIMIZER_REQUIRED_COLUMNS = [
+    "Strategy",
+    "Owner SS Age",
+    "Spouse SS Age",
+    "Final Net Worth",
+    "Ending Traditional IRA Balance",
+    "Total Government Drag",
+    "Total Conversions",
+]
+
+OPTIMIZER_PROFILE_SCORE_COLUMNS = [
+    "Balanced Profile Score",
+    "Growth Profile Score",
+    "Tax-Efficient Profile Score",
+    "Legacy Profile Score",
+    "Spend With Confidence Profile Score",
+]
+
+
+def ensure_dataframe_columns(df: pd.DataFrame, required: list[str], name: str) -> pd.DataFrame:
+    if df is None:
+        raise ValueError(f"{name} is None")
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{name} missing required columns: {missing}")
+    return df
+
+
+def canonicalize_optimizer_result_df(df: pd.DataFrame, name: str = "optimizer results") -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    df = df.copy()
+
+    if "Selected Score" not in df.columns and "Score" in df.columns:
+        df["Selected Score"] = df["Score"]
+    if "Score" not in df.columns and "Selected Score" in df.columns:
+        df["Score"] = df["Selected Score"]
+
+    for col in OPTIMIZER_PROFILE_SCORE_COLUMNS:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    required = OPTIMIZER_REQUIRED_COLUMNS + ["Selected Score", "Score"]
+    return ensure_dataframe_columns(df, required, name)
+
+
+def get_selected_score_value(row) -> float:
+    if isinstance(row, pd.Series):
+        if "Selected Score" in row.index:
+            return float(row.get("Selected Score", 0.0))
+        if "Score" in row.index:
+            return float(row.get("Score", 0.0))
+        return 0.0
+    if isinstance(row, dict):
+        if "Selected Score" in row:
+            return float(row.get("Selected Score", 0.0))
+        if "Score" in row:
+            return float(row.get("Score", 0.0))
+        return 0.0
+    try:
+        return float(getattr(row, "Selected Score"))
+    except Exception:
+        return 0.0
+
 
 def _coerce_numeric_or_none(value):
     try:
@@ -1130,6 +1198,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Owner SS Age": int(ranked_row["Owner SS Age"]),
                 "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
                 "Selected Score": float(ranked_row["score_100"]),
+            "Score": float(ranked_row["score_100"]),
                 "Net Worth": float(ranked_row["final_net_worth"]),
                 "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
                 "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
@@ -1247,6 +1316,7 @@ def build_ranked_optimizer_results_df(
             "IRMAA Hit Years": int(ranked_row.get("IRMAA Hit Years", 0)),
             "Traditional IRA Penalty Applied": float(ranked_row.get("lambda_penalty_dollars", 0.0)),
             "Selected Score": float(ranked_row["score_100"]),
+            "Score": float(ranked_row["score_100"]),
             "Stability": ranked_row.get("stability_label", ""),
             "Risk": ranked_row.get("risk_label", ""),
             "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
@@ -5248,11 +5318,11 @@ def run_ss_optimizer(
             shortlist_top_n=5,
         )
         scoring_context = shared_outputs["scoring_context"]
-        results_df = shared_outputs["ranked_df"]
+        results_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "ss optimizer ranked results")
         profile_shortlists = shared_outputs["profile_shortlists"]
 
-        top_10_df = results_df.head(10).copy()
-        top_3 = results_df.head(3).copy()
+        top_10_df = canonicalize_optimizer_result_df(results_df.head(10).copy(), "ss optimizer top 10")
+        top_3 = canonicalize_optimizer_result_df(results_df.head(3).copy(), "ss optimizer top 3")
 
         compare_metrics = [
             ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
@@ -5269,7 +5339,7 @@ def run_ss_optimizer(
             ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
             ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
             ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
-            ("Selected Score", lambda r: format_dollars(r.get("Selected Score", r.get("Score", 0)))),
+            ("Selected Score", lambda r: format_dollars(get_selected_score_value(r))),
         ]
 
         compare_rows = []
@@ -5444,7 +5514,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if raw_best is not None:
         best = raw_best
         st.write(f"Current-profile exhaustive winner: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
-        st.write(f"Unified score: {best['Score']:.2f}")
+        st.write(f"Unified score: {get_selected_score_value(best):.2f}")
         st.write(f"Final Net Worth: {format_dollars(best['Final Net Worth'])}")
         st.write(f"Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
 
