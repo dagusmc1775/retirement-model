@@ -5269,7 +5269,7 @@ def run_ss_optimizer(
             ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
             ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
             ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
-            ("Score", lambda r: format_dollars(r["Score"])),
+            ("Selected Score", lambda r: format_dollars(r.get("Selected Score", r.get("Score", 0)))),
         ]
 
         compare_rows = []
