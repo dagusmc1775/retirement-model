@@ -1336,6 +1336,9 @@ def build_ranked_optimizer_results_df(
             "Tax-Efficient Profile Score": float(profile_score_maps.get("Tax-Efficient Stability", {}).get(ranked_row["Strategy"], 0.0)),
             "Legacy Profile Score": float(profile_score_maps.get("Legacy Focused", {}).get(ranked_row["Strategy"], 0.0)),
             "Spend With Confidence Profile Score": float(profile_score_maps.get("Spend With Confidence", {}).get(ranked_row["Strategy"], 0.0)),
+            "Max SS Modifier Score": float(ranked_row.get("max_ss_modifier_component", 0.0) * 100.0),
+            "Income Stability Modifier Score": float(ranked_row.get("income_stability_modifier_component", 0.0) * 100.0),
+            "Min Trad IRA Modifier Score": float(ranked_row.get("min_trad_ira_modifier_component", 0.0) * 100.0),
         })
 
     ranked_df = pd.DataFrame(rows)
@@ -1364,6 +1367,14 @@ def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) 
         "Spouse SS Age",
         "Selected Score",
         "Score",
+        "Balanced Profile Score",
+        "Growth Profile Score",
+        "Tax-Efficient Profile Score",
+        "Legacy Profile Score",
+        "Spend With Confidence Profile Score",
+        "Max SS Modifier Score",
+        "Income Stability Modifier Score",
+        "Min Trad IRA Modifier Score",
         "Final Net Worth",
         "After-Tax Legacy",
         "Effective Legacy Value",
@@ -1611,29 +1622,29 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
 
     preference_bonus = 0.0
     preference_penalty = 0.0
+
+    raw_max_ss_bonus = 0.24 * (ss_value_signal ** 1.20)
+    if profile_name == "Legacy Focused":
+        raw_max_ss_bonus *= 1.40
+    elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
+        raw_max_ss_bonus *= 1.15
     if preferences.get("maximize_social_security"):
-        ss_bonus = 0.24 * (ss_value_signal ** 1.20)
-        if profile_name == "Legacy Focused":
-            ss_bonus *= 1.40
-        elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
-            ss_bonus *= 1.15
-        preference_bonus += ss_bonus
+        preference_bonus += raw_max_ss_bonus
 
+    income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
+    raw_income_stability_bonus = 0.10 * income_stability_score
     if preferences.get("income_stability_focus"):
-        income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
-        preference_bonus += 0.10 * income_stability_score
-    else:
-        income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
+        preference_bonus += raw_income_stability_bonus
 
+    raw_min_trad_penalty = (
+        0.24 * (trad_share_penalty_base ** 2.10)
+        + 0.24 * (heir_tax_penalty_base ** 1.35)
+        + 0.10 * (trad_penalty_base ** 1.20)
+    )
+    if profile_name == "Legacy Focused":
+        raw_min_trad_penalty *= 1.40
     if preferences.get("minimize_trad_ira_for_heirs"):
-        heir_structure_penalty = (
-            0.24 * (trad_share_penalty_base ** 2.10)
-            + 0.24 * (heir_tax_penalty_base ** 1.35)
-            + 0.10 * (trad_penalty_base ** 1.20)
-        )
-        if profile_name == "Legacy Focused":
-            heir_structure_penalty *= 1.40
-        preference_penalty += heir_structure_penalty
+        preference_penalty += raw_min_trad_penalty
 
     lambda_penalty_dollars = trad_balance_penalty_lambda * float(scoring_input.get("ending_traditional_ira_balance", 0.0))
     lambda_penalty_score = safe_ratio(lambda_penalty_dollars, starting_assets * 10.0)
@@ -1662,6 +1673,9 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
         "risk_component": float(risk_component),
         "heir_tax_component": float(heir_tax_component),
         "ss_value_component": float(0.14 * (ss_value_signal ** 1.10) if preferences.get("maximize_social_security") else 0.0),
+        "max_ss_modifier_component": float(raw_max_ss_bonus),
+        "income_stability_modifier_component": float(raw_income_stability_bonus),
+        "min_trad_ira_modifier_component": float(raw_min_trad_penalty),
         "preference_bonus_component": float(preference_bonus),
         "preference_penalty_component": float(preference_penalty),
         "social_security_present_value": float(scoring_input.get("social_security_present_value", estimate_social_security_present_value(
