@@ -1404,61 +1404,59 @@ def build_strategy_scoring_context(inputs: dict | None = None, metrics_list: lis
     }
 
 
-def build_scoring_inputs(metrics_list: list[dict]) -> list[dict]:
+def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None = None) -> list[dict]:
     """
     Build the shared scoring-input rows used by BOTH Quick and Full.
-    Candidate generation is the only intended path difference. Once we reach
-    this layer, the data and transformations must be identical.
+    These inputs must be strategy-local and scenario-local only.
+    They must NOT depend on the size or composition of the candidate set,
+    otherwise overlapping Quick/Full strategies can never match exactly.
     """
     if not metrics_list:
         return []
 
-    trad_share_values = []
-    for m in metrics_list:
-        ending_total = max(
-            1.0,
-            float(m.get("ending_traditional_ira_balance", 0.0))
-            + float(m.get("ending_roth_balance", 0.0))
-            + float(m.get("ending_brokerage_balance", 0.0))
-            + float(m.get("ending_cash_balance", 0.0)),
-        )
-        trad_share_values.append(float(m.get("ending_traditional_ira_balance", 0.0)) / ending_total)
-
-    nw_norm = normalize_series([float(m.get("final_net_worth", 0.0)) for m in metrics_list])
-    base_legacy_norm = normalize_series([float(m.get("after_tax_legacy", 0.0)) for m in metrics_list])
-    effective_legacy_norm = normalize_series([float(m.get("effective_legacy_value", m.get("after_tax_legacy", 0.0))) for m in metrics_list])
-    heir_tax_drag_norm = normalize_series([float(m.get("heir_tax_drag", 0.0)) for m in metrics_list])
-    trad_norm = normalize_series([float(m.get("ending_traditional_ira_balance", 0.0)) for m in metrics_list])
-    stability_norm = normalize_series([float(m.get("stability_value", 0.0)) for m in metrics_list])
-    ss_income_norm = normalize_series([float(m.get("final_household_ss_income", 0.0)) for m in metrics_list])
-    survivor_ss_norm = normalize_series([float(m.get("survivor_ss_income", 0.0)) for m in metrics_list])
-    ss_present_value_norm = normalize_series([
-        float(m.get("social_security_present_value", estimate_social_security_present_value(
-            float(m.get("final_household_ss_income", 0.0)),
-            float(m.get("survivor_ss_income", 0.0)),
-        ))) for m in metrics_list
-    ])
-    risk_norm = normalize_series([float(m.get("risk_value", 0.0)) for m in metrics_list])
-    drag_norm = normalize_series([float(m.get("Total Government Drag", 0.0)) for m in metrics_list])
-    trad_share_norm = normalize_series(trad_share_values)
+    scoring_context = scoring_context or {}
+    starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
+    annual_spending = max(1.0, float(scoring_context.get("annual_spending", 1.0)))
 
     scoring_inputs = []
-    for i, metrics in enumerate(metrics_list):
+    for metrics in metrics_list:
+        ending_trad = float(metrics.get("ending_traditional_ira_balance", 0.0))
+        ending_roth = float(metrics.get("ending_roth_balance", 0.0))
+        ending_brokerage = float(metrics.get("ending_brokerage_balance", 0.0))
+        ending_cash = float(metrics.get("ending_cash_balance", 0.0))
+        ending_total = max(1.0, ending_trad + ending_roth + ending_brokerage + ending_cash)
+        trad_share = ending_trad / ending_total
+
+        final_net_worth = float(metrics.get("final_net_worth", 0.0))
+        after_tax_legacy = float(metrics.get("after_tax_legacy", 0.0))
+        effective_legacy_value = float(metrics.get("effective_legacy_value", after_tax_legacy))
+        heir_tax_drag = float(metrics.get("heir_tax_drag", 0.0))
+        stability_value = float(metrics.get("stability_value", 0.0))
+        final_household_ss_income = float(metrics.get("final_household_ss_income", 0.0))
+        survivor_ss_income = float(metrics.get("survivor_ss_income", 0.0))
+        ss_present_value = float(metrics.get("social_security_present_value", estimate_social_security_present_value(final_household_ss_income, survivor_ss_income)))
+        total_government_drag = float(metrics.get("Total Government Drag", 0.0))
+        min_liquid_assets = max(0.0, -float(metrics.get("risk_value", 0.0)))
+
+        liquidity_coverage_years = safe_ratio(min_liquid_assets, annual_spending, default=0.0)
+        income_coverage_ratio = safe_ratio(final_household_ss_income, annual_spending, default=0.0)
+        survivor_coverage_ratio = safe_ratio(survivor_ss_income, annual_spending, default=0.0)
+        stability_support_ratio = safe_ratio(stability_value, annual_spending, default=0.0)
+
         scoring_inputs.append({
             **metrics,
-            "nw_norm": float(nw_norm[i]),
-            "base_legacy_norm": float(base_legacy_norm[i]),
-            "effective_legacy_norm": float(effective_legacy_norm[i]),
-            "heir_tax_drag_norm": float(heir_tax_drag_norm[i]),
-            "trad_norm": float(trad_norm[i]),
-            "stability_norm": float(stability_norm[i]),
-            "ss_income_norm": float(ss_income_norm[i]),
-            "survivor_ss_norm": float(survivor_ss_norm[i]),
-            "ss_present_value_norm": float(ss_present_value_norm[i]),
-            "risk_norm": float(risk_norm[i]),
-            "drag_norm": float(drag_norm[i]),
-            "trad_share_norm": float(trad_share_norm[i]),
-            "ending_traditional_ira_share": float(trad_share_values[i]),
+            "ending_traditional_ira_share": float(trad_share),
+            "net_worth_ratio": safe_ratio(final_net_worth, starting_assets),
+            "legacy_ratio": safe_ratio(after_tax_legacy, starting_assets),
+            "effective_legacy_ratio": safe_ratio(effective_legacy_value, starting_assets),
+            "heir_tax_drag_ratio": safe_ratio(heir_tax_drag, starting_assets),
+            "trad_ratio": safe_ratio(ending_trad, starting_assets),
+            "drag_ratio": safe_ratio(total_government_drag, starting_assets),
+            "ss_present_value_ratio": safe_ratio(ss_present_value, starting_assets),
+            "liquidity_coverage_years": float(liquidity_coverage_years),
+            "income_coverage_ratio": float(income_coverage_ratio),
+            "survivor_coverage_ratio": float(survivor_coverage_ratio),
+            "stability_support_ratio": float(stability_support_ratio),
         })
     return scoring_inputs
 
@@ -1486,8 +1484,9 @@ def build_scoring_context(
 def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     """
     Compute the selected ranking score for a single strategy row.
-    The intent comes from v130's effective profile/modifier behavior, but this
-    implementation is rebuilt cleanly so BOTH Quick and Full call the same code.
+    This function must be candidate-set invariant: the same strategy with the
+    same metrics and the same scoring context must receive the same score,
+    whether it came from Quick or Full.
     """
     profile_name = str(scoring_context.get("profile_name", "Balanced"))
     weights = scoring_context.get("weights", get_profile_summary(profile_name)["weights"])
@@ -1495,76 +1494,92 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
     trad_balance_penalty_lambda = max(0.0, float(scoring_context.get("trad_balance_penalty_lambda", 0.0)))
 
-    nw_adjusted = float(scoring_input["nw_norm"]) ** 0.72
-    base_legacy_norm = float(scoring_input["base_legacy_norm"])
-    effective_legacy_norm = float(scoring_input["effective_legacy_norm"])
-    heir_tax_drag_norm = float(scoring_input["heir_tax_drag_norm"])
-    trad_penalty = float(scoring_input["trad_norm"])
-    stability_norm = float(scoring_input["stability_norm"])
-    ss_income_norm = float(scoring_input["ss_income_norm"])
-    survivor_ss_norm = float(scoring_input["survivor_ss_norm"])
-    ss_present_value_norm = float(scoring_input["ss_present_value_norm"])
-    risk_penalty = float(scoring_input["risk_norm"])
-    drag_penalty = float(scoring_input["drag_norm"])
-    trad_share_penalty = float(scoring_input["trad_share_norm"])
+    net_worth_ratio = float(scoring_input.get("net_worth_ratio", 0.0))
+    legacy_ratio = float(scoring_input.get("legacy_ratio", 0.0))
+    effective_legacy_ratio = float(scoring_input.get("effective_legacy_ratio", legacy_ratio))
+    heir_tax_drag_ratio = float(scoring_input.get("heir_tax_drag_ratio", 0.0))
+    trad_ratio = float(scoring_input.get("trad_ratio", 0.0))
+    drag_ratio = float(scoring_input.get("drag_ratio", 0.0))
+    trad_share = float(scoring_input.get("ending_traditional_ira_share", 0.0))
+    ss_present_value_ratio = float(scoring_input.get("ss_present_value_ratio", 0.0))
+    liquidity_coverage_years = float(scoring_input.get("liquidity_coverage_years", 0.0))
+    income_coverage_ratio = float(scoring_input.get("income_coverage_ratio", 0.0))
+    survivor_coverage_ratio = float(scoring_input.get("survivor_coverage_ratio", 0.0))
+    stability_support_ratio = float(scoring_input.get("stability_support_ratio", 0.0))
+
+    nw_signal = math.log1p(max(0.0, net_worth_ratio))
+    base_legacy_signal = math.log1p(max(0.0, legacy_ratio))
+    effective_legacy_signal = math.log1p(max(0.0, effective_legacy_ratio))
+    heir_tax_penalty_base = math.log1p(max(0.0, heir_tax_drag_ratio))
+    trad_penalty_base = math.log1p(max(0.0, trad_ratio))
+    drag_penalty_base = math.log1p(max(0.0, drag_ratio))
+    ss_value_signal = math.log1p(max(0.0, ss_present_value_ratio))
+    stability_signal = (
+        0.45 * math.log1p(max(0.0, stability_support_ratio))
+        + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+        + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
+    )
+    liquidity_signal = clamp01(liquidity_coverage_years / 25.0)
+    risk_penalty_base = 1.0 - liquidity_signal
+    trad_share_penalty_base = trad_share
 
     if profile_name == "Legacy Focused":
-        legacy_signal = 0.76 * effective_legacy_norm + 0.24 * base_legacy_norm
-        legacy_adjusted = legacy_signal ** 1.34
-        trad_penalty_adj = trad_penalty ** 1.75
-        drag_penalty_adj = drag_penalty ** 1.08
-        trad_share_penalty_adj = trad_share_penalty ** 2.45
-        heir_tax_penalty_adj = heir_tax_drag_norm ** 1.72
-        stability_adjusted = 0.45 * (stability_norm ** 1.12) + 0.30 * (ss_income_norm ** 1.16) + 0.25 * (survivor_ss_norm ** 1.16)
-        risk_penalty_adj = risk_penalty ** 1.02
-        positive_score = (0.05 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-        negative_score = (
-            (weights["trad"] * trad_penalty_adj)
-            + (1.05 * weights.get("trad_share", 0.0) * trad_share_penalty_adj)
-            + (0.75 * weights.get("drag", 0.0) * drag_penalty_adj)
-            + (1.25 * weights["trad"] * heir_tax_penalty_adj)
-            + (weights["risk"] * risk_penalty_adj)
-        )
+        legacy_component = weights["legacy"] * (0.76 * effective_legacy_signal + 0.24 * base_legacy_signal)
+        nw_component = 0.05 * weights["nw"] * nw_signal
+        stability_component = weights["stability"] * stability_signal
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.55)
+        trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 2.30)
+        drag_component = 0.75 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.05)
+        heir_tax_component = 1.25 * weights["trad"] * (heir_tax_penalty_base ** 1.55)
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.00)
     elif profile_name == "Spend With Confidence":
-        legacy_adjusted = base_legacy_norm ** 1.00
-        trad_penalty_adj = trad_penalty ** 1.35
-        drag_penalty_adj = drag_penalty ** 1.00
-        trad_share_penalty_adj = trad_share_penalty ** 1.20
-        heir_tax_penalty_adj = 0.0
-        stability_adjusted = 0.35 * (stability_norm ** 1.25) + 0.40 * (ss_income_norm ** 1.55) + 0.25 * (survivor_ss_norm ** 1.40)
-        risk_penalty_adj = risk_penalty ** 1.15
-        positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-        negative_score = (weights["trad"] * trad_penalty_adj) + (weights["risk"] * risk_penalty_adj) + (weights.get("drag", 0.0) * drag_penalty_adj) + (weights.get("trad_share", 0.0) * trad_share_penalty_adj)
+        legacy_component = weights["legacy"] * base_legacy_signal
+        nw_component = weights["nw"] * nw_signal
+        stability_component = weights["stability"] * (
+            0.35 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.40 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.25 * math.log1p(max(0.0, survivor_coverage_ratio))
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.20)
+        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.10)
+        drag_component = weights.get("drag", 0.0) * drag_penalty_base
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.10)
     else:
-        legacy_adjusted = base_legacy_norm ** 1.05
-        trad_penalty_adj = trad_penalty ** 1.85
-        drag_penalty_adj = drag_penalty ** 1.20
-        trad_share_penalty_adj = trad_share_penalty ** 1.65
-        heir_tax_penalty_adj = 0.0
-        stability_adjusted = 0.50 * (stability_norm ** 1.35) + 0.35 * (ss_income_norm ** 1.35) + 0.15 * (survivor_ss_norm ** 1.20)
-        risk_penalty_adj = risk_penalty ** 1.10
-        positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-        negative_score = (weights["trad"] * trad_penalty_adj) + (weights["risk"] * risk_penalty_adj) + (weights.get("drag", 0.0) * drag_penalty_adj) + (weights.get("trad_share", 0.0) * trad_share_penalty_adj)
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = weights["nw"] * (nw_signal ** 0.90)
+        stability_component = weights["stability"] * (
+            0.50 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.35)
+        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.45)
+        drag_component = weights.get("drag", 0.0) * (drag_penalty_base ** 1.10)
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
 
     preference_bonus = 0.0
     preference_penalty = 0.0
     if preferences.get("maximize_social_security"):
-        ss_bonus = 0.24 * (ss_present_value_norm ** 1.30)
+        ss_bonus = 0.24 * (ss_value_signal ** 1.20)
         if profile_name == "Legacy Focused":
             ss_bonus *= 1.40
         elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
             ss_bonus *= 1.15
         preference_bonus += ss_bonus
 
-    income_stability_score = clamp01(0.65 * stability_norm + 0.35 * survivor_ss_norm)
     if preferences.get("income_stability_focus"):
+        income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
         preference_bonus += 0.10 * income_stability_score
+    else:
+        income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
 
     if preferences.get("minimize_trad_ira_for_heirs"):
         heir_structure_penalty = (
-            0.24 * (trad_share_penalty ** 2.20)
-            + 0.24 * (heir_tax_drag_norm ** 1.45)
-            + 0.10 * (trad_penalty ** 1.30)
+            0.24 * (trad_share_penalty_base ** 2.10)
+            + 0.24 * (heir_tax_penalty_base ** 1.35)
+            + 0.10 * (trad_penalty_base ** 1.20)
         )
         if profile_name == "Legacy Focused":
             heir_structure_penalty *= 1.40
@@ -1573,9 +1588,12 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     lambda_penalty_dollars = trad_balance_penalty_lambda * float(scoring_input.get("ending_traditional_ira_balance", 0.0))
     lambda_penalty_score = safe_ratio(lambda_penalty_dollars, starting_assets * 10.0)
 
-    positive_score += preference_bonus
-    negative_score += preference_penalty + lambda_penalty_score
+    positive_score = nw_component + legacy_component + stability_component + preference_bonus
+    negative_score = trad_component + trad_share_component + drag_component + heir_tax_component + risk_component + preference_penalty + lambda_penalty_score
     score = positive_score - negative_score
+
+    stability_label = "High" if income_coverage_ratio >= 0.95 and survivor_coverage_ratio >= 0.60 else ("Medium" if income_coverage_ratio >= 0.60 else "Low")
+    risk_label = "Low" if liquidity_coverage_years >= 12.0 else ("Medium" if liquidity_coverage_years >= 6.0 else "High")
 
     return {
         **scoring_input,
@@ -1583,17 +1601,17 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
         "score_100": float(score * 100.0),
         "lambda_penalty_dollars": float(lambda_penalty_dollars),
         "lambda_penalty_score": float(lambda_penalty_score),
-        "stability_label": qualitative_bucket(stability_adjusted),
-        "risk_label": qualitative_bucket(risk_penalty_adj, reverse=True),
-        "nw_component": float((0.05 * weights["nw"] * nw_adjusted) if profile_name == "Legacy Focused" else (weights["nw"] * nw_adjusted)),
-        "legacy_component": float(weights["legacy"] * legacy_adjusted),
-        "stability_component": float(weights["stability"] * stability_adjusted),
-        "trad_component": float(weights["trad"] * trad_penalty_adj),
-        "drag_component": float((0.75 * weights.get("drag", 0.0) * drag_penalty_adj) if profile_name == "Legacy Focused" else (weights.get("drag", 0.0) * drag_penalty_adj)),
-        "trad_share_component": float(weights.get("trad_share", 0.0) * trad_share_penalty_adj),
-        "risk_component": float(weights["risk"] * risk_penalty_adj),
-        "heir_tax_component": float((1.25 * weights["trad"] * heir_tax_penalty_adj) if profile_name == "Legacy Focused" else 0.0),
-        "ss_value_component": float(0.14 * (ss_present_value_norm ** 1.15) if preferences.get("maximize_social_security") else 0.0),
+        "stability_label": stability_label,
+        "risk_label": risk_label,
+        "nw_component": float(nw_component),
+        "legacy_component": float(legacy_component),
+        "stability_component": float(stability_component),
+        "trad_component": float(trad_component),
+        "drag_component": float(drag_component),
+        "trad_share_component": float(trad_share_component),
+        "risk_component": float(risk_component),
+        "heir_tax_component": float(heir_tax_component),
+        "ss_value_component": float(0.14 * (ss_value_signal ** 1.10) if preferences.get("maximize_social_security") else 0.0),
         "preference_bonus_component": float(preference_bonus),
         "preference_penalty_component": float(preference_penalty),
         "social_security_present_value": float(scoring_input.get("social_security_present_value", estimate_social_security_present_value(
@@ -1615,7 +1633,7 @@ def score_strategy_metrics(
     scoring_context: dict | None = None,
 ) -> list[dict]:
     shared_context = dict(scoring_context or build_strategy_scoring_context(metrics_list=metrics_list))
-    scoring_inputs = build_scoring_inputs(metrics_list)
+    scoring_inputs = build_scoring_inputs(metrics_list, scoring_context=shared_context)
     ranking_context = build_scoring_context(
         profile_name=profile_name,
         preferences=preferences or {},
