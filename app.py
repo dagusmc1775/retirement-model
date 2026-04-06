@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v202-centralized-scoring-payload"
+APP_VERSION = "v203-shared-quick-full-ranking"
 APP_STATE_VERSION = "v103"
 
 
@@ -1823,39 +1823,62 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
     quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
     quick_step_size = sanitize_governor_step_size(float(step_size))
+    trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
 
     quick_rows, errors = build_ss_optimizer_fact_rows(
         base_inputs,
         QUICK_STRATEGY_COMBOS,
         quick_max_conversion,
         quick_step_size,
-        trad_balance_penalty_lambda=float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
         progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
         cache_namespace="_quick_recommendation_result_rows_cache",
     )
     if not quick_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
 
-    quick_scoring_context = build_strategy_scoring_context(inputs=base_inputs, metrics_list=quick_rows)
+    ranked_df = None
+    data_source = "quick_subset_same_engine"
     full_result_payload = get_current_result_payload("ss_optimizer_last_result")
-    if isinstance(full_result_payload, dict):
+    optimizer_hash_inputs = {
+        **copy.deepcopy(base_inputs),
+        "max_conversion": quick_max_conversion,
+        "step_size": quick_step_size,
+        "trad_balance_penalty_lambda": trad_balance_penalty_lambda,
+        "optimizer_is_profile_neutral": True,
+    }
+    current_optimizer_hash = build_scenario_fingerprint(optimizer_hash_inputs)
+    quick_strategy_set = {f"{int(a)}/{int(b)}" for a, b in QUICK_STRATEGY_COMBOS}
+
+    if isinstance(full_result_payload, dict) and str(full_result_payload.get("input_hash", "")) == current_optimizer_hash:
         full_results_df = full_result_payload.get("all_results_df")
         if isinstance(full_results_df, pd.DataFrame) and not full_results_df.empty:
+            full_results_rows = full_results_df.to_dict("records")
             full_scoring_context = full_result_payload.get("scoring_context")
-            if isinstance(full_scoring_context, dict) and full_scoring_context:
-                quick_scoring_context = copy.deepcopy(full_scoring_context)
-            else:
-                quick_scoring_context = build_strategy_scoring_context(
-                    inputs=collect_scenario_state(),
-                    metrics_list=full_results_df.to_dict("records"),
-                )
-    ranked_df = build_ranked_optimizer_results_df(
-        quick_rows,
-        profile_name,
-        preferences=preferences,
-        trad_balance_penalty_lambda=float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-        scoring_context=quick_scoring_context,
-    )
+            if not isinstance(full_scoring_context, dict) or not full_scoring_context:
+                full_scoring_context = build_strategy_scoring_context(inputs=base_inputs, metrics_list=full_results_rows)
+            shared_ranked_df = build_ranked_optimizer_results_df(
+                full_results_rows,
+                profile_name,
+                preferences=preferences,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                scoring_context=full_scoring_context,
+            )
+            ranked_df = shared_ranked_df[shared_ranked_df["Strategy"].isin(quick_strategy_set)].copy().reset_index(drop=True)
+            if not ranked_df.empty:
+                ranked_df["Rank"] = range(1, len(ranked_df) + 1)
+                data_source = "quick_filtered_from_full_81"
+
+    if ranked_df is None:
+        quick_scoring_context = build_strategy_scoring_context(inputs=base_inputs, metrics_list=quick_rows)
+        ranked_df = build_ranked_optimizer_results_df(
+            quick_rows,
+            profile_name,
+            preferences=preferences,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            scoring_context=quick_scoring_context,
+        )
+
     ranked = ranked_df.to_dict("records")
 
     summary_rows = []
@@ -1885,7 +1908,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
-        "data_source": "quick_subset_same_engine",
+        "data_source": data_source,
         "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
         "strategy_universe_size": len(quick_rows),
@@ -5343,7 +5366,9 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     all_results_df = result.get("all_results_df", pd.DataFrame())
     if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty:
         base_context_inputs = collect_scenario_state()
-        dynamic_scoring_context = build_strategy_scoring_context(inputs=base_context_inputs, metrics_list=all_results_df.to_dict("records"))
+        dynamic_scoring_context = result.get("scoring_context")
+        if not isinstance(dynamic_scoring_context, dict) or not dynamic_scoring_context:
+            dynamic_scoring_context = build_strategy_scoring_context(inputs=base_context_inputs, metrics_list=all_results_df.to_dict("records"))
         dynamic_shortlists = build_profile_shortlists_from_optimizer_rows(
             all_results_df.to_dict("records"),
             preferences=current_preferences or {},
