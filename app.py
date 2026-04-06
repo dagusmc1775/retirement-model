@@ -1548,6 +1548,41 @@ def build_strategy_scoring_payload(
     }
 
 
+def build_scored_strategy_outputs(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+) -> dict:
+    """
+    Shared end-to-end scoring / ranking path for both Quick and Full SS scans.
+    The only intended difference between Quick and Full is candidate generation.
+    """
+    safe_inputs = copy.deepcopy(inputs or {})
+    scoring_context = build_strategy_scoring_context(inputs=safe_inputs, metrics_list=results_rows)
+    ranked_df = build_ranked_optimizer_results_df(
+        results_rows,
+        selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    profile_shortlists = build_profile_shortlists_from_optimizer_rows(
+        results_rows,
+        top_n=max(1, int(shortlist_top_n)),
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    return {
+        "scoring_context": scoring_context,
+        "ranked_df": ranked_df,
+        "profile_shortlists": profile_shortlists,
+    }
+
+
 def build_quick_profile_anchor_rows(ranked_rows: list[dict]) -> dict:
     if not ranked_rows:
         return {}
@@ -1837,68 +1872,36 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     if not quick_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
 
-    ranked_df = None
-    data_source = "quick_subset_same_engine"
-    full_result_payload = get_current_result_payload("ss_optimizer_last_result")
-    optimizer_hash_inputs = {
-        **copy.deepcopy(base_inputs),
-        "max_conversion": quick_max_conversion,
-        "step_size": quick_step_size,
-        "trad_balance_penalty_lambda": trad_balance_penalty_lambda,
-        "optimizer_is_profile_neutral": True,
-    }
-    current_optimizer_hash = build_scenario_fingerprint(optimizer_hash_inputs)
-    quick_strategy_set = {f"{int(a)}/{int(b)}" for a, b in QUICK_STRATEGY_COMBOS}
-
-    if isinstance(full_result_payload, dict) and str(full_result_payload.get("input_hash", "")) == current_optimizer_hash:
-        full_results_df = full_result_payload.get("all_results_df")
-        if isinstance(full_results_df, pd.DataFrame) and not full_results_df.empty:
-            full_results_rows = full_results_df.to_dict("records")
-            full_scoring_context = full_result_payload.get("scoring_context")
-            if not isinstance(full_scoring_context, dict) or not full_scoring_context:
-                full_scoring_context = build_strategy_scoring_context(inputs=base_inputs, metrics_list=full_results_rows)
-            shared_ranked_df = build_ranked_optimizer_results_df(
-                full_results_rows,
-                profile_name,
-                preferences=preferences,
-                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                scoring_context=full_scoring_context,
-            )
-            ranked_df = shared_ranked_df[shared_ranked_df["Strategy"].isin(quick_strategy_set)].copy().reset_index(drop=True)
-            if not ranked_df.empty:
-                ranked_df["Rank"] = range(1, len(ranked_df) + 1)
-                data_source = "quick_filtered_from_full_81"
-
-    if ranked_df is None:
-        quick_scoring_context = build_strategy_scoring_context(inputs=base_inputs, metrics_list=quick_rows)
-        ranked_df = build_ranked_optimizer_results_df(
-            quick_rows,
-            profile_name,
-            preferences=preferences,
-            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            scoring_context=quick_scoring_context,
-        )
-
+    shared_outputs = build_scored_strategy_outputs(
+        quick_rows,
+        inputs=base_inputs,
+        selected_profile_name=profile_name,
+        preferences=preferences,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=10,
+    )
+    ranked_df = shared_outputs["ranked_df"]
     ranked = ranked_df.to_dict("records")
+    data_source = "quick_subset_shared_scoring_pipeline"
 
-    summary_rows = []
-    for _, row in ranked_df.head(10).iterrows():
-        summary_rows.append({
-            "Strategy": row["Strategy"],
+    summary_df = pd.DataFrame([
+        {
+            "Strategy": row.get("Strategy", ""),
             "Score": float(row.get("Score", 0.0)),
-            "Net Worth": float(row.get("Final Net Worth", 0.0)),
+            "Net Worth": float(row.get("Net Worth", row.get("Final Net Worth", 0.0))),
             "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
-            "Trad IRA @ End": float(row.get("Ending Traditional IRA Balance", 0.0)),
-            "Roth @ End": float(row.get("Ending Roth Balance", 0.0)),
-            "Brokerage @ End": float(row.get("Ending Brokerage Balance", 0.0)),
+            "Trad IRA @ End": float(row.get("Trad IRA @ End", row.get("Ending Traditional IRA Balance", 0.0))),
+            "Roth @ End": float(row.get("Roth @ End", row.get("Ending Roth Balance", 0.0))),
+            "Brokerage @ End": float(row.get("Brokerage @ End", row.get("Ending Brokerage Balance", 0.0))),
             "Stability": row.get("Stability", ""),
             "Risk": row.get("Risk", ""),
             "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
             "Survivor SS Income": float(row.get("Survivor SS Income", 0.0)),
             "Owner SS Age": int(row.get("Owner SS Age", 0)),
             "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
-        })
-    summary_df = pd.DataFrame(summary_rows)
+        }
+        for row in ranked[:10]
+    ])
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
@@ -1912,8 +1915,9 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
         "strategy_universe_size": len(quick_rows),
+        "profile_shortlists": shared_outputs.get("profile_shortlists", {}),
+        "scoring_context": shared_outputs.get("scoring_context", {}),
     }
-
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -5235,23 +5239,20 @@ def run_ss_optimizer(
             progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
 
         scoring_preferences = extract_scoring_preferences(inputs)
-        scoring_context = build_strategy_scoring_context(inputs=inputs, metrics_list=results)
-        results_df = build_ranked_optimizer_results_df(
+        shared_outputs = build_scored_strategy_outputs(
             results,
-            profile_name,
+            inputs=inputs,
+            selected_profile_name=profile_name,
             preferences=scoring_preferences,
             trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            scoring_context=scoring_context,
+            shortlist_top_n=5,
         )
+        scoring_context = shared_outputs["scoring_context"]
+        results_df = shared_outputs["ranked_df"]
+        profile_shortlists = shared_outputs["profile_shortlists"]
 
         top_10_df = results_df.head(10).copy()
         top_3 = results_df.head(3).copy()
-        profile_shortlists = build_profile_shortlists_from_optimizer_rows(
-            results,
-            preferences=scoring_preferences,
-            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            scoring_context=scoring_context,
-        )
 
         compare_metrics = [
             ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
