@@ -1805,6 +1805,18 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
 
     quick_scoring_context = build_strategy_scoring_context(inputs=base_inputs, metrics_list=quick_rows)
+    full_result_payload = get_current_result_payload("ss_optimizer_last_result")
+    if isinstance(full_result_payload, dict):
+        full_results_df = full_result_payload.get("all_results_df")
+        if isinstance(full_results_df, pd.DataFrame) and not full_results_df.empty:
+            full_scoring_context = full_result_payload.get("scoring_context")
+            if isinstance(full_scoring_context, dict) and full_scoring_context:
+                quick_scoring_context = copy.deepcopy(full_scoring_context)
+            else:
+                quick_scoring_context = build_strategy_scoring_context(
+                    inputs=collect_scenario_state(),
+                    metrics_list=full_results_df.to_dict("records"),
+                )
     ranked_df = build_ranked_optimizer_results_df(
         quick_rows,
         profile_name,
@@ -5251,6 +5263,7 @@ def run_ss_optimizer(
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": copy.deepcopy(scoring_context),
             "profile_name": None,
             "optimizer_is_profile_neutral": True,
             "completed": True,
@@ -5272,6 +5285,7 @@ def run_ss_optimizer(
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": copy.deepcopy(scoring_context),
             "profile_name": profile_name,
             "applied_preset_note": "",
             "interrupted_partial_df": None,
