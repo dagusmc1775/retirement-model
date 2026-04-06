@@ -5685,7 +5685,9 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                     key=f"download_profile_shortlist_{tab_profile_name}",
                 )
 
-    with st.expander("All 81 SS combinations"):
+    st.subheader("Full 81 Viewer")
+    st.caption("The complete ranked 81-strategy table is directly below. It is expanded by default so you do not have to hunt for it.")
+    with st.expander("All 81 SS combinations", expanded=True):
         st.caption("Full ranked universe using the current profile, active modifiers, and lambda penalty.")
         st.dataframe(
             all_results_df.style.format({
