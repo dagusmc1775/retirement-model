@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v139-unified-ss-pipeline"
+APP_VERSION = "v202-centralized-scoring-payload"
 APP_STATE_VERSION = "v103"
 
 
@@ -1205,46 +1205,15 @@ def build_ranked_optimizer_results_df(
     if not results_rows:
         return pd.DataFrame()
 
-    metric_rows = []
-    for row in results_rows:
-        metric_rows.append({
-            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
-            "Owner SS Age": int(row["Owner SS Age"]),
-            "Spouse SS Age": int(row["Spouse SS Age"]),
-            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
-            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
-            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
-            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
-            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
-            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
-            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
-            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
-            "stability_value": float(row.get("Stability Value", 0.0)),
-            "risk_value": float(row.get("Risk Value", 0.0)),
-            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
-            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
-            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
-            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
-            "Total Conversions": float(row.get("Total Conversions", 0.0)),
-            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
-            "Total State Tax": float(row.get("Total State Tax", 0.0)),
-            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
-            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
-            "First IRMAA Year": row.get("First IRMAA Year"),
-            "Max MAGI": float(row.get("Max MAGI", 0.0)),
-            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
-            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
-        })
-
-    ranked = score_strategy_metrics(
-        metric_rows,
-        profile_name,
+    scoring_payload = build_strategy_scoring_payload(
+        results_rows,
+        selected_profile_name=profile_name,
         preferences=preferences or {},
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
         scoring_context=scoring_context,
     )
-
-    profile_score_maps = build_profile_score_maps(metric_rows, scoring_context=scoring_context, trad_balance_penalty_lambda=trad_balance_penalty_lambda)
+    ranked = scoring_payload["selected_ranked_rows"]
+    profile_score_maps = scoring_payload["profile_score_maps"]
 
     rows = []
     for idx, ranked_row in enumerate(ranked, start=1):
@@ -1514,6 +1483,69 @@ def build_profile_score_maps(metrics_list: list[dict], scoring_context: dict | N
         ranked = score_strategy_metrics(metrics_list, profile_name, preferences={}, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
         out[profile_name] = {str(row.get("Strategy", "")): float(row.get("score_100", 0.0)) for row in ranked}
     return out
+
+
+def build_strategy_scoring_payload(
+    results_rows: list[dict],
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> dict:
+    """
+    Central scoring payload used by both Quick and Full SS scans.
+    This keeps profile scoring, selected ranking, and profile score maps on one shared path.
+    """
+    metric_rows = []
+    for row in results_rows:
+        metric_rows.append({
+            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
+            "Owner SS Age": int(row["Owner SS Age"]),
+            "Spouse SS Age": int(row["Spouse SS Age"]),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+
+    scoring_context = scoring_context or build_strategy_scoring_context(metrics_list=metric_rows)
+    selected_ranked_rows = score_strategy_metrics(
+        metric_rows,
+        selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    profile_score_maps = build_profile_score_maps(
+        metric_rows,
+        scoring_context=scoring_context,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+    )
+    return {
+        "metric_rows": metric_rows,
+        "selected_ranked_rows": selected_ranked_rows,
+        "profile_score_maps": profile_score_maps,
+        "scoring_context": scoring_context,
+    }
 
 
 def build_quick_profile_anchor_rows(ranked_rows: list[dict]) -> dict:
