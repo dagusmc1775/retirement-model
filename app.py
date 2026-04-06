@@ -28,8 +28,8 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v203-shared-quick-full-ranking"
-APP_STATE_VERSION = "v103"
+APP_VERSION = "v217-shared-path-enforced"
+APP_STATE_VERSION = "v104"
 
 
 
@@ -980,7 +980,7 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
                 scenario_inputs = copy.deepcopy(base_inputs)
                 scenario_inputs["owner_claim_age"] = int(owner_age)
                 scenario_inputs["spouse_claim_age"] = int(spouse_age)
-                run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
+                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
                 metrics = build_strategy_metrics(run_result)
                 metric_rows.append({
                     **metrics,
@@ -1749,6 +1749,30 @@ def build_scored_strategy_outputs(
         "ranked_df": ranked_df,
         "profile_shortlists": profile_shortlists,
     }
+
+
+def extract_selected_score_map(df: pd.DataFrame) -> dict[str, float]:
+    if df is None or df.empty:
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        strategy = str(row.get("Strategy", ""))
+        if strategy:
+            out[strategy] = float(get_selected_score_value(row))
+    return out
+
+
+def validate_overlap_score_identity(quick_df: pd.DataFrame, full_df: pd.DataFrame, tolerance: float = 1e-9) -> pd.DataFrame:
+    quick_scores = extract_selected_score_map(quick_df)
+    full_scores = extract_selected_score_map(full_df)
+    overlaps = sorted(set(quick_scores).intersection(full_scores))
+    mismatches = []
+    for strategy in overlaps:
+        q = float(quick_scores[strategy])
+        f = float(full_scores[strategy])
+        if abs(q - f) > tolerance:
+            mismatches.append({"Strategy": strategy, "Quick Score": q, "Full Score": f, "Delta": f - q})
+    return pd.DataFrame(mismatches)
 
 
 def build_quick_profile_anchor_rows(ranked_rows: list[dict]) -> dict:
@@ -5344,12 +5368,8 @@ def run_ss_optimizer(
     base_snapshot = copy.deepcopy(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
-    quick_max_conversion = sanitize_governor_max_conversion(
-        float(base_snapshot.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION))
-    )
-    quick_step_size = sanitize_governor_step_size(
-        float(base_snapshot.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE))
-    )
+    max_conversion = sanitize_governor_max_conversion(float(max_conversion))
+    step_size = sanitize_governor_step_size(float(step_size))
 
     results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
@@ -5366,7 +5386,7 @@ def run_ss_optimizer(
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
             try:
-                run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
+                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
             except Exception as exc:
                 st.session_state["ss_optimizer_progress_index"] = combo_index
                 st.session_state["ss_optimizer_partial_results"] = results
