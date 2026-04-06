@@ -28,8 +28,8 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v218-lambda-shared-inputs"
-APP_STATE_VERSION = "v105"
+APP_VERSION = "v219-shared-post-candidate-pipeline"
+APP_STATE_VERSION = "v106"
 
 
 
@@ -2114,23 +2114,27 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     if not quick_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
 
-    shared_outputs = build_scored_strategy_outputs(
+    shared_payload = build_strategy_scan_payload(
         quick_rows,
         inputs=base_inputs,
         selected_profile_name=profile_name,
         preferences=preferences,
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
         shortlist_top_n=10,
+        primary_table_top_n=10,
+        comparison_top_n=3,
+        include_profile_shortlists=False,
     )
-    ranked_df = shared_outputs["ranked_df"]
+    ranked_df = shared_payload["ranked_df"]
     ranked = ranked_df.to_dict("records")
     data_source = "quick_subset_shared_scoring_pipeline"
 
-    summary_df = build_primary_strategy_table_df(ranked_df, top_n=10)
+    summary_df = shared_payload["primary_table_df"]
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
         "summary_df": summary_df,
+        "comparison_display_df": shared_payload["comparison_df"],
         "all_results_df": canonicalize_optimizer_result_df(ranked_df.copy(), "quick scored results"),
         "ranked_rows": ranked,
         "advisor_text": explanation,
@@ -8429,5 +8433,79 @@ def get_shared_household_inputs_from_state() -> dict:
         "target_trad_balance": float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
         "target_trad_override_enabled": bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
         "target_trad_override_max_rate": float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])),
+    }
+
+
+def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
+    """
+    Shared Top-N comparison table built from the canonical primary strategy rows.
+    BOTH Quick and Full should use this exact helper for their main side-by-side comparison.
+    """
+    primary_df = build_primary_strategy_table_df(df, top_n=top_n)
+    if primary_df.empty:
+        return pd.DataFrame()
+
+    compare_metrics = [
+        ("SS Ages", lambda r: str(r.get("Strategy", ""))),
+        ("Selected Score", lambda r: f"{float(r.get('Selected Score', r.get('Score', 0.0))):.2f}"),
+        ("Final Net Worth", lambda r: format_dollars(r.get("Final Net Worth", 0.0))),
+        ("After-Tax Legacy", lambda r: format_dollars(r.get("After-Tax Legacy", 0.0))),
+        ("Ending Traditional IRA Balance", lambda r: format_dollars(r.get("Ending Traditional IRA Balance", 0.0))),
+        ("Ending Roth Balance", lambda r: format_dollars(r.get("Ending Roth Balance", 0.0))),
+        ("Ending Brokerage Balance", lambda r: format_dollars(r.get("Ending Brokerage Balance", 0.0))),
+        ("Final Household SS Income", lambda r: format_dollars(r.get("Final Household SS Income", 0.0))),
+        ("Survivor SS Income", lambda r: format_dollars(r.get("Survivor SS Income", 0.0))),
+        ("Total Government Drag", lambda r: format_dollars(r.get("Total Government Drag", 0.0))),
+        ("Total Conversions", lambda r: format_dollars(r.get("Total Conversions", 0.0))),
+        ("Max MAGI", lambda r: format_dollars(r.get("Max MAGI", 0.0))),
+        ("Stability", lambda r: str(r.get("Stability", ""))),
+        ("Risk", lambda r: str(r.get("Risk", ""))),
+    ]
+
+    compare_rows = []
+    for label, getter in compare_metrics:
+        row = {"Metric": label}
+        for idx, (_, source_row) in enumerate(primary_df.iterrows(), start=1):
+            row[f"#{idx}"] = getter(source_row)
+        compare_rows.append(row)
+    return pd.DataFrame(compare_rows)
+
+
+def build_strategy_scan_payload(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+    include_profile_shortlists: bool = True,
+) -> dict:
+    """
+    Shared post-candidate pipeline for BOTH Quick and Full.
+    After candidate generation, both scan types should call this same function so the
+    code path for evaluation outputs, scoring, ranking, primary rows, and comparison
+    rows is identical.
+    """
+    shared_outputs = build_scored_strategy_outputs(
+        results_rows,
+        inputs=inputs,
+        selected_profile_name=selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=shortlist_top_n,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "strategy scan ranked results")
+    primary_table_df = build_primary_strategy_table_df(ranked_df, top_n=primary_table_top_n)
+    comparison_df = build_top_strategy_comparison_df(ranked_df, top_n=comparison_top_n)
+    best_result = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
+    return {
+        "scoring_context": shared_outputs["scoring_context"],
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+        "best_result": best_result,
+        "profile_shortlists": shared_outputs["profile_shortlists"] if include_profile_shortlists else {},
     }
 
