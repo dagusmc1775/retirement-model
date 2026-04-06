@@ -28,8 +28,8 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v217-shared-path-enforced"
-APP_STATE_VERSION = "v104"
+APP_VERSION = "v218-lambda-shared-inputs"
+APP_STATE_VERSION = "v105"
 
 
 
@@ -7379,6 +7379,7 @@ def render_shared_household_inputs() -> dict:
         "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
         "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
         "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+        "trad_balance_penalty_lambda": float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
     }
     return inputs
 
