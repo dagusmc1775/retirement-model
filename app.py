@@ -1129,7 +1129,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Strategy": ranked_row["Strategy"],
                 "Owner SS Age": int(ranked_row["Owner SS Age"]),
                 "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
-                "Score": float(ranked_row["score_100"]),
+                "Selected Selected Score": float(ranked_row["score_100"]),
                 "Net Worth": float(ranked_row["final_net_worth"]),
                 "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
                 "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
@@ -1246,7 +1246,7 @@ def build_ranked_optimizer_results_df(
             "ACA Hit Years": int(ranked_row.get("ACA Hit Years", 0)),
             "IRMAA Hit Years": int(ranked_row.get("IRMAA Hit Years", 0)),
             "Traditional IRA Penalty Applied": float(ranked_row.get("lambda_penalty_dollars", 0.0)),
-            "Score": float(ranked_row["score_100"]),
+            "Selected Selected Score": float(ranked_row["score_100"]),
             "Stability": ranked_row.get("stability_label", ""),
             "Risk": ranked_row.get("risk_label", ""),
             "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
@@ -1261,11 +1261,11 @@ def build_ranked_optimizer_results_df(
             "Preference Bonus +": float(ranked_row.get("preference_bonus_component", 0.0) * 100.0),
             "Preference Penalty -": float(ranked_row.get("preference_penalty_component", 0.0) * 100.0),
             "Lambda Penalty -": float(ranked_row.get("lambda_penalty_score", 0.0) * 100.0),
-            "Balanced Score": float(profile_score_maps.get("Balanced", {}).get(ranked_row["Strategy"], 0.0)),
-            "Growth Score": float(profile_score_maps.get("Growth", {}).get(ranked_row["Strategy"], 0.0)),
-            "Tax-Efficient Score": float(profile_score_maps.get("Tax-Efficient Stability", {}).get(ranked_row["Strategy"], 0.0)),
-            "Legacy Score": float(profile_score_maps.get("Legacy Focused", {}).get(ranked_row["Strategy"], 0.0)),
-            "Spend With Confidence Score": float(profile_score_maps.get("Spend With Confidence", {}).get(ranked_row["Strategy"], 0.0)),
+            "Balanced Profile Score": float(profile_score_maps.get("Balanced", {}).get(ranked_row["Strategy"], 0.0)),
+            "Growth Profile Score": float(profile_score_maps.get("Growth", {}).get(ranked_row["Strategy"], 0.0)),
+            "Tax-Efficient Profile Score": float(profile_score_maps.get("Tax-Efficient Stability", {}).get(ranked_row["Strategy"], 0.0)),
+            "Legacy Profile Score": float(profile_score_maps.get("Legacy Focused", {}).get(ranked_row["Strategy"], 0.0)),
+            "Spend With Confidence Profile Score": float(profile_score_maps.get("Spend With Confidence", {}).get(ranked_row["Strategy"], 0.0)),
         })
 
     ranked_df = pd.DataFrame(rows)
@@ -1887,7 +1887,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     summary_df = pd.DataFrame([
         {
             "Strategy": row.get("Strategy", ""),
-            "Score": float(row.get("Score", 0.0)),
+            "Selected Score": float(row.get("Score", row.get("Selected Score", 0.0))),
             "Net Worth": float(row.get("Net Worth", row.get("Final Net Worth", 0.0))),
             "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
             "Trad IRA @ End": float(row.get("Trad IRA @ End", row.get("Ending Traditional IRA Balance", 0.0))),
@@ -2353,7 +2353,7 @@ def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapsho
             st.subheader("Quick Scan Summary")
             st.dataframe(
                 strategy_df.style.format({
-                    "Score": "{:.1f}",
+                    "Selected Score": "{:.1f}",
                     "Net Worth": "${:,.0f}",
                     "After-Tax Legacy": "${:,.0f}",
                     "Trad IRA @ End": "${:,.0f}",
@@ -5523,7 +5523,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
 
     if dynamic_shortlists:
         st.subheader("Top 5 exhaustive combinations by planning profile")
-        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the same unified scoring pipeline. They can differ from Quick Scan because Quick Scan only tests 7 anchor strategies, while this section searches all 81 combinations.")
+        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the same unified scoring pipeline. The Selected Score column is the active ranking score for that tab. The separate profile score columns in other tables are stored reference scores, not alternate ranking paths for this tab.")
         st.caption(f"Active modifiers applied now: {describe_active_scoring_preferences(current_preferences)}")
         tabs = st.tabs(list(dynamic_shortlists.keys()))
         for tab, tab_profile_name in zip(tabs, dynamic_shortlists.keys()):
@@ -5534,7 +5534,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                     continue
                 st.dataframe(
                     shortlist_df.style.format({
-                        "Score": "{:.2f}",
+                        "Selected Score": "{:.2f}",
                         "Net Worth": "${:,.0f}",
                         "After-Tax Legacy": "${:,.0f}",
                         "Effective Legacy Value": "${:,.0f}",
@@ -7371,7 +7371,7 @@ def render_conversion_page() -> None:
             st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
             st.dataframe(
                 quick_result["summary_df"].style.format({
-                    "Score": "{:.1f}",
+                    "Selected Score": "{:.1f}",
                     "Net Worth": "${:,.0f}",
                     "After-Tax Legacy": "${:,.0f}",
                     "Trad IRA @ End": "${:,.0f}",
