@@ -1344,6 +1344,56 @@ def build_ranked_optimizer_results_df(
     return reorder_ss_optimizer_results_df(ranked_df)
 
 
+def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) -> pd.DataFrame:
+    """
+    Shared primary strategy table schema for BOTH Quick and Full.
+    The goal is that overlapping strategies calculate, record, and display the same
+    canonical result fields regardless of whether they came from Quick or Full.
+    """
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    working = canonicalize_optimizer_result_df(df.copy(), "primary strategy table")
+    if top_n is not None:
+        working = working.head(int(top_n)).copy()
+    preferred = [
+        "Rank",
+        "Strategy",
+        "Owner SS Age",
+        "Spouse SS Age",
+        "Selected Score",
+        "Score",
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Traditional IRA Balance",
+        "Ending Roth Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Stability Value",
+        "Risk Value",
+        "Stability",
+        "Risk",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Social Security Present Value",
+        "Total Government Drag",
+        "Total Conversions",
+        "Total Federal Tax",
+        "Total State Tax",
+        "Total ACA Cost",
+        "Total IRMAA Cost",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+    ]
+    existing = [c for c in preferred if c in working.columns]
+    return working.loc[:, existing].copy()
+
+
 def clamp01(value: float) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -2076,28 +2126,12 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     ranked = ranked_df.to_dict("records")
     data_source = "quick_subset_shared_scoring_pipeline"
 
-    summary_df = pd.DataFrame([
-        {
-            "Strategy": row.get("Strategy", ""),
-            "Selected Score": float(row.get("Score", row.get("Selected Score", 0.0))),
-            "Net Worth": float(row.get("Net Worth", row.get("Final Net Worth", 0.0))),
-            "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
-            "Trad IRA @ End": float(row.get("Trad IRA @ End", row.get("Ending Traditional IRA Balance", 0.0))),
-            "Roth @ End": float(row.get("Roth @ End", row.get("Ending Roth Balance", 0.0))),
-            "Brokerage @ End": float(row.get("Brokerage @ End", row.get("Ending Brokerage Balance", 0.0))),
-            "Stability": row.get("Stability", ""),
-            "Risk": row.get("Risk", ""),
-            "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
-            "Survivor SS Income": float(row.get("Survivor SS Income", 0.0)),
-            "Owner SS Age": int(row.get("Owner SS Age", 0)),
-            "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
-        }
-        for row in ranked[:10]
-    ])
+    summary_df = build_primary_strategy_table_df(ranked_df, top_n=10)
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
         "summary_df": summary_df,
+        "all_results_df": canonicalize_optimizer_result_df(ranked_df.copy(), "quick scored results"),
         "ranked_rows": ranked,
         "advisor_text": explanation,
         "close_result": is_close_quick_result(ranked),
@@ -5651,26 +5685,31 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if not result.get("completed", True):
         return
 
-    top_10_df = result.get("top_10_df", pd.DataFrame())
+    top_10_df = build_primary_strategy_table_df(result.get("top_10_df", pd.DataFrame()), top_n=10)
     st.subheader(f"Top 10 SS Strategies for {planning_profile}")
-    st.caption("This table uses the same current-profile scoring pipeline as Quick Scan and the exhaustive shortlist below: profile weights, modifiers, and lambda penalty all flow through the same ranking logic.")
+    st.caption("This table now uses the same canonical primary-result schema as Quick Scan. The only intended difference is candidate universe size.")
     st.dataframe(
         top_10_df.style.format({
+            "Selected Score": "{:.2f}",
+            "Score": "{:.2f}",
             "Final Net Worth": "${:,.0f}",
             "After-Tax Legacy": "${:,.0f}",
-            "Ending Roth Balance": "${:,.0f}",
+            "Effective Legacy Value": "${:,.0f}",
+            "Heir Tax Drag": "${:,.0f}",
             "Ending Traditional IRA Balance": "${:,.0f}",
+            "Ending Roth Balance": "${:,.0f}",
             "Ending Brokerage Balance": "${:,.0f}",
+            "Ending Cash Balance": "${:,.0f}",
+            "Final Household SS Income": "${:,.0f}",
+            "Survivor SS Income": "${:,.0f}",
+            "Social Security Present Value": "${:,.0f}",
             "Total Federal Tax": "${:,.0f}",
             "Total State Tax": "${:,.0f}",
             "Total ACA Cost": "${:,.0f}",
             "Total IRMAA Cost": "${:,.0f}",
             "Total Government Drag": "${:,.0f}",
             "Total Conversions": "${:,.0f}",
-            "Traditional IRA Penalty Applied": "${:,.0f}",
-            "Risk Value": "{:,.0f}",
             "Max MAGI": "${:,.0f}",
-            "Score": "${:,.0f}",
         }),
         use_container_width=True,
     )
@@ -7554,20 +7593,32 @@ def render_conversion_page() -> None:
             else:
                 render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick scan results")
             st.subheader("Quick Scan Summary")
-            st.caption("These strategy rows use the same core engine and ranking path as the Full 81 scan, but only over the 7 quick-scan anchor strategies. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+            st.caption("These strategy rows now use the same canonical result schema, the same core engine, and the same ranking path as the Full 81 scan. The only intended difference is that Quick evaluates fewer candidate strategies.")
             if quick_result.get("applied_preset_note"):
                 st.caption(quick_result["applied_preset_note"])
             st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
             st.dataframe(
                 quick_result["summary_df"].style.format({
-                    "Selected Score": "{:.1f}",
-                    "Net Worth": "${:,.0f}",
+                    "Selected Score": "{:.2f}",
+                    "Score": "{:.2f}",
+                    "Final Net Worth": "${:,.0f}",
                     "After-Tax Legacy": "${:,.0f}",
-                    "Trad IRA @ End": "${:,.0f}",
-                    "Roth @ End": "${:,.0f}",
-                    "Brokerage @ End": "${:,.0f}",
+                    "Effective Legacy Value": "${:,.0f}",
+                    "Heir Tax Drag": "${:,.0f}",
+                    "Ending Traditional IRA Balance": "${:,.0f}",
+                    "Ending Roth Balance": "${:,.0f}",
+                    "Ending Brokerage Balance": "${:,.0f}",
+                    "Ending Cash Balance": "${:,.0f}",
                     "Final Household SS Income": "${:,.0f}",
                     "Survivor SS Income": "${:,.0f}",
+                    "Social Security Present Value": "${:,.0f}",
+                    "Total Government Drag": "${:,.0f}",
+                    "Total Conversions": "${:,.0f}",
+                    "Total Federal Tax": "${:,.0f}",
+                    "Total State Tax": "${:,.0f}",
+                    "Total ACA Cost": "${:,.0f}",
+                    "Total IRMAA Cost": "${:,.0f}",
+                    "Max MAGI": "${:,.0f}",
                 }),
                 use_container_width=True,
             )
