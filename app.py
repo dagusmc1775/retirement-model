@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v205-modular-ss-scan-pipeline-shared-quick-full-ranking"
+APP_VERSION = "v203-shared-quick-full-ranking"
 APP_STATE_VERSION = "v103"
 
 
@@ -804,105 +804,6 @@ def build_ss_optimizer_result_row(
         "Traditional IRA Penalty Applied": trad_penalty_applied,
         "Score": float(run_result["final_net_worth"]) - trad_penalty_applied,
     }
-
-
-def get_ss_scan_candidate_combos(scan_mode: str) -> list[tuple[int, int]]:
-    mode = str(scan_mode or "").strip().lower()
-    if mode == "quick":
-        return [(int(a), int(b)) for a, b in QUICK_STRATEGY_COMBOS]
-    if mode == "full":
-        return [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
-    raise ValueError(f"Unknown SS scan mode: {scan_mode}")
-
-
-def prepare_ss_scan_base_inputs(inputs: dict) -> dict:
-    base_snapshot = copy.deepcopy(inputs or {})
-    base_snapshot["integrity_mode"] = False
-    base_snapshot["strict_repeatability_check"] = False
-    return base_snapshot
-
-
-def evaluate_single_ss_candidate(
-    base_inputs: dict,
-    owner_age: int,
-    spouse_age: int,
-    max_conversion: float,
-    step_size: float,
-    trad_balance_penalty_lambda: float = 0.0,
-) -> dict:
-    scenario_inputs = dict(base_inputs)
-    scenario_inputs["owner_claim_age"] = int(owner_age)
-    scenario_inputs["spouse_claim_age"] = int(spouse_age)
-    run_result = run_model_break_even_governor(
-        scenario_inputs,
-        sanitize_governor_max_conversion(float(max_conversion)),
-        sanitize_governor_step_size(float(step_size)),
-    )
-    return build_ss_optimizer_result_row(
-        run_result,
-        owner_age,
-        spouse_age,
-        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-    )
-
-
-def evaluate_ss_scan_candidates(
-    base_inputs: dict,
-    candidate_combos: list[tuple[int, int]],
-    max_conversion: float,
-    step_size: float,
-    trad_balance_penalty_lambda: float = 0.0,
-    progress_prefix: str = "Running SS scan",
-    initial_results: list | None = None,
-    start_index: int = 0,
-    progress_callback=None,
-    error_callback=None,
-) -> tuple[list[dict], list[str]]:
-    results = list(initial_results or [])
-    errors: list[str] = []
-    total = len(candidate_combos)
-    progress_bar = st.progress(start_index / total if total else 0.0, text=f"{progress_prefix}...") if total else None
-    try:
-        for combo_index in range(start_index, total):
-            owner_age, spouse_age = candidate_combos[combo_index]
-            try:
-                row = evaluate_single_ss_candidate(
-                    base_inputs, owner_age, spouse_age, max_conversion, step_size, trad_balance_penalty_lambda=trad_balance_penalty_lambda
-                )
-                results.append(row)
-                if progress_callback is not None:
-                    progress_callback(combo_index, owner_age, spouse_age, results)
-            except Exception as exc:
-                errors.append(f"{owner_age}/{spouse_age}: {exc}")
-                if error_callback is not None:
-                    payload = error_callback(combo_index, owner_age, spouse_age, exc, results)
-                    if payload is not None:
-                        return payload, errors
-            finally:
-                if progress_bar is not None:
-                    progress_bar.progress((combo_index + 1) / total, text=f"{progress_prefix}... {combo_index + 1}/{total}")
-    finally:
-        if progress_bar is not None:
-            progress_bar.empty()
-    return results, errors
-
-
-def score_rank_ss_scan_rows(
-    results_rows: list[dict],
-    inputs: dict,
-    selected_profile_name: str,
-    preferences: dict | None = None,
-    trad_balance_penalty_lambda: float = 0.0,
-    shortlist_top_n: int = 10,
-) -> dict:
-    return build_scored_strategy_outputs(
-        results_rows,
-        inputs=inputs,
-        selected_profile_name=selected_profile_name,
-        preferences=preferences or {},
-        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-        shortlist_top_n=shortlist_top_n,
-    )
 
 
 def build_ss_optimizer_fact_rows(
@@ -1954,23 +1855,24 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     preferences = extract_scoring_preferences(inputs)
-    base_inputs = prepare_ss_scan_base_inputs(inputs)
+    base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
     quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
     quick_step_size = sanitize_governor_step_size(float(step_size))
     trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
 
-    quick_rows, errors = evaluate_ss_scan_candidates(
+    quick_rows, errors = build_ss_optimizer_fact_rows(
         base_inputs,
-        get_ss_scan_candidate_combos("quick"),
+        QUICK_STRATEGY_COMBOS,
         quick_max_conversion,
         quick_step_size,
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-        progress_prefix="Running Quick Scan",
+        progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
+        cache_namespace="_quick_recommendation_result_rows_cache",
     )
     if not quick_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
 
-    shared_outputs = score_rank_ss_scan_rows(
+    shared_outputs = build_scored_strategy_outputs(
         quick_rows,
         inputs=base_inputs,
         selected_profile_name=profile_name,
@@ -1982,23 +1884,40 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     ranked = ranked_df.to_dict("records")
     data_source = "quick_subset_shared_scoring_pipeline"
 
+    summary_df = pd.DataFrame([
+        {
+            "Strategy": row.get("Strategy", ""),
+            "Score": float(row.get("Score", 0.0)),
+            "Net Worth": float(row.get("Net Worth", row.get("Final Net Worth", 0.0))),
+            "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "Trad IRA @ End": float(row.get("Trad IRA @ End", row.get("Ending Traditional IRA Balance", 0.0))),
+            "Roth @ End": float(row.get("Roth @ End", row.get("Ending Roth Balance", 0.0))),
+            "Brokerage @ End": float(row.get("Brokerage @ End", row.get("Ending Brokerage Balance", 0.0))),
+            "Stability": row.get("Stability", ""),
+            "Risk": row.get("Risk", ""),
+            "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
+            "Survivor SS Income": float(row.get("Survivor SS Income", 0.0)),
+            "Owner SS Age": int(row.get("Owner SS Age", 0)),
+            "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
+        }
+        for row in ranked[:10]
+    ])
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
-        "summary_df": ranked_df.head(10).copy(),
+        "summary_df": summary_df,
         "ranked_rows": ranked,
         "advisor_text": explanation,
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
         "data_source": data_source,
+        "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
         "strategy_universe_size": len(quick_rows),
         "profile_shortlists": shared_outputs.get("profile_shortlists", {}),
-        "quick_recommendation_input_state": copy.deepcopy(base_inputs),
-        "quick_recommendation_source_scenario_state": copy.deepcopy(inputs),
+        "scoring_context": shared_outputs.get("scoring_context", {}),
     }
-
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -5248,162 +5167,2952 @@ def run_ss_optimizer(
     existing_results: list | None = None,
     profile_name: str = "Balanced",
 ) -> dict:
-    combos = get_ss_scan_candidate_combos("full")
+    combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
-    base_snapshot = prepare_ss_scan_base_inputs(inputs)
+
+    # Freeze a clean snapshot for optimizer runs and force the optimizer path into fast mode.
+    # This 81-combination scan is intentionally profile-neutral at the engine level so the
+    # resulting raw combo table can be rescored independently for every planning profile.
+    base_snapshot = copy.deepcopy(inputs)
+    base_snapshot["integrity_mode"] = False
+    base_snapshot["strict_repeatability_check"] = False
+    quick_max_conversion = sanitize_governor_max_conversion(
+        float(base_snapshot.get("quick_recommendation_max_conversion", QUICK_RECOMMENDATION_MAX_CONVERSION))
+    )
+    quick_step_size = sanitize_governor_step_size(
+        float(base_snapshot.get("quick_recommendation_step_size", QUICK_RECOMMENDATION_STEP_SIZE))
+    )
+
     results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
     st.session_state["ss_optimizer_interrupted"] = False
     st.session_state["ss_optimizer_error"] = None
     st.session_state["ss_optimizer_partial_results"] = results
+    progress_bar = st.progress(start_index / total_combos if total_combos else 0.0, text="Running Social Security optimizer...")
 
-    def _progress_callback(combo_index: int, owner_age: int, spouse_age: int, current_results: list[dict]) -> None:
-        st.session_state["ss_optimizer_partial_results"] = current_results
-        st.session_state["ss_optimizer_progress_index"] = combo_index + 1
-        st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
+    try:
+        for combo_index in range(start_index, total_combos):
+            owner_age, spouse_age = combos[combo_index]
+            scenario_inputs = dict(base_snapshot)
+            scenario_inputs["owner_claim_age"] = int(owner_age)
+            scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
-    def _error_callback(combo_index: int, owner_age: int, spouse_age: int, exc: Exception, current_results: list[dict]):
-        st.session_state["ss_optimizer_progress_index"] = combo_index
-        st.session_state["ss_optimizer_partial_results"] = current_results
-        st.session_state["ss_optimizer_last_completed"] = combos[combo_index - 1] if combo_index > 0 else None
-        st.session_state["ss_optimizer_interrupted"] = True
-        st.session_state["ss_optimizer_error"] = f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
-        interrupted_df = pd.DataFrame(current_results) if current_results else pd.DataFrame()
-        return tag_result_payload({
-            "all_results_df": interrupted_df.copy(),
-            "all_results_export_df": interrupted_df.copy(),
-            "top_10_df": interrupted_df.head(10).copy(),
-            "top_10_export_df": interrupted_df.head(10).copy(),
-            "comparison_df": pd.DataFrame(),
-            "comparison_display_df": pd.DataFrame(),
-            "best_result": None,
-            "best_validation": None,
-            "best_rerun_summary": None,
+            try:
+                run_result = run_model_break_even_governor(scenario_inputs, quick_max_conversion, quick_step_size)
+            except Exception as exc:
+                st.session_state["ss_optimizer_progress_index"] = combo_index
+                st.session_state["ss_optimizer_partial_results"] = results
+                st.session_state["ss_optimizer_last_completed"] = combos[combo_index - 1] if combo_index > 0 else None
+                st.session_state["ss_optimizer_interrupted"] = True
+                st.session_state["ss_optimizer_error"] = f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
+                interrupted_df = pd.DataFrame(results) if results else pd.DataFrame()
+                return tag_result_payload({
+                    "all_results_df": interrupted_df.copy(),
+                    "all_results_export_df": interrupted_df.copy(),
+                    "top_10_df": interrupted_df.head(10).copy(),
+                    "top_10_export_df": interrupted_df.head(10).copy(),
+                    "comparison_df": pd.DataFrame(),
+                    "comparison_display_df": pd.DataFrame(),
+                    "best_result": None,
+                    "best_validation": None,
+                    "best_rerun_summary": None,
+                    "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+                    "profile_name": None,
+                    "optimizer_is_profile_neutral": True,
+                    "interrupted_partial_df": interrupted_df.copy(),
+                    "completed": False,
+                    "progress_index": combo_index,
+                    "total_combos": total_combos,
+                    "error_message": st.session_state["ss_optimizer_error"],
+                }, engine="ss_optimizer")
+
+            row = build_ss_optimizer_result_row(
+                run_result,
+                owner_age,
+                spouse_age,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            )
+            results.append(row)
+            st.session_state["ss_optimizer_partial_results"] = results
+            st.session_state["ss_optimizer_progress_index"] = combo_index + 1
+            st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
+            progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
+
+        scoring_preferences = extract_scoring_preferences(inputs)
+        shared_outputs = build_scored_strategy_outputs(
+            results,
+            inputs=inputs,
+            selected_profile_name=profile_name,
+            preferences=scoring_preferences,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            shortlist_top_n=5,
+        )
+        scoring_context = shared_outputs["scoring_context"]
+        results_df = shared_outputs["ranked_df"]
+        profile_shortlists = shared_outputs["profile_shortlists"]
+
+        top_10_df = results_df.head(10).copy()
+        top_3 = results_df.head(3).copy()
+
+        compare_metrics = [
+            ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
+            ("Final Net Worth", lambda r: format_dollars(r["Final Net Worth"])),
+            ("Ending Traditional IRA Balance", lambda r: format_dollars(r["Ending Traditional IRA Balance"])),
+            ("Total Government Drag", lambda r: format_dollars(r["Total Government Drag"])),
+            ("Total Conversions", lambda r: format_dollars(r["Total Conversions"])),
+            ("Total Federal Tax", lambda r: format_dollars(r["Total Federal Tax"])),
+            ("Total State Tax", lambda r: format_dollars(r["Total State Tax"])),
+            ("Total ACA Cost", lambda r: format_dollars(r["Total ACA Cost"])),
+            ("Total IRMAA Cost", lambda r: format_dollars(r["Total IRMAA Cost"])),
+            ("Max MAGI", lambda r: format_dollars(r["Max MAGI"])),
+            ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
+            ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
+            ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
+            ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
+            ("Score", lambda r: format_dollars(r["Score"])),
+        ]
+
+        compare_rows = []
+        for metric_name, getter in compare_metrics:
+            row = {"Metric": metric_name}
+            for idx in range(3):
+                col_name = f"#{idx + 1}"
+                row[col_name] = getter(top_3.iloc[idx]) if idx < len(top_3) else ""
+            compare_rows.append(row)
+        comparison_df = pd.DataFrame(compare_rows)
+
+        best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
+        best_validation = None
+        best_rerun_summary = None
+        if integrity_mode and best_result is not None:
+            best_inputs = dict(inputs)
+            best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
+            best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
+            best_rerun = run_model_break_even_governor(best_inputs, max_conversion, step_size)
+            best_validation = make_consistency_payload(
+                {
+                    "final_net_worth": float(best_result["Final Net Worth"]),
+                    "ending_trad_balance": float(best_result["Ending Traditional IRA Balance"]),
+                    "total_conversions": float(best_result["Total Conversions"]),
+                    "total_federal_taxes": float(best_result["Total Federal Tax"]),
+                    "total_state_taxes": float(best_result["Total State Tax"]),
+                    "total_aca_cost": float(best_result["Total ACA Cost"]),
+                    "total_irmaa_cost": float(best_result["Total IRMAA Cost"]),
+                    "total_government_drag": float(best_result["Total Government Drag"]),
+                    "total_shortfall": 0.0,
+                    "max_magi": float(best_result["Max MAGI"]),
+                },
+                best_rerun,
+                tol=validation_tolerance,
+            )
+            best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
+
+        progress_bar.empty()
+        clear_ss_optimizer_state(clear_last_result=False)
+        st.session_state["ss_optimizer_last_result"] = tag_result_payload({
+            "all_results_df": results_df,
+            "top_10_df": top_10_df,
+            "comparison_df": comparison_df,
+            "profile_shortlists": profile_shortlists,
+            "raw_results_df": pd.DataFrame(results),
+            "best_result": best_result,
+            "best_validation": best_validation,
+            "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": copy.deepcopy(scoring_context),
             "profile_name": None,
             "optimizer_is_profile_neutral": True,
-            "interrupted_partial_df": interrupted_df.copy(),
-            "completed": False,
-            "progress_index": combo_index,
+            "completed": True,
+            "progress_index": total_combos,
             "total_combos": total_combos,
-            "error_message": st.session_state["ss_optimizer_error"],
+            "interrupted_partial_df": None,
+            "error_message": None,
         }, engine="ss_optimizer")
+        return tag_result_payload({
+            "all_results_df": results_df,
+            "all_results_export_df": results_df.copy(),
+            "top_10_df": top_10_df,
+            "top_10_export_df": top_10_df.copy(),
+            "comparison_df": comparison_df,
+            "comparison_display_df": comparison_df,
+            "profile_shortlists": profile_shortlists,
+            "raw_results_df": pd.DataFrame(results),
+            "best_result": best_result,
+            "best_validation": best_validation,
+            "best_rerun_summary": best_rerun_summary,
+            "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": copy.deepcopy(scoring_context),
+            "profile_name": profile_name,
+            "applied_preset_note": "",
+            "interrupted_partial_df": None,
+            "completed": True,
+            "progress_index": total_combos,
+            "total_combos": total_combos,
+            "error_message": None,
+        }, engine="ss_optimizer")
+    finally:
+        st.session_state["ss_optimizer_running"] = False
+        try:
+            progress_bar.empty()
+        except Exception:
+            pass
 
-    evaluated, errors = evaluate_ss_scan_candidates(
-        base_snapshot,
-        combos,
+
+
+def render_ss_optimizer_results(result: dict, planning_profile: str, current_preferences: dict):
+    st.subheader("Full 81-Combination Scan Results")
+    st.caption("Use this section for exhaustive validation or to explore alternatives after you review the quick scan and Break-Even Governor results.")
+
+    quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+    all_results_df = result.get("all_results_df", pd.DataFrame())
+    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty:
+        base_context_inputs = collect_scenario_state()
+        dynamic_scoring_context = result.get("scoring_context")
+        if not isinstance(dynamic_scoring_context, dict) or not dynamic_scoring_context:
+            dynamic_scoring_context = build_strategy_scoring_context(inputs=base_context_inputs, metrics_list=all_results_df.to_dict("records"))
+        dynamic_shortlists = build_profile_shortlists_from_optimizer_rows(
+            all_results_df.to_dict("records"),
+            preferences=current_preferences or {},
+            trad_balance_penalty_lambda=float(result.get("trad_balance_penalty_lambda", 0.0)),
+            scoring_context=dynamic_scoring_context,
+        )
+    else:
+        dynamic_shortlists = {}
+
+    current_profile_shortlist = dynamic_shortlists.get(planning_profile, pd.DataFrame())
+    profile_best = current_profile_shortlist.iloc[0].to_dict() if isinstance(current_profile_shortlist, pd.DataFrame) and not current_profile_shortlist.empty else None
+    raw_best = result.get("best_result")
+
+    if quick_result is not None and profile_best is not None:
+        ranked_rows = quick_result.get("ranked_rows", []) or []
+        quick_winner = ranked_rows[0] if ranked_rows else None
+
+        def _f(row: dict, key: str) -> float:
+            try:
+                return float(row.get(key, 0.0))
+            except Exception:
+                return 0.0
+
+        if quick_winner is not None:
+            quick_strategy = str(quick_winner.get("Strategy", ""))
+            best_strategy = str(profile_best.get("Strategy", ""))
+            if quick_strategy == best_strategy:
+                st.success(f"Exhaustive search across all 81 combinations confirms the current-profile recommendation ({quick_strategy}).")
+            else:
+                st.warning(f"Exhaustive search across all 81 combinations found a stronger current-profile strategy than the current quick scan ({quick_strategy} → {best_strategy}).")
+
+            quick_net = _f(quick_winner, "Final Net Worth")
+            quick_legacy = _f(quick_winner, "After-Tax Legacy")
+            quick_ss = _f(quick_winner, "Final Household SS Income")
+            quick_trad = _f(quick_winner, "Ending Traditional IRA Balance")
+
+            best_net = _f(profile_best, "Net Worth")
+            best_legacy = _f(profile_best, "After-Tax Legacy")
+            best_ss = _f(profile_best, "Final Household SS Income")
+            best_trad = _f(profile_best, "Trad IRA @ End")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Quick scan winner**")
+                st.write(quick_strategy)
+            with c2:
+                st.markdown(f"**Best exhaustive result for {planning_profile}**")
+                st.write(best_strategy)
+
+            st.markdown(
+                "\n".join([
+                    "**Difference summary**",
+                    f"- Final Net Worth: {format_signed_dollars(best_net - quick_net)}",
+                    f"- After-Tax Legacy: {format_signed_dollars(best_legacy - quick_legacy)}",
+                    f"- Household Social Security Income: {format_signed_dollars(best_ss - quick_ss)}/year",
+                    f"- Ending Traditional IRA: {format_signed_dollars(best_trad - quick_trad)}",
+                ])
+            )
+
+            materiality_score = max(
+                abs(best_net - quick_net),
+                abs(best_legacy - quick_legacy),
+                abs(best_ss - quick_ss) * 15.0,
+            )
+            if materiality_score < 100000:
+                st.info("Differences are small. The quick scan is already close to the full 81-combination search, so the exhaustive result is mostly a confirmation.")
+            else:
+                st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
+
+    st.markdown(f"**Traditional IRA lambda weight:** {result['trad_balance_penalty_lambda']:.2f}")
+    st.caption("Full 81 results below are now ranked with the same scoring pipeline used everywhere else. The lambda weight is part of that unified score rather than a separate raw-only ranking.")
+    if raw_best is not None:
+        best = raw_best
+        st.write(f"Current-profile exhaustive winner: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
+        st.write(f"Unified score: {best['Score']:.2f}")
+        st.write(f"Final Net Worth: {format_dollars(best['Final Net Worth'])}")
+        st.write(f"Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
+
+    if result.get("best_validation") is not None:
+        validation = result["best_validation"]
+        if validation["passed"]:
+            st.success("Best-strategy rerun validation passed. Optimizer winner matched a fresh rerun within tolerance.")
+        else:
+            st.error("Best-strategy rerun validation failed. The optimizer winner did not match a fresh rerun.")
+            st.dataframe(validation["mismatch_df"], use_container_width=True)
+
+    if result.get("interrupted_partial_df") is not None or not result.get("completed", True):
+        msg = result.get("error_message") or "A prior optimizer run was interrupted before all 81 combinations finished."
+        st.warning(f"{msg} Resume it to complete the full run.")
+
+    if not result.get("completed", True):
+        return
+
+    top_10_df = result.get("top_10_df", pd.DataFrame())
+    st.subheader(f"Top 10 SS Strategies for {planning_profile}")
+    st.caption("This table uses the same current-profile scoring pipeline as Quick Scan and the exhaustive shortlist below: profile weights, modifiers, and lambda penalty all flow through the same ranking logic.")
+    st.dataframe(
+        top_10_df.style.format({
+            "Final Net Worth": "${:,.0f}",
+            "After-Tax Legacy": "${:,.0f}",
+            "Ending Roth Balance": "${:,.0f}",
+            "Ending Traditional IRA Balance": "${:,.0f}",
+            "Ending Brokerage Balance": "${:,.0f}",
+            "Total Federal Tax": "${:,.0f}",
+            "Total State Tax": "${:,.0f}",
+            "Total ACA Cost": "${:,.0f}",
+            "Total IRMAA Cost": "${:,.0f}",
+            "Total Government Drag": "${:,.0f}",
+            "Total Conversions": "${:,.0f}",
+            "Traditional IRA Penalty Applied": "${:,.0f}",
+            "Risk Value": "{:,.0f}",
+            "Max MAGI": "${:,.0f}",
+            "Score": "${:,.0f}",
+        }),
+        use_container_width=True,
+    )
+    st.download_button(
+        "Download Raw Top 10 SS Strategies (CSV)",
+        data=result["top_10_export_df"].to_csv(index=False),
+        file_name="top_10_ss_strategies.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    st.subheader("Top 3 Side-by-Side Comparison")
+    st.dataframe(result["comparison_display_df"], use_container_width=True)
+    st.download_button(
+        "Download Top 3 Comparison (CSV)",
+        data=result["comparison_display_df"].to_csv(index=False),
+        file_name="top_3_ss_comparison.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v139.json"
+    st.download_button(
+        "Export SS Optimizer Results (JSON)",
+        data=build_ss_optimizer_export_payload(result),
+        file_name=ss_export_name,
+        mime="application/json",
+        use_container_width=True,
+    )
+    st.caption("This JSON is an export for outside review. It does not open in Snapshot Viewer.")
+
+    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
+        try:
+            if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
+                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only.")
+        except Exception:
+            pass
+
+    if dynamic_shortlists:
+        st.subheader("Top 5 exhaustive combinations by planning profile")
+        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the same unified scoring pipeline. They can differ from Quick Scan because Quick Scan only tests 7 anchor strategies, while this section searches all 81 combinations.")
+        st.caption(f"Active modifiers applied now: {describe_active_scoring_preferences(current_preferences)}")
+        tabs = st.tabs(list(dynamic_shortlists.keys()))
+        for tab, tab_profile_name in zip(tabs, dynamic_shortlists.keys()):
+            with tab:
+                shortlist_df = dynamic_shortlists.get(tab_profile_name, pd.DataFrame())
+                if shortlist_df.empty:
+                    st.info("No shortlist available for this profile yet.")
+                    continue
+                st.dataframe(
+                    shortlist_df.style.format({
+                        "Score": "{:.2f}",
+                        "Net Worth": "${:,.0f}",
+                        "After-Tax Legacy": "${:,.0f}",
+                        "Effective Legacy Value": "${:,.0f}",
+                        "Heir Tax Drag": "${:,.0f}",
+                        "Trad IRA @ End": "${:,.0f}",
+                        "Traditional IRA Share @ End": "{:.1%}",
+                        "Roth @ End": "${:,.0f}",
+                        "Brokerage @ End": "${:,.0f}",
+                        "Final Household SS Income": "${:,.0f}",
+                        "Survivor SS Income": "${:,.0f}",
+                        "Total Government Drag": "${:,.0f}",
+                        "Total Conversions": "${:,.0f}",
+                        "NW Score +": "{:.2f}",
+                        "Legacy Score +": "{:.2f}",
+                        "Stability Score +": "{:.2f}",
+                        "Trad Penalty -": "{:.2f}",
+                        "Trad Share Penalty -": "{:.2f}",
+                        "Gov Drag Penalty -": "{:.2f}",
+                        "Heir Tax Penalty -": "{:.2f}",
+                        "Risk Penalty -": "{:.2f}",
+                    }),
+                    use_container_width=True,
+                )
+                top_row = shortlist_df.iloc[0]
+                st.caption("This button loads the selected exhaustive shortlist winner into the Governor below. It does not rerun the optimizer.")
+                st.button(
+                    f"Apply {tab_profile_name} winner {top_row['Strategy']} to Governor",
+                    key=f"profile_shortlist_open_{tab_profile_name}_{top_row['Strategy']}",
+                    on_click=launch_conversion_optimizer_from_strategy,
+                    args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", tab_profile_name),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    f"Download {tab_profile_name} Top 5 (CSV)",
+                    data=shortlist_df.to_csv(index=False),
+                    file_name=f"ss_optimizer_top5_{tab_profile_name.lower().replace(' ', '_').replace('-', '_')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"download_profile_shortlist_{tab_profile_name}",
+                )
+
+    with st.expander("All 81 SS combinations"):
+        st.caption("Full ranked universe using the current profile, active modifiers, and lambda penalty.")
+        st.dataframe(
+            all_results_df.style.format({
+                "Final Net Worth": "${:,.0f}",
+                "After-Tax Legacy": "${:,.0f}",
+                "Ending Roth Balance": "${:,.0f}",
+                "Ending Traditional IRA Balance": "${:,.0f}",
+                "Ending Brokerage Balance": "${:,.0f}",
+                "Total Federal Tax": "${:,.0f}",
+                "Total State Tax": "${:,.0f}",
+                "Total ACA Cost": "${:,.0f}",
+                "Total IRMAA Cost": "${:,.0f}",
+                "Total Government Drag": "${:,.0f}",
+                "Total Conversions": "${:,.0f}",
+                "Traditional IRA Penalty Applied": "${:,.0f}",
+                "Risk Value": "{:,.0f}",
+                "Max MAGI": "${:,.0f}",
+                "Score": "${:,.0f}",
+            }),
+            use_container_width=True,
+        )
+        st.download_button(
+            "Download All 81 SS Results (CSV)",
+            data=result["all_results_export_df"].to_csv(index=False),
+            file_name="all_ss_results.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+def get_first_irmaa_cliff_threshold(year: int) -> float | None:
+    table = get_irmaa_table(year)
+    positive_rows = [row for row in table if float(row[2]) > 0.0]
+    if not positive_rows:
+        return None
+    return float(positive_rows[0][0])
+
+
+def evaluate_annual_conversion_candidate(
+    year: int,
+    other_ordinary_income: float,
+    total_ss: float,
+    realized_ltcg: float,
+    conversion: float,
+    state_tax_rate: float,
+    aca_lives: int,
+    medicare_lives: int,
+) -> dict:
+    conversion = max(0.0, float(conversion))
+    other_ordinary_income = max(0.0, float(other_ordinary_income))
+    total_ss = max(0.0, float(total_ss))
+    realized_ltcg = max(0.0, float(realized_ltcg))
+
+    tax_info = calculate_federal_tax(
+        other_ordinary_income + conversion,
+        total_ss,
+        year,
+        realized_ltcg=realized_ltcg,
+    )
+    magi = calculate_magi(tax_info['agi'], year)
+    state_tax = max(
+        0.0,
+        float(tax_info['ordinary_taxable_income'] + tax_info.get('ltcg_taxable_income', 0.0))
+    ) * float(state_tax_rate)
+    aca_cost = calculate_aca_cost(magi, year, aca_lives)
+    irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
+    total_drag = float(tax_info['federal_tax'] + state_tax + aca_cost + irmaa_cost)
+    agi = float(tax_info['agi'])
+    total_tax = float(tax_info['federal_tax'] + state_tax)
+    effective_tax_rate = (total_tax / agi) if agi > 0 else 0.0
+    # All-in effective rate is intentionally conversion-based, not AGI-based.
+    # This keeps it aligned with the annual conversion decision question:
+    # "What percent of this conversion is being consumed by total government drag?"
+    all_in_effective_rate = (total_drag / conversion) if conversion > 0 else None
+    aca_limit = get_aca_magi_limit(year, aca_lives) if aca_lives > 0 else None
+    first_irmaa_cliff = get_first_irmaa_cliff_threshold(year) if medicare_lives > 0 else None
+    aca_headroom_remaining = max(0.0, float(aca_limit) - float(magi)) if aca_limit is not None else None
+    irmaa_headroom_remaining = max(0.0, float(first_irmaa_cliff) - float(magi)) if first_irmaa_cliff is not None else None
+
+    return {
+        'Conversion': conversion,
+        'Other Ordinary Income': float(other_ordinary_income + conversion),
+        'Total SS': total_ss,
+        'Realized LTCG': realized_ltcg,
+        'Taxable SS': float(tax_info['taxable_ss']),
+        'AGI': agi,
+        'MAGI': float(magi),
+        'Ordinary Taxable Income': float(tax_info['ordinary_taxable_income']),
+        'LTCG Taxable Income': float(tax_info['ltcg_taxable_income']),
+        'Taxable Income': float(tax_info['taxable_income']),
+        'Federal Tax': float(tax_info['federal_tax']),
+        'State Tax': float(state_tax),
+        'ACA Cost': float(aca_cost),
+        'IRMAA Cost': float(irmaa_cost),
+        'Total Tax': total_tax,
+        'Total Government Drag': total_drag,
+        'Effective Tax Rate': float(effective_tax_rate),
+        'All-In Effective Rate': (float(all_in_effective_rate) if all_in_effective_rate is not None else ''),
+        'ACA Headroom Remaining': aca_headroom_remaining,
+        'IRMAA Headroom Remaining': irmaa_headroom_remaining,
+        'Marginal Rate': float(tax_info['marginal_rate']),
+    }
+
+
+def round_down_to_step(value: float, step_size: float) -> float:
+    value = max(0.0, float(value))
+    step_size = max(1.0, float(step_size))
+    return math.floor(value / step_size) * step_size
+
+
+def safe_numeric_or_blank(value):
+    if value in ('', None):
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return ''
+
+
+def find_max_conversion_under_rule(
+    year: int,
+    base_other_ordinary_income: float,
+    total_ss: float,
+    realized_ltcg: float,
+    state_tax_rate: float,
+    aca_lives: int,
+    medicare_lives: int,
+    max_conversion: float,
+    step_size: float,
+    predicate,
+) -> tuple[float, dict]:
+    best_conversion = 0.0
+    best_candidate = evaluate_annual_conversion_candidate(
+        year,
+        base_other_ordinary_income,
+        total_ss,
+        realized_ltcg,
+        0.0,
+        state_tax_rate,
+        aca_lives,
+        medicare_lives,
+    )
+
+    steps = int(max(0, math.floor(float(max_conversion) / float(step_size))))
+    for step_idx in range(steps + 1):
+        conversion = float(step_idx) * float(step_size)
+        candidate = evaluate_annual_conversion_candidate(
+            year,
+            base_other_ordinary_income,
+            total_ss,
+            realized_ltcg,
+            conversion,
+            state_tax_rate,
+            aca_lives,
+            medicare_lives,
+        )
+        if predicate(candidate):
+            best_conversion = conversion
+            best_candidate = candidate
+        else:
+            break
+
+    return best_conversion, best_candidate
+
+
+def run_annual_conversion_calculator(
+    inputs: dict,
+    calc_year: int,
+    external_other_ordinary_income: float,
+    realized_ltcg_so_far: float,
+    total_ss_for_year: float,
+    target_bracket: str,
+    income_safety_buffer: float,
+    max_conversion: float,
+    step_size: float,
+    apply_bracket_guardrail: bool,
+    apply_aca_guardrail: bool,
+    apply_irmaa_guardrail: bool,
+) -> dict:
+    params = build_common_params(inputs)
+    annual_state = {
+        'trad': float(inputs.get('trad', 0.0)),
+        'roth': float(inputs.get('roth', 0.0)),
+        'brokerage': float(inputs.get('brokerage', 0.0)),
+        'brokerage_basis': float(inputs.get('brokerage_basis', inputs.get('brokerage', 0.0))),
+        'cash': float(inputs.get('cash', 0.0)),
+    }
+    future_rate_info = estimate_future_marginal_rate(calc_year, annual_state, params)
+    estimated_future_marginal_rate = float(future_rate_info.get('estimated_future_marginal_rate', 0.0))
+
+    coverage = get_coverage_status(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']))
+    aca_lives = int(coverage['aca_lives'])
+    medicare_lives = int(coverage['medicare_lives'])
+    state_tax_rate = float(inputs.get('state_tax_rate', 0.0399))
+    safety_buffer = max(0.0, float(income_safety_buffer))
+
+    baseline = evaluate_annual_conversion_candidate(
+        calc_year,
+        external_other_ordinary_income,
+        total_ss_for_year,
+        realized_ltcg_so_far,
+        0.0,
+        state_tax_rate,
+        aca_lives,
+        medicare_lives,
+    )
+
+    bracket_tops = get_bracket_tops(calc_year)
+    target_bracket_top = float(bracket_tops[target_bracket])
+    bracket_limit = max(0.0, target_bracket_top - safety_buffer)
+
+    aca_limit = get_aca_magi_limit(calc_year, aca_lives) if aca_lives > 0 else None
+    aca_limit_buffered = max(0.0, float(aca_limit) - safety_buffer) if aca_limit is not None else None
+
+    first_irmaa_cliff = get_first_irmaa_cliff_threshold(calc_year) if medicare_lives > 0 else None
+    first_irmaa_cliff_buffered = max(0.0, float(first_irmaa_cliff) - safety_buffer) if first_irmaa_cliff is not None else None
+
+    threshold_rows = []
+    active_caps = []
+
+    bracket_max_conversion, bracket_candidate = find_max_conversion_under_rule(
+        calc_year,
+        external_other_ordinary_income,
+        total_ss_for_year,
+        realized_ltcg_so_far,
+        state_tax_rate,
+        aca_lives,
+        medicare_lives,
         max_conversion,
         step_size,
-        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-        progress_prefix="Running Social Security optimizer",
-        initial_results=results,
-        start_index=start_index,
-        progress_callback=_progress_callback,
-        error_callback=_error_callback,
+        lambda c: float(c['Ordinary Taxable Income']) <= bracket_limit,
     )
-    if isinstance(evaluated, dict):
-        return evaluated
-    results = evaluated
+    threshold_rows.append({
+        'Rule': f'Top of {target_bracket} bracket',
+        'Enabled For Recommendation': bool(apply_bracket_guardrail),
+        'Threshold Value': target_bracket_top,
+        'Buffered Threshold': bracket_limit,
+        'Max Conversion': bracket_max_conversion,
+        'MAGI At Max': float(bracket_candidate['MAGI']),
+        'ACA Headroom At Max': bracket_candidate.get('ACA Headroom Remaining'),
+        'IRMAA Headroom At Max': bracket_candidate.get('IRMAA Headroom Remaining'),
+        'Ordinary Taxable Income At Max': float(bracket_candidate['Ordinary Taxable Income']),
+        'Federal Tax At Max': float(bracket_candidate['Federal Tax']),
+        'State Tax At Max': float(bracket_candidate['State Tax']),
+        'ACA Cost At Max': float(bracket_candidate['ACA Cost']),
+        'IRMAA Cost At Max': float(bracket_candidate['IRMAA Cost']),
+        'Total Government Drag At Max': float(bracket_candidate['Total Government Drag']),
+        'Note': 'Primary federal bracket guardrail for the current year.',
+    })
+    if apply_bracket_guardrail:
+        active_caps.append(bracket_max_conversion)
 
-    scoring_preferences = extract_scoring_preferences(inputs)
-    shared_outputs = score_rank_ss_scan_rows(
-        results,
-        inputs=base_snapshot,
-        selected_profile_name=profile_name,
-        preferences=scoring_preferences,
-        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-        shortlist_top_n=5,
+    if aca_lives > 0:
+        aca_max_conversion, aca_candidate = find_max_conversion_under_rule(
+            calc_year,
+            external_other_ordinary_income,
+            total_ss_for_year,
+            realized_ltcg_so_far,
+            state_tax_rate,
+            aca_lives,
+            medicare_lives,
+            max_conversion,
+            step_size,
+            lambda c: float(c['MAGI']) <= float(aca_limit_buffered),
+        )
+        threshold_rows.append({
+            'Rule': 'ACA MAGI limit',
+            'Enabled For Recommendation': bool(apply_aca_guardrail),
+            'Threshold Value': float(aca_limit),
+            'Buffered Threshold': float(aca_limit_buffered),
+            'Max Conversion': aca_max_conversion,
+            'MAGI At Max': float(aca_candidate['MAGI']),
+            'ACA Headroom At Max': aca_candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom At Max': aca_candidate.get('IRMAA Headroom Remaining'),
+            'Ordinary Taxable Income At Max': float(aca_candidate['Ordinary Taxable Income']),
+            'Federal Tax At Max': float(aca_candidate['Federal Tax']),
+            'State Tax At Max': float(aca_candidate['State Tax']),
+            'ACA Cost At Max': float(aca_candidate['ACA Cost']),
+            'IRMAA Cost At Max': float(aca_candidate['IRMAA Cost']),
+            'Total Government Drag At Max': float(aca_candidate['Total Government Drag']),
+            'Note': 'Keeps MAGI under the ACA cliff/headroom line for the selected year.',
+        })
+        if apply_aca_guardrail:
+            active_caps.append(aca_max_conversion)
+    else:
+        threshold_rows.append({
+            'Rule': 'ACA MAGI limit',
+            'Enabled For Recommendation': False,
+            'Threshold Value': '',
+            'Buffered Threshold': '',
+            'Max Conversion': '',
+            'MAGI At Max': '',
+            'ACA Headroom At Max': '',
+            'IRMAA Headroom At Max': '',
+            'Ordinary Taxable Income At Max': '',
+            'Federal Tax At Max': '',
+            'State Tax At Max': '',
+            'ACA Cost At Max': '',
+            'IRMAA Cost At Max': '',
+            'Total Government Drag At Max': '',
+            'Note': 'No ACA-covered lives in the selected year, so ACA guardrail is not applicable.',
+        })
+
+    if medicare_lives > 0 and first_irmaa_cliff is not None:
+        irmaa_max_conversion, irmaa_candidate = find_max_conversion_under_rule(
+            calc_year,
+            external_other_ordinary_income,
+            total_ss_for_year,
+            realized_ltcg_so_far,
+            state_tax_rate,
+            aca_lives,
+            medicare_lives,
+            max_conversion,
+            step_size,
+            lambda c: float(c['MAGI']) <= float(first_irmaa_cliff_buffered),
+        )
+        threshold_rows.append({
+            'Rule': 'First IRMAA cliff',
+            'Enabled For Recommendation': bool(apply_irmaa_guardrail),
+            'Threshold Value': float(first_irmaa_cliff),
+            'Buffered Threshold': float(first_irmaa_cliff_buffered),
+            'Max Conversion': irmaa_max_conversion,
+            'MAGI At Max': float(irmaa_candidate['MAGI']),
+            'ACA Headroom At Max': irmaa_candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom At Max': irmaa_candidate.get('IRMAA Headroom Remaining'),
+            'Ordinary Taxable Income At Max': float(irmaa_candidate['Ordinary Taxable Income']),
+            'Federal Tax At Max': float(irmaa_candidate['Federal Tax']),
+            'State Tax At Max': float(irmaa_candidate['State Tax']),
+            'ACA Cost At Max': float(irmaa_candidate['ACA Cost']),
+            'IRMAA Cost At Max': float(irmaa_candidate['IRMAA Cost']),
+            'Total Government Drag At Max': float(irmaa_candidate['Total Government Drag']),
+            'Note': 'Current-year MAGI warning line for the first IRMAA tier.',
+        })
+        if apply_irmaa_guardrail:
+            active_caps.append(irmaa_max_conversion)
+    else:
+        threshold_rows.append({
+            'Rule': 'First IRMAA cliff',
+            'Enabled For Recommendation': 'N/A (pre-Medicare)',
+            'Threshold Value': '',
+            'Buffered Threshold': '',
+            'Max Conversion': '',
+            'MAGI At Max': '',
+            'ACA Headroom At Max': '',
+            'IRMAA Headroom At Max': '',
+            'Ordinary Taxable Income At Max': '',
+            'Federal Tax At Max': '',
+            'State Tax At Max': '',
+            'ACA Cost At Max': '',
+            'IRMAA Cost At Max': '',
+            'Total Government Drag At Max': '',
+            'Note': 'No Medicare-covered lives in the selected year, so IRMAA guardrail is not applicable.',
+        })
+
+    recommended_conversion = min(active_caps) if active_caps else max_conversion
+    recommended_conversion = round_down_to_step(recommended_conversion, step_size)
+    recommended = evaluate_annual_conversion_candidate(
+        calc_year,
+        external_other_ordinary_income,
+        total_ss_for_year,
+        realized_ltcg_so_far,
+        recommended_conversion,
+        state_tax_rate,
+        aca_lives,
+        medicare_lives,
     )
-    scoring_context = shared_outputs["scoring_context"]
-    results_df = shared_outputs["ranked_df"]
-    profile_shortlists = shared_outputs["profile_shortlists"]
 
-    top_10_df = results_df.head(10).copy()
-    top_3 = results_df.head(3).copy()
+    def _comparison_stop_reason(scenario_label: str, candidate: dict) -> str:
+        candidate_conversion_amount = float(candidate.get('Conversion', 0.0) or 0.0)
+        if scenario_label == 'No conversion':
+            return 'Baseline'
+        if scenario_label.startswith('Top of '):
+            return scenario_label.replace('Top of ', '')
+        if scenario_label == 'ACA MAGI limit':
+            return 'ACA MAGI limit'
+        if scenario_label == 'First IRMAA cliff':
+            return 'First IRMAA cliff'
+        if scenario_label == 'Recommended conversion':
+            if candidate_conversion_amount <= 0.0:
+                return 'No additional conversion fits'
+            if not active_caps:
+                return 'No active guardrails'
+            return 'Within active guardrails'
+        return scenario_label
 
-    compare_metrics = [
-        ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
-        ("Final Net Worth", lambda r: format_dollars(r["Final Net Worth"])),
-        ("Ending Traditional IRA Balance", lambda r: format_dollars(r["Ending Traditional IRA Balance"])),
-        ("Total Government Drag", lambda r: format_dollars(r["Total Government Drag"])),
-        ("Total Conversions", lambda r: format_dollars(r["Total Conversions"])),
-        ("Total Federal Tax", lambda r: format_dollars(r["Total Federal Tax"])),
-        ("Total State Tax", lambda r: format_dollars(r["Total State Tax"])),
-        ("Total ACA Cost", lambda r: format_dollars(r["Total ACA Cost"])),
-        ("Total IRMAA Cost", lambda r: format_dollars(r["Total IRMAA Cost"])),
-        ("Max MAGI", lambda r: format_dollars(r["Max MAGI"])),
-        ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
-        ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
-        ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
-        ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
-        ("Score", lambda r: format_dollars(r["Score"])),
+    def _label_with_cap_if_needed(base_label: str, candidate: dict, *, limit_type: str, limit_value: float | None = None) -> str:
+        conversion_value = float(candidate.get('Conversion', 0.0) or 0.0)
+        if conversion_value <= 0.0:
+            return base_label
+        hit_max_test = abs(conversion_value - float(max_conversion)) < 0.01
+        if not hit_max_test:
+            return base_label
+
+        if limit_type == 'bracket' and limit_value is not None:
+            remaining_room = float(limit_value) - float(candidate.get('Ordinary Taxable Income', 0.0) or 0.0)
+            if remaining_room > max(float(step_size), 1.0):
+                return f"{base_label} (capped by max conversion tested)"
+        elif limit_type == 'aca' and limit_value is not None:
+            remaining_room = float(limit_value) - float(candidate.get('MAGI', 0.0) or 0.0)
+            if remaining_room > max(float(step_size), 1.0):
+                return f"{base_label} (capped by max conversion tested)"
+        elif limit_type == 'irmaa' and limit_value is not None:
+            remaining_room = float(limit_value) - float(candidate.get('MAGI', 0.0) or 0.0)
+            if remaining_room > max(float(step_size), 1.0):
+                return f"{base_label} (capped by max conversion tested)"
+        return base_label
+
+    def _build_comparison_row(scenario_label: str, candidate: dict) -> dict:
+        candidate_incremental_drag = float(candidate['Total Government Drag']) - float(baseline['Total Government Drag'])
+        candidate_incremental_tax = float(candidate['Total Tax']) - float(baseline['Total Tax'])
+        candidate_conversion_amount = float(candidate['Conversion'])
+        candidate_incremental_rate = (candidate_incremental_drag / candidate_conversion_amount) if candidate_conversion_amount > 0 else 0.0
+        candidate_spread_vs_future = (estimated_future_marginal_rate - candidate_incremental_rate) if candidate_conversion_amount > 0 else None
+        return {
+            'Scenario': scenario_label,
+            'Stop Reason': _comparison_stop_reason(scenario_label, candidate),
+            'Conversion': float(candidate['Conversion']),
+            'MAGI': float(candidate['MAGI']),
+            'Ordinary Taxable Income': float(candidate['Ordinary Taxable Income']),
+            'Federal Tax': float(candidate['Federal Tax']),
+            'State Tax': float(candidate['State Tax']),
+            'ACA Cost': float(candidate['ACA Cost']),
+            'IRMAA Cost': float(candidate['IRMAA Cost']),
+            'Total Government Drag': float(candidate['Total Government Drag']),
+            'ACA Headroom Remaining': candidate.get('ACA Headroom Remaining'),
+            'IRMAA Headroom Remaining': candidate.get('IRMAA Headroom Remaining'),
+            'Marginal Federal Rate': float(candidate['Marginal Rate']),
+            'Estimated Future Marginal Rate': float(estimated_future_marginal_rate) if candidate_conversion_amount > 0 else None,
+            'Spread vs Future Rate': candidate_spread_vs_future,
+            'Effective Tax Rate': float(candidate['Effective Tax Rate']),
+            'All-In Effective Rate': safe_numeric_or_blank(candidate.get('All-In Effective Rate')),
+            'Incremental Tax vs No Conversion': float(candidate_incremental_tax),
+            'Incremental All-In vs No Conversion': float(candidate_incremental_drag),
+            'Incremental All-In Rate vs No Conversion': float(candidate_incremental_rate),
+        }
+
+    comparison_rows = [
+        _build_comparison_row('No conversion', baseline)
     ]
 
-    compare_rows = []
-    for metric_name, getter in compare_metrics:
-        row = {"Metric": metric_name}
-        for idx in range(3):
-            col_name = f"#{idx + 1}"
-            row[col_name] = getter(top_3.iloc[idx]) if idx < len(top_3) else ""
-        compare_rows.append(row)
-    comparison_df = pd.DataFrame(compare_rows)
-
-    best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
-    best_validation = None
-    best_rerun_summary = None
-    if integrity_mode and best_result is not None:
-        best_inputs = dict(inputs)
-        best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
-        best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
-        best_rerun = run_model_break_even_governor(best_inputs, max_conversion, step_size)
-        best_validation = make_consistency_payload(
-            {
-                "final_net_worth": float(best_result["Final Net Worth"]),
-                "ending_trad_balance": float(best_result["Ending Traditional IRA Balance"]),
-                "total_conversions": float(best_result["Total Conversions"]),
-                "total_federal_taxes": float(best_result["Total Federal Tax"]),
-                "total_state_taxes": float(best_result["Total State Tax"]),
-                "total_aca_cost": float(best_result["Total ACA Cost"]),
-                "total_irmaa_cost": float(best_result["Total IRMAA Cost"]),
-                "total_government_drag": float(best_result["Total Government Drag"]),
-                "total_shortfall": 0.0,
-                "max_magi": float(best_result["Max MAGI"]),
-            },
-            best_rerun,
-            tol=validation_tolerance,
+    compare_brackets = ['10%', '12%', '22%', '24%']
+    for compare_bracket in compare_brackets:
+        bracket_top_for_compare = float(bracket_tops[compare_bracket])
+        compare_bracket_limit = max(0.0, bracket_top_for_compare - safety_buffer)
+        _, compare_candidate = find_max_conversion_under_rule(
+            calc_year,
+            external_other_ordinary_income,
+            total_ss_for_year,
+            realized_ltcg_so_far,
+            state_tax_rate,
+            aca_lives,
+            medicare_lives,
+            max_conversion,
+            step_size,
+            lambda c, limit=compare_bracket_limit: float(c['Ordinary Taxable Income']) <= limit,
         )
-        best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
+        compare_label = _label_with_cap_if_needed(
+            f'Top of {compare_bracket} bracket',
+            compare_candidate,
+            limit_type='bracket',
+            limit_value=compare_bracket_limit,
+        )
+        comparison_rows.append(_build_comparison_row(compare_label, compare_candidate))
 
-    result_payload = tag_result_payload({
-        "all_results_df": results_df.copy(),
-        "all_results_export_df": results_df.copy(),
-        "top_10_df": top_10_df.copy(),
-        "top_10_export_df": top_10_df.copy(),
-        "comparison_df": comparison_df.copy(),
-        "comparison_display_df": comparison_df.copy(),
-        "best_result": best_result,
-        "best_validation": best_validation,
-        "best_rerun_summary": best_rerun_summary,
-        "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
-        "profile_name": profile_name,
-        "optimizer_is_profile_neutral": False,
-        "profile_shortlists": profile_shortlists,
-        "scoring_context": scoring_context,
-        "scoring_preferences_snapshot": copy.deepcopy(scoring_preferences),
-        "planning_profile_snapshot": str(profile_name),
-        "completed": True,
-        "progress_index": total_combos,
-        "total_combos": total_combos,
-        "error_message": None,
-    }, engine="ss_optimizer")
-    mark_result_state("ss_optimizer", base_snapshot)
-    st.session_state["ss_optimizer_running"] = False
-    st.session_state["ss_optimizer_interrupted"] = False
-    st.session_state["ss_optimizer_error"] = None
-    st.session_state["ss_optimizer_progress_index"] = total_combos
-    st.session_state["ss_optimizer_partial_results"] = results
-    st.session_state["ss_optimizer_last_completed"] = combos[-1] if combos else None
-    return result_payload
+    if aca_lives > 0:
+        aca_compare_label = _label_with_cap_if_needed(
+            'ACA MAGI limit',
+            aca_candidate,
+            limit_type='aca',
+            limit_value=aca_limit_buffered,
+        )
+        comparison_rows.append(_build_comparison_row(aca_compare_label, aca_candidate))
+
+    if medicare_lives > 0:
+        irmaa_compare_label = _label_with_cap_if_needed(
+            'First IRMAA cliff',
+            irmaa_candidate,
+            limit_type='irmaa',
+            limit_value=first_irmaa_cliff_buffered,
+        )
+        comparison_rows.append(_build_comparison_row(irmaa_compare_label, irmaa_candidate))
+
+    recommended_row_label = None
+    for row in comparison_rows:
+        if abs(float(row['Conversion']) - float(recommended['Conversion'])) < 0.01:
+            recommended_row_label = str(row['Scenario'])
+            row['Scenario'] = f"{row['Scenario']} (Recommended conversion)"
+            break
+
+    if recommended_row_label is None:
+        comparison_rows.append(_build_comparison_row('Recommended conversion', recommended))
+
+    baseline_vs_recommended = pd.DataFrame(comparison_rows)
+    baseline_vs_recommended['Is Recommended'] = baseline_vs_recommended['Scenario'].astype(str).str.contains(r'\(Recommended conversion\)', regex=True)
+    baseline_vs_recommended['Incremental vs No Conversion'] = baseline_vs_recommended['Total Government Drag'] - float(baseline['Total Government Drag'])
+
+    calc_assumptions = {
+        'calc_year': int(calc_year),
+        'external_other_ordinary_income': float(external_other_ordinary_income),
+        'realized_ltcg_so_far': float(realized_ltcg_so_far),
+        'total_ss_for_year': float(total_ss_for_year),
+        'target_bracket': str(target_bracket),
+        'income_safety_buffer': float(income_safety_buffer),
+        'max_conversion': float(max_conversion),
+        'step_size': float(step_size),
+        'apply_bracket_guardrail': bool(apply_bracket_guardrail),
+        'apply_aca_guardrail': bool(apply_aca_guardrail),
+        'apply_irmaa_guardrail': bool(apply_irmaa_guardrail),
+        'aca_lives': int(aca_lives),
+        'medicare_lives': int(medicare_lives),
+        'state_tax_rate': float(state_tax_rate),
+    }
+    calc_fingerprint = hashlib.md5(json.dumps(_json_safe(calc_assumptions), sort_keys=True).encode()).hexdigest()[:10]
+
+
+    binding_constraints = []
+    if bool(apply_bracket_guardrail) and abs(float(recommended_conversion) - float(bracket_max_conversion)) < 0.01:
+        binding_constraints.append(f"Top of {target_bracket} bracket")
+    if aca_lives > 0 and bool(apply_aca_guardrail) and abs(float(recommended_conversion) - float(aca_max_conversion)) < 0.01:
+        binding_constraints.append("ACA MAGI limit")
+    if medicare_lives > 0 and first_irmaa_cliff is not None and bool(apply_irmaa_guardrail) and abs(float(recommended_conversion) - float(irmaa_max_conversion)) < 0.01:
+        binding_constraints.append("First IRMAA cliff")
+
+    recommended_incremental_rate = (
+        float(recommended['Total Government Drag'] - baseline['Total Government Drag']) / float(recommended['Conversion'])
+        if float(recommended['Conversion']) > 0 else None
+    )
+    recommended_spread_vs_future = (
+        float(estimated_future_marginal_rate) - float(recommended_incremental_rate)
+        if recommended_incremental_rate is not None else None
+    )
+    bracket_room_remaining = max(0.0, float(bracket_limit) - float(recommended['Ordinary Taxable Income']))
+    aca_headroom_remaining = max(0.0, float(aca_limit) - float(recommended['MAGI'])) if aca_limit is not None else None
+    irmaa_headroom_remaining = max(0.0, float(first_irmaa_cliff) - float(recommended['MAGI'])) if first_irmaa_cliff is not None else None
+
+    if not binding_constraints:
+        if recommended_conversion <= 0.0:
+            why_conversion = "No additional conversion fits within the active guardrails for the selected year."
+            stop_reason = "No additional conversion fits"
+        elif not active_caps:
+            why_conversion = "No guardrails were active, so the calculator used the maximum additional conversion tested."
+            stop_reason = "No active guardrails"
+        else:
+            if recommended_spread_vs_future is not None:
+                why_conversion = (
+                    f"No single guardrail bound first. Recommendation stayed inside the active guardrails, "
+                    f"and the spread versus future rate finished at {recommended_spread_vs_future:.2%}."
+                )
+            else:
+                why_conversion = "The recommendation stayed within the active guardrails without a single binding limit."
+            stop_reason = "Within active guardrails"
+    else:
+        reason_parts = []
+        if f"Top of {target_bracket} bracket" in binding_constraints:
+            reason_parts.append(f"{target_bracket} bracket with ${bracket_room_remaining:,.0f} remaining room")
+        if "ACA MAGI limit" in binding_constraints and aca_headroom_remaining is not None:
+            reason_parts.append(f"ACA limit with ${aca_headroom_remaining:,.0f} remaining headroom")
+        if "First IRMAA cliff" in binding_constraints:
+            if irmaa_headroom_remaining is None:
+                reason_parts.append("first IRMAA cliff")
+            else:
+                reason_parts.append(f"first IRMAA cliff with ${irmaa_headroom_remaining:,.0f} remaining headroom")
+        why_conversion = "Recommendation stopped at " + "; ".join(reason_parts) + "."
+        if recommended_spread_vs_future is not None:
+            why_conversion += f" Spread versus future rate: {recommended_spread_vs_future:.2%}."
+        stop_reason = ", ".join(binding_constraints)
+
+    if not baseline_vs_recommended.empty and 'Scenario' in baseline_vs_recommended.columns:
+        recommended_mask = baseline_vs_recommended['Scenario'].astype(str).str.contains('(Recommended conversion)', regex=False)
+        if recommended_mask.any():
+            baseline_vs_recommended.loc[recommended_mask, 'Stop Reason'] = stop_reason
+
+    summary = {
+        'Year': int(calc_year),
+        'Recommended Conversion': float(recommended_conversion),
+        'Current-Year SS Used': float(total_ss_for_year),
+        'Current-Year Other Ordinary Income Used': float(external_other_ordinary_income),
+        'Current-Year LTCG Used': float(realized_ltcg_so_far),
+        'Target Bracket': str(target_bracket),
+        'ACA Lives': int(aca_lives),
+        'Medicare Lives': int(medicare_lives),
+        'ACA Limit': aca_limit,
+        'ACA Headroom Remaining': aca_headroom_remaining,
+        'IRMAA Headroom Remaining': irmaa_headroom_remaining,
+        'Bracket Room Remaining': bracket_room_remaining,
+        'First IRMAA Cliff': first_irmaa_cliff,
+        'IRMAA Guardrail Status': 'N/A (pre-Medicare)' if medicare_lives <= 0 else ('Enabled' if apply_irmaa_guardrail else 'Disabled'),
+        'Binding Constraints': binding_constraints,
+        'Stop Reason': stop_reason,
+        'Why This Conversion': why_conversion,
+        'Estimated Future Marginal Rate': float(estimated_future_marginal_rate),
+        'Recommended Spread vs Future Rate': recommended_spread_vs_future,
+        'Scenario Fingerprint': calc_fingerprint,
+    }
+
+    return {
+        'summary': summary,
+        'threshold_df': pd.DataFrame(threshold_rows),
+        'compare_df': baseline_vs_recommended,
+        'recommended_candidate': recommended,
+        'baseline_candidate': baseline,
+    }
+
+
+def render_annual_conversion_calculator_results(result: dict):
+    summary = result['summary']
+    recommended = result['recommended_candidate']
+    baseline = result['baseline_candidate']
+
+    st.subheader('Annual Conversion Calculator Summary')
+    st.write(f"Scenario Fingerprint: `{summary['Scenario Fingerprint']}`")
+    st.write(f"Year analyzed: {summary['Year']}")
+    st.write(f"Recommended conversion: ${float(summary['Recommended Conversion']):,.0f}")
+    st.write(f"Target bracket: {summary['Target Bracket']}")
+    st.write(f"ACA lives / Medicare lives: {summary['ACA Lives']} / {summary['Medicare Lives']}")
+    st.write(f"Current-year SS used: ${float(summary['Current-Year SS Used']):,.0f}")
+    st.write(f"Current-year other ordinary income used: ${float(summary['Current-Year Other Ordinary Income Used']):,.0f}")
+    st.write(f"Current-year realized LTCG used: ${float(summary['Current-Year LTCG Used']):,.0f}")
+    if summary['ACA Limit'] is not None:
+        st.write(f"ACA Cliff: ${float(summary['ACA Limit']):,.0f}")
+        st.write(f"Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
+    st.write(f"Stop reason: {summary['Stop Reason']}")
+    if summary['First IRMAA Cliff'] is not None:
+        st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
+        st.write(f"IRMAA Headroom Remaining: ${float(summary['IRMAA Headroom Remaining']):,.0f}")
+    else:
+        st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
+    st.write(f"Why this conversion: {summary['Why This Conversion']}")
+
+    metric_row_1 = st.columns(3)
+    metric_row_2 = st.columns(3)
+    metric_row_1[0].metric('Recommended Conversion', f"${float(summary['Recommended Conversion']):,.0f}")
+    metric_row_1[1].metric('Recommended MAGI', f"${float(recommended['MAGI']):,.0f}")
+    metric_row_1[2].metric('Incremental Total Drag', f"${float(recommended['Total Government Drag'] - baseline['Total Government Drag']):,.0f}")
+    metric_row_2[0].metric('Recommended Total Drag', f"${float(recommended['Total Government Drag']):,.0f}")
+    metric_row_2[1].metric('Future Marginal Rate', f"{float(summary['Estimated Future Marginal Rate']):.2%}")
+    metric_row_2[2].metric(
+        'Spread vs Future',
+        '' if summary.get('Recommended Spread vs Future Rate') is None else f"{float(summary['Recommended Spread vs Future Rate']):.2%}"
+    )
+    st.write(f"Estimated future marginal rate used: {float(summary['Estimated Future Marginal Rate']):.2%}")
+    if summary.get('Recommended Spread vs Future Rate') is not None:
+        st.write(f"Recommended spread vs future rate: {float(summary['Recommended Spread vs Future Rate']):.2%}")
+
+    st.subheader('Guardrail Thresholds')
+    threshold_df = result['threshold_df'].copy()
+    threshold_formatters = {
+        'Threshold Value': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Buffered Threshold': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Max Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'MAGI At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Headroom At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Headroom At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Ordinary Taxable Income At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Federal Tax At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'State Tax At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Cost At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Cost At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Total Government Drag At Max': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+    }
+    st.dataframe(
+        threshold_df.style.format(threshold_formatters),
+        use_container_width=True,
+    )
+
+    st.subheader('Annual Conversion Options Comparison')
+    st.caption('Added safe diagnostics: stop reason, marginal federal rate, estimated future marginal rate, spread versus future rate, incremental tax dollars, and incremental all-in rate versus no conversion. These are display-only and do not change the recommendation engine.')
+    compare_df = result['compare_df'].copy()
+    compare_formatters = {
+        'Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'MAGI': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Ordinary Taxable Income': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Federal Tax': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'State Tax': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Cost': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Cost': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Total Government Drag': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'ACA Headroom Remaining': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'IRMAA Headroom Remaining': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Incremental vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Incremental Tax vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Incremental All-In vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'${float(x):,.0f}',
+        'Marginal Federal Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Estimated Future Marginal Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Spread vs Future Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Effective Tax Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'All-In Effective Rate': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+        'Incremental All-In Rate vs No Conversion': lambda x: '' if x in ('', None) or pd.isna(x) else f'{float(x):.2%}',
+    }
+    display_compare_df = compare_df.drop(columns=['Is Recommended'], errors='ignore')
+
+    def _highlight_recommended_row(row):
+        is_recommended = False
+        try:
+            source_row = compare_df.loc[row.name]
+            is_recommended = bool(source_row.get('Is Recommended', False))
+        except Exception:
+            is_recommended = '(Recommended conversion)' in str(row.get('Scenario', ''))
+        if is_recommended:
+            return ['font-weight: bold; background-color: #f6f9e8'] * len(row)
+        return [''] * len(row)
+
+    st.dataframe(
+        display_compare_df.style.format(compare_formatters).apply(_highlight_recommended_row, axis=1),
+        use_container_width=True,
+    )
+
+
+# -----------------------------
+# DISPLAY
+# -----------------------------
+def render_summary(title: str, result: dict):
+    owner_claim_age = result.get("owner_claim_age")
+    spouse_claim_age = result.get("spouse_claim_age")
+    title_suffix = ""
+    if owner_claim_age is not None and spouse_claim_age is not None:
+        title_suffix = f" ({int(owner_claim_age)}/{int(spouse_claim_age)})"
+    st.subheader(f"{title}{title_suffix}")
+    owner_year_suffix = f" ({int(owner_claim_age)})" if owner_claim_age is not None else ""
+    spouse_year_suffix = f" ({int(spouse_claim_age)})" if spouse_claim_age is not None else ""
+    st.write(f"Owner SS Start Year: {result['owner_ss_start']}{owner_year_suffix}")
+    st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}{spouse_year_suffix}")
+    st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
+    st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
+    st.write(f"Ending Traditional IRA Balance at RMD Start Age: ${result['ending_trad_balance']:,.0f}")
+    total_lifetime_rmds = result.get("total_lifetime_rmds")
+    if total_lifetime_rmds is None:
+        try:
+            df_for_rmd = result.get("df")
+            if df_for_rmd is not None and not df_for_rmd.empty and "RMD Income" in df_for_rmd.columns:
+                total_lifetime_rmds = float(df_for_rmd["RMD Income"].fillna(0.0).sum())
+            else:
+                total_lifetime_rmds = 0.0
+        except Exception:
+            total_lifetime_rmds = 0.0
+    st.write(f"Total Lifetime RMDs: ${float(total_lifetime_rmds):,.0f}")
+    st.write(f"Total Federal Taxes: ${result['total_federal_taxes']:,.0f}")
+    st.write(f"Total State Taxes: ${result.get('total_state_taxes', 0.0):,.0f}")
+    st.write(f"Total ACA Cost: ${result['total_aca_cost']:,.0f}")
+    st.write(f"Total IRMAA Cost: ${result['total_irmaa_cost']:,.0f}")
+    st.write(f"Total Government Drag: ${result.get('total_government_drag', 0.0):,.0f}")
+    st.write(f"Total Shortfall: ${result['total_shortfall']:,.0f}")
+    st.write(f"Max MAGI: ${result['max_magi']:,.0f}")
+    st.write(f"Total Conversions: ${result['total_conversions']:,.0f}")
+    st.write(f"ACA Hit Years: {result['aca_hit_years']}")
+    st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
+    st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
+    validation = result.get("validation")
+    if validation is not None:
+        if validation["passed"]:
+            st.success("Repeatability check passed. Back-to-back rerun matched within tolerance.")
+        else:
+            st.error("Repeatability check failed. Back-to-back rerun did not match.")
+            st.dataframe(validation["mismatch_df"], use_container_width=True)
+
+
+# -----------------------------
+# UI
+# -----------------------------
+
+
+
+ANNUAL_FILING_STATUS_OPTIONS = ["MFJ", "Single"]
+ANNUAL_TARGET_BRACKET_OPTIONS = ["12%", "22%", "24%"]
+
+
+def annual_status_factor(filing_status: str) -> float:
+    return 1.0 if filing_status == "MFJ" else 0.5
+
+
+def get_annual_standard_deduction_default(year: int, filing_status: str) -> float:
+    return float(get_standard_deduction(year)) * annual_status_factor(filing_status)
+
+
+def get_annual_federal_brackets(year: int, filing_status: str) -> list[tuple[float, float]]:
+    factor = annual_status_factor(filing_status)
+    return [(float(start) * factor, float(rate)) for start, rate in get_federal_brackets(year)]
+
+
+def get_annual_ltcg_brackets(year: int, filing_status: str) -> list[tuple[float, float]]:
+    factor = annual_status_factor(filing_status)
+    return [(float(start) * factor, float(rate)) for start, rate in get_ltcg_brackets(year)]
+
+
+def get_annual_bracket_tops(year: int, filing_status: str) -> dict:
+    factor = annual_status_factor(filing_status)
+    base = get_bracket_tops(year)
+    return {k: float(v) * factor for k, v in base.items()}
+
+
+def calculate_taxable_ss_annual(total_ss: float, non_ss_income: float, filing_status: str) -> tuple[float, float]:
+    total_ss = max(0.0, float(total_ss))
+    non_ss_income = max(0.0, float(non_ss_income))
+    if filing_status == "MFJ":
+        base1, base2, base_taxable = 32000.0, 44000.0, 6000.0
+    else:
+        base1, base2, base_taxable = 25000.0, 34000.0, 4500.0
+
+    provisional_income = non_ss_income + 0.5 * total_ss
+    if provisional_income <= base1:
+        taxable_ss = 0.0
+    elif provisional_income <= base2:
+        taxable_ss = 0.5 * (provisional_income - base1)
+    else:
+        taxable_ss = base_taxable + 0.85 * (provisional_income - base2)
+
+    taxable_ss = max(0.0, min(taxable_ss, 0.85 * total_ss))
+    return float(taxable_ss), float(provisional_income)
+
+
+def calculate_progressive_tax_from_brackets(taxable_income: float, brackets: list[tuple[float, float]]) -> float:
+    taxable_income = max(0.0, float(taxable_income))
+    if taxable_income <= 0:
+        return 0.0
+
+    tax = 0.0
+    for i, (start, rate) in enumerate(brackets):
+        end = brackets[i + 1][0] if i + 1 < len(brackets) else None
+        if taxable_income <= start:
+            break
+        upper = taxable_income if end is None else min(taxable_income, end)
+        amount = max(0.0, upper - start)
+        tax += amount * rate
+        if end is not None and taxable_income <= end:
+            break
+    return float(tax)
+
+
+def calculate_ltcg_tax_from_brackets(ordinary_taxable_income: float, preferential_taxable_income: float, brackets: list[tuple[float, float]]) -> float:
+    ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
+    preferential_taxable_income = max(0.0, float(preferential_taxable_income))
+    if preferential_taxable_income <= 0:
+        return 0.0
+
+    tax = 0.0
+    remaining = preferential_taxable_income
+    current = ordinary_taxable_income
+
+    for i, (start, rate) in enumerate(brackets):
+        end = brackets[i + 1][0] if i + 1 < len(brackets) else None
+        band_start = max(current, start)
+        if end is None:
+            tax += remaining * rate
+            remaining = 0.0
+            break
+        band_room = max(0.0, end - band_start)
+        if band_room <= 0:
+            continue
+        amount = min(remaining, band_room)
+        tax += amount * rate
+        remaining -= amount
+        current += amount
+        if remaining <= 1e-9:
+            break
+    return float(tax)
+
+
+def get_annual_marginal_rate(ordinary_taxable_income: float, year: int, filing_status: str) -> float:
+    ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
+    brackets = get_annual_federal_brackets(year, filing_status)
+    rate = brackets[0][1]
+    for start, bracket_rate in brackets:
+        if ordinary_taxable_income >= start:
+            rate = bracket_rate
+        else:
+            break
+    return float(rate)
+
+
+def get_annual_aca_limit(calc_year: int, filing_status: str, aca_covered_lives: int) -> float | None:
+    if aca_covered_lives <= 0:
+        return None
+    household_key = "2_person" if filing_status == "MFJ" and aca_covered_lives >= 2 else "1_person"
+    return float(get_aca_magi_limit(calc_year, 2 if household_key == "2_person" else 1))
+
+
+def get_annual_irmaa_first_cliff(calc_year: int, filing_status: str) -> float | None:
+    if filing_status == "MFJ":
+        return float(get_first_irmaa_cliff_threshold(calc_year))
+    return float(get_first_irmaa_cliff_threshold(calc_year)) * 0.5
+
+
+def evaluate_annual_tax_scenario(
+    year: int,
+    filing_status: str,
+    earned_income: float,
+    other_ordinary_income: float,
+    ira_withdrawals: float,
+    conversions_done: float,
+    additional_conversion: float,
+    social_security_received: float,
+    realized_ltcg: float,
+    qualified_dividends: float,
+    standard_deduction: float,
+    state_tax_rate: float,
+    aca_covered_lives: int,
+    medicare_covered_lives: int,
+) -> dict:
+    earned_income = max(0.0, float(earned_income))
+    other_ordinary_income = max(0.0, float(other_ordinary_income))
+    ira_withdrawals = max(0.0, float(ira_withdrawals))
+    conversions_done = max(0.0, float(conversions_done))
+    additional_conversion = max(0.0, float(additional_conversion))
+    social_security_received = max(0.0, float(social_security_received))
+    realized_ltcg = max(0.0, float(realized_ltcg))
+    qualified_dividends = max(0.0, float(qualified_dividends))
+    standard_deduction = max(0.0, float(standard_deduction))
+    preferential_income = realized_ltcg + qualified_dividends
+
+    ordinary_income_pre_ss = (
+        earned_income
+        + other_ordinary_income
+        + ira_withdrawals
+        + conversions_done
+        + additional_conversion
+    )
+    taxable_ss, provisional_income = calculate_taxable_ss_annual(
+        social_security_received,
+        ordinary_income_pre_ss + preferential_income,
+        filing_status,
+    )
+    ordinary_income_total = ordinary_income_pre_ss + taxable_ss
+    agi = ordinary_income_total + preferential_income
+    magi = agi
+
+    ordinary_taxable_income = max(0.0, ordinary_income_total - standard_deduction)
+    deduction_remaining_for_preferential = max(0.0, standard_deduction - ordinary_income_total)
+    preferential_taxable_income = max(0.0, preferential_income - deduction_remaining_for_preferential)
+    taxable_income = ordinary_taxable_income + preferential_taxable_income
+
+    federal_brackets = get_annual_federal_brackets(year, filing_status)
+    ltcg_brackets = get_annual_ltcg_brackets(year, filing_status)
+    ordinary_tax = calculate_progressive_tax_from_brackets(ordinary_taxable_income, federal_brackets)
+    ltcg_qd_tax = calculate_ltcg_tax_from_brackets(ordinary_taxable_income, preferential_taxable_income, ltcg_brackets)
+    federal_tax = ordinary_tax + ltcg_qd_tax
+
+    nc_taxable_income = taxable_income
+    state_tax = max(0.0, nc_taxable_income) * float(state_tax_rate)
+
+    aca_cost = 0.0
+    aca_limit = None
+    if aca_covered_lives > 0:
+        aca_limit = get_annual_aca_limit(year, filing_status, aca_covered_lives)
+        household_key = "2_person" if filing_status == "MFJ" and aca_covered_lives >= 2 else "1_person"
+        aca_cost = calculate_aca_cost(magi, year, 2 if household_key == "2_person" else 1)
+
+    irmaa_first_cliff = None
+    irmaa_cost = 0.0
+    if medicare_covered_lives > 0:
+        if filing_status == "MFJ":
+            irmaa_cost = calculate_irmaa_cost(magi, year, medicare_covered_lives)
+            irmaa_first_cliff = get_first_irmaa_cliff_threshold(year)
+        else:
+            irmaa_first_cliff = get_annual_irmaa_first_cliff(year, filing_status)
+            single_irmaa_table = [(start * 0.5, end * 0.5, surcharge) for start, end, surcharge in get_latest_year_value(IRMAA_TABLE_BY_YEAR, year)]
+            annual_surcharge = 0.0
+            for start, end, surcharge in single_irmaa_table:
+                if magi >= start and magi < end:
+                    annual_surcharge = surcharge * 12.0
+                    break
+            irmaa_cost = annual_surcharge * max(1, medicare_covered_lives)
+
+    aca_headroom_remaining = max(0.0, float(aca_limit) - float(magi)) if aca_limit is not None else None
+    irmaa_headroom_remaining = max(0.0, float(irmaa_first_cliff) - float(magi)) if irmaa_first_cliff is not None else None
+
+    total_tax = federal_tax + state_tax
+    total_government_drag = total_tax + aca_cost + irmaa_cost
+    effective_tax_rate = total_tax / agi if agi > 0 else 0.0
+    all_in_effective_rate = total_government_drag / agi if agi > 0 else 0.0
+    marginal_rate = get_annual_marginal_rate(ordinary_taxable_income, year, filing_status)
+
+    return {
+        "Year": int(year),
+        "Filing Status": filing_status,
+        "Earned Income": earned_income,
+        "Other Ordinary Income": other_ordinary_income,
+        "IRA Withdrawals": ira_withdrawals,
+        "Conversions Already Done": conversions_done,
+        "Additional Conversion": additional_conversion,
+        "Total Conversion For Year": conversions_done + additional_conversion,
+        "Social Security Received": social_security_received,
+        "Realized LTCG": realized_ltcg,
+        "Qualified Dividends": qualified_dividends,
+        "Preferential Income": preferential_income,
+        "Provisional Income": provisional_income,
+        "Taxable SS": taxable_ss,
+        "Ordinary Income Before SS": ordinary_income_pre_ss,
+        "Ordinary Income Total": ordinary_income_total,
+        "AGI": agi,
+        "MAGI": magi,
+        "Standard Deduction": standard_deduction,
+        "Ordinary Taxable Income": ordinary_taxable_income,
+        "Preferential Taxable Income": preferential_taxable_income,
+        "Taxable Income": taxable_income,
+        "Federal Ordinary Tax": ordinary_tax,
+        "Federal LTCG/QD Tax": ltcg_qd_tax,
+        "Federal Tax": federal_tax,
+        "NC State Tax": state_tax,
+        "Total Tax": total_tax,
+        "ACA Cost": aca_cost,
+        "IRMAA Cost": irmaa_cost,
+        "Total Government Drag": total_government_drag,
+        "Effective Tax Rate": effective_tax_rate,
+        "All-In Effective Rate": all_in_effective_rate,
+        "Marginal Federal Rate": marginal_rate,
+        "ACA Limit": aca_limit,
+        "ACA Headroom Remaining": aca_headroom_remaining,
+        "First IRMAA Cliff": irmaa_first_cliff,
+        "IRMAA Headroom Remaining": irmaa_headroom_remaining,
+        "ACA Covered Lives": int(aca_covered_lives),
+        "Medicare Covered Lives": int(medicare_covered_lives),
+    }
+
+
+def find_max_additional_conversion_for_rule(
+    year: int,
+    filing_status: str,
+    earned_income: float,
+    other_ordinary_income: float,
+    ira_withdrawals: float,
+    conversions_done: float,
+    social_security_received: float,
+    realized_ltcg: float,
+    qualified_dividends: float,
+    standard_deduction: float,
+    state_tax_rate: float,
+    aca_covered_lives: int,
+    medicare_covered_lives: int,
+    max_additional_conversion: float,
+    step_size: float,
+    rule_fn,
+) -> tuple[float, dict]:
+    best_conversion = 0.0
+    best_candidate = evaluate_annual_tax_scenario(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+        conversions_done, 0.0, social_security_received, realized_ltcg, qualified_dividends,
+        standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+    )
+    step_index = 0
+    while True:
+        additional_conversion = min(max_additional_conversion, step_index * step_size)
+        candidate = evaluate_annual_tax_scenario(
+            year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+            conversions_done, additional_conversion, social_security_received, realized_ltcg, qualified_dividends,
+            standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+        )
+        if rule_fn(candidate):
+            best_conversion = additional_conversion
+            best_candidate = candidate
+        else:
+            break
+        if additional_conversion >= max_additional_conversion - 1e-9:
+            break
+        step_index += 1
+    return float(best_conversion), best_candidate
+
+
+
+def run_standalone_annual_tax_engine(
+    year: int,
+    filing_status: str,
+    earned_income: float,
+    other_ordinary_income: float,
+    ira_withdrawals: float,
+    conversions_done: float,
+    social_security_received: float,
+    realized_ltcg: float,
+    qualified_dividends: float,
+    standard_deduction: float,
+    state_tax_rate: float,
+    aca_covered_lives: int,
+    medicare_covered_lives: int,
+    target_bracket: str,
+    safety_buffer: float,
+    max_additional_conversion: float,
+    step_size: float,
+    use_bracket_guardrail: bool,
+    use_aca_guardrail: bool,
+    use_irmaa_guardrail: bool,
+) -> dict:
+    baseline = evaluate_annual_tax_scenario(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+        conversions_done, 0.0, social_security_received, realized_ltcg, qualified_dividends,
+        standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+    )
+
+    bracket_tops = get_annual_bracket_tops(year, filing_status)
+    target_bracket_top = float(bracket_tops[target_bracket])
+    bracket_limit = max(0.0, target_bracket_top - float(safety_buffer))
+
+    threshold_rows = []
+    active_caps = []
+
+    bracket_max, bracket_candidate = find_max_additional_conversion_for_rule(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals, conversions_done,
+        social_security_received, realized_ltcg, qualified_dividends, standard_deduction, state_tax_rate,
+        aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
+        lambda c: float(c["Ordinary Taxable Income"]) <= bracket_limit,
+    )
+    bracket_current_value = float(baseline["Ordinary Taxable Income"])
+    threshold_rows.append({
+        "Rule": f"Top of {target_bracket} bracket",
+        "Enabled": bool(use_bracket_guardrail),
+        "Threshold": target_bracket_top,
+        "Buffered Threshold": bracket_limit,
+        "Max Additional Conversion": bracket_max,
+        "MAGI At Max": float(bracket_candidate["MAGI"]),
+        "Taxable Income At Max": float(bracket_candidate["Taxable Income"]),
+        "Federal Tax At Max": float(bracket_candidate["Federal Tax"]),
+        "NC Tax At Max": float(bracket_candidate["NC State Tax"]),
+        "ACA Cost At Max": float(bracket_candidate["ACA Cost"]),
+        "Total Drag At Max": float(bracket_candidate["Total Government Drag"]),
+        "Effective Tax Rate At Max": float(bracket_candidate["Effective Tax Rate"]),
+        "All-In Effective Rate At Max": safe_numeric_or_blank(bracket_candidate.get("All-In Effective Rate")),
+        "Binding Metric": "Ordinary Taxable Income",
+    })
+    if use_bracket_guardrail:
+        active_caps.append(bracket_max)
+
+    aca_limit = get_annual_aca_limit(year, filing_status, aca_covered_lives)
+    if aca_limit is not None:
+        aca_limit_buffered = max(0.0, float(aca_limit) - float(safety_buffer))
+        aca_max, aca_candidate = find_max_additional_conversion_for_rule(
+            year, filing_status, earned_income, other_ordinary_income, ira_withdrawals, conversions_done,
+            social_security_received, realized_ltcg, qualified_dividends, standard_deduction, state_tax_rate,
+            aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
+            lambda c: float(c["MAGI"]) <= aca_limit_buffered,
+        )
+        threshold_rows.append({
+            "Rule": "ACA MAGI limit",
+            "Enabled": bool(use_aca_guardrail),
+            "Threshold": float(aca_limit),
+            "Buffered Threshold": float(aca_limit_buffered),
+            "Max Additional Conversion": aca_max,
+            "MAGI At Max": float(aca_candidate["MAGI"]),
+            "ACA Headroom At Max": float(aca_candidate["ACA Headroom Remaining"]) if aca_candidate.get("ACA Headroom Remaining") is not None else "",
+            "IRMAA Headroom At Max": float(aca_candidate["IRMAA Headroom Remaining"]) if aca_candidate.get("IRMAA Headroom Remaining") is not None else "",
+            "Taxable Income At Max": float(aca_candidate["Taxable Income"]),
+            "Federal Tax At Max": float(aca_candidate["Federal Tax"]),
+            "NC Tax At Max": float(aca_candidate["NC State Tax"]),
+            "ACA Cost At Max": float(aca_candidate["ACA Cost"]),
+            "Total Drag At Max": float(aca_candidate["Total Government Drag"]),
+            "Effective Tax Rate At Max": float(aca_candidate["Effective Tax Rate"]),
+            "All-In Effective Rate At Max": safe_numeric_or_blank(aca_candidate.get("All-In Effective Rate")),
+            "Binding Metric": "MAGI",
+        })
+        if use_aca_guardrail:
+            active_caps.append(aca_max)
+
+    irmaa_first_cliff = None
+    if medicare_covered_lives > 0:
+        irmaa_first_cliff = get_annual_irmaa_first_cliff(year, filing_status)
+        irmaa_limit_buffered = max(0.0, float(irmaa_first_cliff) - float(safety_buffer))
+        irmaa_max, irmaa_candidate = find_max_additional_conversion_for_rule(
+            year, filing_status, earned_income, other_ordinary_income, ira_withdrawals, conversions_done,
+            social_security_received, realized_ltcg, qualified_dividends, standard_deduction, state_tax_rate,
+            aca_covered_lives, medicare_covered_lives, max_additional_conversion, step_size,
+            lambda c: float(c["MAGI"]) <= irmaa_limit_buffered,
+        )
+        threshold_rows.append({
+            "Rule": "First IRMAA cliff",
+            "Enabled": bool(use_irmaa_guardrail),
+            "Threshold": float(irmaa_first_cliff),
+            "Buffered Threshold": float(irmaa_limit_buffered),
+            "Max Additional Conversion": irmaa_max,
+            "MAGI At Max": float(irmaa_candidate["MAGI"]),
+            "ACA Headroom At Max": float(irmaa_candidate["ACA Headroom Remaining"]) if irmaa_candidate.get("ACA Headroom Remaining") is not None else "",
+            "IRMAA Headroom At Max": float(irmaa_candidate["IRMAA Headroom Remaining"]) if irmaa_candidate.get("IRMAA Headroom Remaining") is not None else "",
+            "Taxable Income At Max": float(irmaa_candidate["Taxable Income"]),
+            "Federal Tax At Max": float(irmaa_candidate["Federal Tax"]),
+            "NC Tax At Max": float(irmaa_candidate["NC State Tax"]),
+            "ACA Cost At Max": float(irmaa_candidate["ACA Cost"]),
+            "Total Drag At Max": float(irmaa_candidate["Total Government Drag"]),
+            "Effective Tax Rate At Max": float(irmaa_candidate["Effective Tax Rate"]),
+            "All-In Effective Rate At Max": safe_numeric_or_blank(irmaa_candidate.get("All-In Effective Rate")),
+            "Binding Metric": "MAGI",
+        })
+        if use_irmaa_guardrail:
+            active_caps.append(irmaa_max)
+    else:
+        threshold_rows.append({
+            "Rule": "First IRMAA cliff",
+            "Enabled": "N/A (pre-Medicare)",
+            "Threshold": "",
+            "Buffered Threshold": "",
+            "Max Additional Conversion": "",
+            "MAGI At Max": "",
+            "ACA Headroom At Max": "",
+            "IRMAA Headroom At Max": "",
+            "Taxable Income At Max": "",
+            "Federal Tax At Max": "",
+            "NC Tax At Max": "",
+            "ACA Cost At Max": "",
+            "Total Drag At Max": "",
+            "Effective Tax Rate At Max": "",
+            "All-In Effective Rate At Max": "",
+            "Binding Metric": "MAGI",
+        })
+
+    recommended_additional_conversion = min(active_caps) if active_caps else max_additional_conversion
+    recommended_additional_conversion = floor_to_step(recommended_additional_conversion, step_size)
+    recommended = evaluate_annual_tax_scenario(
+        year, filing_status, earned_income, other_ordinary_income, ira_withdrawals,
+        conversions_done, recommended_additional_conversion, social_security_received, realized_ltcg, qualified_dividends,
+        standard_deduction, state_tax_rate, aca_covered_lives, medicare_covered_lives,
+    )
+
+    summary_inputs = {
+        "year": int(year),
+        "filing_status": filing_status,
+        "earned_income": earned_income,
+        "other_ordinary_income": other_ordinary_income,
+        "ira_withdrawals": ira_withdrawals,
+        "conversions_done": conversions_done,
+        "social_security_received": social_security_received,
+        "realized_ltcg": realized_ltcg,
+        "qualified_dividends": qualified_dividends,
+        "standard_deduction": standard_deduction,
+        "state_tax_rate": state_tax_rate,
+        "aca_covered_lives": int(aca_covered_lives),
+        "medicare_covered_lives": int(medicare_covered_lives),
+        "target_bracket": target_bracket,
+        "safety_buffer": safety_buffer,
+        "max_additional_conversion": max_additional_conversion,
+        "step_size": step_size,
+        "use_bracket_guardrail": bool(use_bracket_guardrail),
+        "use_aca_guardrail": bool(use_aca_guardrail),
+        "use_irmaa_guardrail": bool(use_irmaa_guardrail),
+    }
+    scenario_fingerprint = build_scenario_fingerprint(summary_inputs, max_additional_conversion, step_size)
+
+    compare_rows = []
+    for label, candidate in [("Current", baseline), ("After Recommended Additional Conversion", recommended)]:
+        compare_rows.append({
+            "Scenario": label,
+            "Additional Conversion": float(candidate["Additional Conversion"]),
+            "Total Conversion For Year": float(candidate["Total Conversion For Year"]),
+            "Taxable SS": float(candidate["Taxable SS"]),
+            "AGI": float(candidate["AGI"]),
+            "MAGI": float(candidate["MAGI"]),
+            "ACA Headroom Remaining": float(candidate["ACA Headroom Remaining"]) if candidate.get("ACA Headroom Remaining") is not None else None,
+            "IRMAA Headroom Remaining": float(candidate["IRMAA Headroom Remaining"]) if candidate.get("IRMAA Headroom Remaining") is not None else None,
+            "Taxable Income": float(candidate["Taxable Income"]),
+            "Federal Tax": float(candidate["Federal Tax"]),
+            "NC State Tax": float(candidate["NC State Tax"]),
+            "Federal LTCG/QD Tax": float(candidate["Federal LTCG/QD Tax"]),
+            "ACA Cost": float(candidate["ACA Cost"]),
+            "IRMAA Cost": float(candidate["IRMAA Cost"]),
+            "Total Government Drag": float(candidate["Total Government Drag"]),
+            "Effective Tax Rate": float(candidate["Effective Tax Rate"]),
+            "All-In Effective Rate": safe_numeric_or_blank(candidate.get("All-In Effective Rate")),
+        })
+
+    summary = {
+        "Year": int(year),
+        "Filing Status": filing_status,
+        "Recommended Additional Conversion": float(recommended_additional_conversion),
+        "Target Bracket": target_bracket,
+        "Safety Buffer": float(safety_buffer),
+        "Standard Deduction": float(standard_deduction),
+        "ACA Covered Lives": int(aca_covered_lives),
+        "Medicare Covered Lives": int(medicare_covered_lives),
+        "ACA Cliff": float(aca_limit) if aca_limit is not None else None,
+        "ACA Headroom Remaining": float(recommended["ACA Headroom Remaining"]) if recommended.get("ACA Headroom Remaining") is not None else None,
+        "First IRMAA Cliff": float(irmaa_first_cliff) if irmaa_first_cliff is not None else None,
+        "IRMAA Headroom Remaining": float(recommended["IRMAA Headroom Remaining"]) if recommended.get("IRMAA Headroom Remaining") is not None else None,
+        "IRMAA Guardrail Status": "N/A (pre-Medicare)" if medicare_covered_lives <= 0 else ("Enabled" if use_irmaa_guardrail else "Disabled"),
+    }
+
+    return {
+        "summary": summary,
+        "baseline_candidate": baseline,
+        "recommended_candidate": recommended,
+        "threshold_df": pd.DataFrame(threshold_rows),
+        "compare_df": pd.DataFrame(compare_rows),
+    }
+
+
+def render_standalone_annual_tax_results(result: dict) -> None:
+    summary = result["summary"]
+    current = result["baseline_candidate"]
+    recommended = result["recommended_candidate"]
+
+    st.subheader("Annual Tax Engine Summary")
+
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Recommended Additional Conversion", f"${float(summary['Recommended Additional Conversion']):,.0f}")
+    m2.metric("Current MAGI", f"${float(current['MAGI']):,.0f}")
+    m3.metric("Recommended MAGI", f"${float(recommended['MAGI']):,.0f}")
+    m4.metric("ACA Cliff", f"${float(summary['ACA Cliff']):,.0f}" if summary['ACA Cliff'] is not None else "N/A")
+    m5.metric("ACA Headroom", f"${float(summary['ACA Headroom Remaining']):,.0f}" if summary['ACA Headroom Remaining'] is not None else "N/A")
+    m6.metric("IRMAA Headroom", f"${float(summary['IRMAA Headroom Remaining']):,.0f}" if summary.get('IRMAA Headroom Remaining') is not None else "N/A (pre-Medicare)")
+
+    st.subheader("Current-Year Snapshot")
+    snapshot_rows = [
+        ("Filing Status", current["Filing Status"]),
+        ("Provisional Income", current["Provisional Income"]),
+        ("Taxable Social Security", current["Taxable SS"]),
+        ("AGI", current["AGI"]),
+        ("MAGI", current["MAGI"]),
+        ("Taxable Income", current["Taxable Income"]),
+        ("Federal Ordinary Tax", current["Federal Ordinary Tax"]),
+        ("Federal LTCG/QD Tax", current["Federal LTCG/QD Tax"]),
+        ("Projected Federal Tax", current["Federal Tax"]),
+        ("Projected NC State Tax", current["NC State Tax"]),
+        ("Total Projected Tax", current["Total Tax"]),
+        ("Tax-Only Effective Rate", current["Effective Tax Rate"]),
+        ("All-In Effective Rate", current["All-In Effective Rate"]),
+        ("Marginal Federal Rate", current["Marginal Federal Rate"]),
+    ]
+    snapshot_df = pd.DataFrame(snapshot_rows, columns=["Metric", "Current"])
+    currency_metrics = {
+        "Provisional Income", "Taxable Social Security", "AGI", "MAGI", "Taxable Income",
+        "Federal Ordinary Tax", "Federal LTCG/QD Tax", "Projected Federal Tax",
+        "Projected NC State Tax", "Total Projected Tax"
+    }
+    percent_metrics = {"Tax-Only Effective Rate", "All-In Effective Rate", "Marginal Federal Rate"}
+    snapshot_df["Display"] = snapshot_df.apply(
+        lambda row: f"${float(row['Current']):,.0f}" if row["Metric"] in currency_metrics else (
+            f"{float(row['Current']):.2%}" if row["Metric"] in percent_metrics else str(row["Current"])
+        ),
+        axis=1,
+    )
+    st.dataframe(snapshot_df[["Metric", "Display"]], use_container_width=True)
+
+    if summary['ACA Cliff'] is not None:
+        st.write(f"ACA Cliff: ${float(summary['ACA Cliff']):,.0f}")
+        st.write(f"ACA Headroom Remaining: ${float(summary['ACA Headroom Remaining']):,.0f}")
+    if summary['First IRMAA Cliff'] is not None:
+        st.write(f"First IRMAA cliff used: ${float(summary['First IRMAA Cliff']):,.0f}")
+        st.write(f"IRMAA Headroom Remaining: ${float(summary['IRMAA Headroom Remaining']):,.0f}")
+    else:
+        st.write(f"IRMAA guardrail: {summary['IRMAA Guardrail Status']}")
+
+    st.subheader("Current Snapshot")
+    snapshot_cols = st.columns(3)
+    snapshot_cols[0].metric("Current AGI", format_dollars(current["AGI"]))
+    snapshot_cols[1].metric("Current MAGI", format_dollars(current["MAGI"]))
+    snapshot_cols[2].metric("Current Ordinary Taxable Income", format_dollars(current["Ordinary Taxable Income"]))
+
+    st.subheader("Additional Conversion Guardrails")
+    st.dataframe(
+        result["threshold_df"].style.format({
+            "Threshold": "${:,.0f}",
+            "Buffered Threshold": "${:,.0f}",
+            "Max Additional Conversion": "${:,.0f}",
+            "MAGI At Max": "${:,.0f}",
+            "ACA Headroom At Max": "${:,.0f}",
+            "IRMAA Headroom At Max": "${:,.0f}",
+            "Taxable Income At Max": "${:,.0f}",
+            "Federal Tax At Max": "${:,.0f}",
+            "NC Tax At Max": "${:,.0f}",
+            "ACA Cost At Max": "${:,.0f}",
+            "Total Drag At Max": "${:,.0f}",
+            "Effective Tax Rate At Max": "{:.2%}",
+            "All-In Effective Rate At Max": "{:.2%}",
+        }),
+        use_container_width=True,
+    )
+
+    st.subheader("Current vs Recommended Additional Conversion")
+    st.dataframe(
+        result["compare_df"].style.format({
+            "Additional Conversion": "${:,.0f}",
+            "Total Conversion For Year": "${:,.0f}",
+            "Taxable SS": "${:,.0f}",
+            "AGI": "${:,.0f}",
+            "MAGI": "${:,.0f}",
+            "ACA Headroom Remaining": "${:,.0f}",
+            "IRMAA Headroom Remaining": "${:,.0f}",
+            "Taxable Income": "${:,.0f}",
+            "Federal Tax": "${:,.0f}",
+            "NC State Tax": "${:,.0f}",
+            "Federal LTCG/QD Tax": "${:,.0f}",
+            "ACA Cost": "${:,.0f}",
+            "IRMAA Cost": "${:,.0f}",
+            "Total Government Drag": "${:,.0f}",
+            "Effective Tax Rate": "{:.2%}",
+            "All-In Effective Rate": "{:.2%}",
+        }),
+        use_container_width=True,
+    )
+
+def go_to_page(page_name: str) -> None:
+    st.session_state["app_page"] = page_name
+
+
+def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, source_label: str = "quick_recommendation", profile_name: str | None = None) -> None:
+    strategy = f"{int(owner_age)}/{int(spouse_age)}"
+    st.session_state["owner_claim_age"] = int(owner_age)
+    st.session_state["spouse_claim_age"] = int(spouse_age)
+    st.session_state["selected_recommendation_strategy"] = strategy
+    st.session_state["selected_recommendation_source"] = source_label
+    st.session_state["selected_recommendation_profile"] = profile_name
+    st.session_state["suppress_quick_recommendation_stale_once"] = True
+    source_text = str(source_label).replace("_", " ").strip()
+    profile_text = f" under {profile_name}" if profile_name else ""
+    st.session_state["governor_strategy_applied_notice"] = f"Governor now set to {strategy} from {source_text}{profile_text}."
+    if profile_name:
+        st.session_state["planning_profile"] = profile_name
+        apply_break_even_governor_profile_presets(profile_name, st.session_state.get("trad", 0.0), force=True)
+    st.session_state["app_page"] = "conversion"
+
+
+def get_app_page() -> str:
+    if "app_page" not in st.session_state:
+        st.session_state["app_page"] = "home"
+    return st.session_state["app_page"]
+
+
+def render_top_nav(current_page: str) -> None:
+    ensure_default_state()
+    nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
+    with nav1:
+        st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
+    with nav2:
+        st.button(
+            "Annual Calculator",
+            on_click=go_to_page,
+            args=("annual",),
+            disabled=current_page == "annual",
+            use_container_width=True,
+        )
+    with nav3:
+        st.button(
+            "Conversion Optimizer",
+            on_click=go_to_page,
+            args=("conversion",),
+            disabled=current_page == "conversion",
+            use_container_width=True,
+        )
+    with nav4:
+        if st.button("Reset App State", key=f"reset_app_state_nav_{current_page}", use_container_width=True):
+            preserved_page = st.session_state.get("app_page", "home")
+            st.session_state.clear()
+            st.session_state["app_state_version"] = APP_STATE_VERSION
+            st.session_state["app_page"] = preserved_page
+            st.rerun()
+    render_scenario_identity_bar(current_page)
+    st.divider()
+    render_scenario_manager(current_page)
+
+
+def render_home_page() -> None:
+    ensure_default_state()
+    st.title("Retirement Model")
+    st.subheader("Choose a tool")
+    st.write(
+        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
+    )
+    render_top_nav("home")
+    st.info(
+        "State is kept across pages. Annual current-year inputs stay in session and remain available when you switch tools."
+    )
+
+
+
+def render_shared_household_inputs() -> dict:
+    with st.expander("Household Inputs", expanded=False):
+        owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
+        spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
+
+        owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
+        spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            trad = st.number_input("Traditional IRA Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
+            roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
+            brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
+            brokerage_basis = st.number_input(
+                "Brokerage Cost Basis",
+                min_value=0.0,
+                value=float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+                step=1000.0,
+                help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
+                key="brokerage_basis",
+            )
+            cash = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])), step=1000.0, key="cash")
+
+        with col2:
+            growth = st.number_input("Growth Rate (%)", min_value=0.0, value=float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])), step=0.1, key="growth_pct") / 100
+            annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])), step=1000.0, key="annual_spending")
+            spending_inflation_rate = st.number_input(
+                "Spending Inflation Rate (%)",
+                min_value=0.0,
+                value=float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])),
+                step=0.1,
+                help="Applied to spending each year before any retirement-smile multiplier.",
+                key="spending_inflation_rate_pct",
+            ) / 100
+            owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
+            spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
+
+    with st.expander("Retirement Smile Spending", expanded=False):
+        sm1, sm2 = st.columns(2)
+        with sm1:
+            retirement_smile_enabled = st.checkbox(
+                "Enable Retirement Smile Spending",
+                value=bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+                help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
+                key="retirement_smile_enabled",
+            )
+            go_go_end_age = st.number_input(
+                "Go-Go Ends At Age",
+                min_value=0,
+                value=int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+                step=1,
+                help="Applies to the older household member's age for the modeled year.",
+                key="go_go_end_age",
+            )
+            slow_go_end_age = st.number_input(
+                "Slow-Go Ends At Age",
+                min_value=0,
+                value=int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+                step=1,
+                help="No-go spending starts at this age and later.",
+                key="slow_go_end_age",
+            )
+        with sm2:
+            go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])), step=0.05, format="%.2f", key="go_go_multiplier")
+            slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])), step=0.05, format="%.2f", key="slow_go_multiplier")
+            no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])), step=0.05, format="%.2f", key="no_go_multiplier")
+
+        st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
+
+    with st.expander("ACA Coverage", expanded=False):
+        cov1, cov2 = st.columns(2)
+        with cov1:
+            primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
+        with cov2:
+            spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
+
+    with st.expander("Earned Income", expanded=False):
+        sync_conversion_earned_income_widget_state()
+        earn1, earn2, earn3 = st.columns(3)
+        with earn1:
+            earned_income_annual = st.number_input(
+                "Annual Wage Income",
+                min_value=0.0,
+                value=float(st.session_state.get("conversion_earned_income_annual_input", st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))),
+                step=1000.0,
+                key="conversion_earned_income_annual_input",
+                on_change=on_conversion_earned_income_change,
+            )
+        with earn2:
+            earned_income_start_year = st.number_input(
+                "Wage Income Start Year",
+                min_value=START_YEAR,
+                value=int(st.session_state.get("conversion_earned_income_start_year_input", st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))),
+                step=1,
+                key="conversion_earned_income_start_year_input",
+                on_change=on_conversion_earned_income_change,
+            )
+        with earn3:
+            earned_income_end_year = st.number_input(
+                "Wage Income End Year",
+                min_value=START_YEAR,
+                value=int(st.session_state.get("conversion_earned_income_end_year_input", st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))),
+                step=1,
+                key="conversion_earned_income_end_year_input",
+                on_change=on_conversion_earned_income_change,
+            )
+
+    with st.expander("Tax Funding", expanded=False):
+        conversion_tax_funding_policy = st.selectbox(
+            "Preferred tax funding source",
+            [
+                "Cash then Brokerage",
+                "Brokerage only",
+                "Cash only",
+                "Cash then Brokerage then Trad then Roth",
+            ],
+            index=0,
+            key="conversion_tax_funding_policy",
+        )
+        st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
+
+    inputs = {
+        "trad": trad,
+        "roth": roth,
+        "brokerage": brokerage,
+        "brokerage_basis": min(brokerage_basis, brokerage),
+        "cash": cash,
+        "growth": growth,
+        "annual_spending": annual_spending,
+        "spending_inflation_rate": spending_inflation_rate,
+        "retirement_smile_enabled": retirement_smile_enabled,
+        "go_go_end_age": go_go_end_age,
+        "slow_go_end_age": slow_go_end_age,
+        "go_go_multiplier": go_go_multiplier,
+        "slow_go_multiplier": slow_go_multiplier,
+        "no_go_multiplier": no_go_multiplier,
+        "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+        "conversion_tax_funding_policy": conversion_tax_funding_policy,
+        "owner_current_age": owner_current_age,
+        "spouse_current_age": spouse_current_age,
+        "owner_claim_age": owner_claim_age,
+        "spouse_claim_age": spouse_claim_age,
+        "owner_ss_base": owner_ss_base,
+        "spouse_ss_base": spouse_ss_base,
+        "earned_income_annual": float(st.session_state.get("earned_income_annual", earned_income_annual)),
+        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", earned_income_start_year)),
+        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", earned_income_end_year)),
+        "primary_aca_end_year": primary_aca_end_year,
+        "spouse_aca_end_year": spouse_aca_end_year,
+        "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
+        "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
+        "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+    }
+    return inputs
+
+
+def render_conversion_page() -> None:
+    ensure_default_state()
+    st.subheader("Retirement Optimizer")
+    render_top_nav("conversion")
+
+    selected_strategy = st.session_state.get("selected_recommendation_strategy")
+    selected_source = st.session_state.get("selected_recommendation_source")
+    selected_profile = st.session_state.get("selected_recommendation_profile")
+    preset_note = st.session_state.get("break_even_governor_preset_note")
+    active_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
+    applied_notice = st.session_state.get("governor_strategy_applied_notice")
+    if applied_notice:
+        st.caption(applied_notice)
+    elif selected_strategy and selected_strategy != active_strategy:
+        source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
+        profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
+        st.caption(f"Selected strategy context: {selected_strategy}{source_text}{profile_text}.")
+    if preset_note:
+        st.caption(preset_note)
+
+    inputs = render_shared_household_inputs()
+
+    current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
+    if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
+        st.session_state["max_conversion"] = float(current_max_conversion_value)
+    max_conversion = float(current_max_conversion_value)
+    current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
+    if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
+        st.session_state["step_size"] = float(current_step_size_value)
+    step_size = float(current_step_size_value)
+    cash_sweep_threshold = float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"]))
+    current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
+    state_tax_rate = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"]))
+    target_trad_balance_enabled = bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"]))
+    target_trad_balance = float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"]))
+    target_trad_override_enabled = bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"]))
+    current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
+    target_trad_override_max_rate = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"]))
+    post_aca_target_bracket = str(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
+    rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
+    integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+    validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
+
+    st.divider()
+    ss_optimizer_expanded = bool(st.session_state.get("ss_optimizer_expanded", False))
+    if get_current_result_payload("quick_strategy_recommendation_result") is not None or get_current_result_payload("ss_optimizer_last_result") is not None:
+        ss_optimizer_expanded = True
+    with st.expander("SS Optimizer", expanded=ss_optimizer_expanded):
+        st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
+        st.caption("Workflow: set assumptions first, then run Quick Scan for a fast answer or Full 81-Combination Scan for exhaustive validation.")
+        planning_profile = st.selectbox(
+            "Optimize For",
+            list(PROFILE_PRESETS.keys()),
+            index=list(PROFILE_PRESETS.keys()).index(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))),
+            help="Choose the planning lens the recommendation engine should use when ranking quick Social Security strategies.",
+            key="planning_profile",
+        )
+        profile_summary = get_profile_summary(planning_profile)
+        st.info(
+            f"{profile_summary['description']}\n\n"
+            f"This means the model will: \n- {profile_summary['bullets'][0]}\n- {profile_summary['bullets'][1]}\n- {profile_summary['bullets'][2]}\n\n"
+            f"Tradeoff to expect: {profile_summary['tradeoff']}"
+        )
+
+        st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
+        pref1, pref2, pref3 = st.columns(3)
+        with pref1:
+            st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
+        with pref2:
+            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
+        with pref3:
+            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+        current_preferences = extract_scoring_preferences(st.session_state)
+        st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
+        lambda_col_left, lambda_col_right = st.columns([1, 3])
+        with lambda_col_left:
+            trad_balance_penalty_lambda = st.number_input(
+                "Traditional IRA penalty weight",
+                min_value=0.0,
+                max_value=2.0,
+                value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+                step=0.05,
+                help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
+                key="trad_balance_penalty_lambda",
+            )
+        integrity_col1, integrity_col2 = st.columns([1, 1])
+        with integrity_col1:
+            st.checkbox(
+                "Enable integrity check",
+                key="integrity_mode",
+                help="When enabled, the optimizer reruns and validates the selected best result for repeatability.",
+            )
+        with integrity_col2:
+            st.number_input(
+                "Validation tolerance",
+                min_value=0.0,
+                value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
+                step=0.01,
+                key="validation_tolerance",
+                help="Absolute tolerance used by the integrity rerun comparison.",
+            )
+        integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+        validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
+
+        selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
+        with st.container(border=True):
+            st.markdown(f"**{selection_summary['title']}**")
+            st.caption("Base profile tendencies")
+            for item in selection_summary["defaults"]:
+                st.write(f"- {item}")
+            st.caption("Active modifier nudges")
+            for item in selection_summary["modifiers"]:
+                st.write(f"- {item}")
+            st.caption("How this combination behaves")
+            for item in selection_summary["notes"]:
+                st.write(f"- {item}")
+
+        rec_col1, rec_col2, rec_col3 = st.columns([1, 1, 2])
+        with rec_col1:
+            if st.button("Run Quick Scan", use_container_width=True):
+                st.session_state["ss_optimizer_expanded"] = True
+                with st.spinner("Running SS Optimizer quick scan..."):
+                    recommendation_result = run_quick_strategy_recommendation(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        profile_name=planning_profile,
+                    )
+                quick_hash_inputs, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
+                quick_hash_inputs.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
+                recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
+                recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
+                st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
+                mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
+        with rec_col2:
+            if st.button("Run Full 81-Combination Scan", use_container_width=True):
+                st.session_state["ss_optimizer_expanded"] = True
+                clear_ss_optimizer_state(clear_last_result=True)
+                optimizer_result = run_ss_optimizer(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                    integrity_mode=integrity_mode,
+                    validation_tolerance=validation_tolerance,
+                    start_index=0,
+                    existing_results=[],
+                    profile_name=planning_profile,
+                )
+                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
+                optimizer_result["planning_profile_snapshot"] = planning_profile
+                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
+                if optimizer_result.get("completed", False):
+                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
+                st.rerun()
+        with rec_col3:
+            st.caption("Run Quick Scan for a fast directional answer using the same core engine as the Full 81 scan, but limited to 7 anchor strategies: 62/62, 67/67, 70/70, 70/67, 67/70, 62/67, and 67/62.")
+            st.caption("Run Full 81-Combination Scan when you want exhaustive confirmation and progress feedback. Changing modifiers does not update an existing quick scan automatically. Run the quick scan again after any modifier change.")
+
+        quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+        if quick_result is not None:
+            quick_inputs_snapshot, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
+            quick_inputs_snapshot.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
+            if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
+                st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
+                st.session_state["suppress_quick_recommendation_stale_once"] = False
+            else:
+                render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick scan results")
+            st.subheader("Quick Scan Summary")
+            st.caption("These strategy rows use the same core engine and ranking path as the Full 81 scan, but only over the 7 quick-scan anchor strategies. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
+            if quick_result.get("applied_preset_note"):
+                st.caption(quick_result["applied_preset_note"])
+            st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
+            st.dataframe(
+                quick_result["summary_df"].style.format({
+                    "Score": "{:.1f}",
+                    "Net Worth": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Trad IRA @ End": "${:,.0f}",
+                    "Roth @ End": "${:,.0f}",
+                    "Brokerage @ End": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Survivor SS Income": "${:,.0f}",
+                }),
+                use_container_width=True,
+            )
+            anchor_compare_df = build_quick_anchor_comparison_df(quick_result.get("ranked_rows", []))
+            if not anchor_compare_df.empty:
+                st.caption("Anchor comparison shows the recommendation next to the highest net worth and stability anchors from the same quick-run set.")
+                st.dataframe(
+                    anchor_compare_df.style.format({
+                        "Net Worth": "${:,.0f}",
+                        "After-Tax Legacy": "${:,.0f}",
+                        "Lifetime taxes / government drag": "${:,.0f}",
+                        "Final Household SS Income": "${:,.0f}",
+                        "Ending Traditional IRA": "${:,.0f}",
+                    }),
+                    use_container_width=True,
+                )
+            if quick_result.get("close_result"):
+                st.info(
+                    "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
+                )
+            st.download_button(
+                "Download Quick Scan Summary (CSV)",
+                data=quick_result["summary_df"].to_csv(index=False),
+                file_name="quick_strategy_summary.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.subheader("Advisor Interpretation")
+            advisor_text = str(quick_result.get("advisor_text", "")).replace("$", r"\$")
+            st.markdown(advisor_text)
+
+            ranked_rows_for_tradeoff = quick_result.get("ranked_rows", [])
+            if ranked_rows_for_tradeoff:
+                recommended_row = ranked_rows_for_tradeoff[0]
+                most_stable_row = max(
+                    ranked_rows_for_tradeoff,
+                    key=lambda r: (
+                        float(r.get("Final Household SS Income", r.get("final_household_ss_income", 0.0))),
+                        float(r.get("Survivor SS Income", r.get("survivor_ss_income", 0.0))),
+                        -float(r.get("Ending Traditional IRA Balance", r.get("ending_traditional_ira_balance", 0.0))),
+                    )
+                )
+                highest_net_worth_row = max(
+                    ranked_rows_for_tradeoff,
+                    key=lambda r: float(r.get("Final Net Worth", r.get("final_net_worth", 0.0)))
+                )
+
+                def _strategy_metrics_for_display(row: dict) -> tuple[str, float, float, float, float]:
+                    return (
+                        str(row.get("Strategy", "")),
+                        float(row.get("After-Tax Legacy", row.get("after_tax_legacy", 0.0))),
+                        float(row.get("Ending Traditional IRA Balance", row.get("ending_traditional_ira_balance", 0.0))),
+                        float(row.get("Final Net Worth", row.get("final_net_worth", 0.0))),
+                        float(row.get("Final Household SS Income", row.get("final_household_ss_income", 0.0))),
+                    )
+
+                def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
+                    same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
+                    with col:
+                        st.markdown(f"**{title}**")
+                        if same_as_recommended and title != "Recommended Strategy":
+                            st.caption("Same as recommended")
+                        st.write(row.get("Strategy", ""))
+                        st.write(f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
+                        st.write(f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
+                        st.write(f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
+                        st.write(f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
+
+                st.subheader("Tradeoff Summary")
+                tc1, tc2, tc3 = st.columns(3)
+                _render_tradeoff_column(tc1, "Recommended Strategy", recommended_row, recommended_row)
+                _render_tradeoff_column(tc2, "Most Stable Strategy", most_stable_row, recommended_row)
+                _render_tradeoff_column(tc3, "Highest Net Worth Strategy", highest_net_worth_row, recommended_row)
+
+                stable_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(most_stable_row.get('Ending Traditional IRA Balance', most_stable_row.get('ending_traditional_ira_balance', 0.0)))
+                stable_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(most_stable_row.get('Final Net Worth', most_stable_row.get('final_net_worth', 0.0)))
+                stable_ss_delta = float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))) - float(most_stable_row.get('Final Household SS Income', most_stable_row.get('final_household_ss_income', 0.0)))
+                nw_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(highest_net_worth_row.get('Ending Traditional IRA Balance', highest_net_worth_row.get('ending_traditional_ira_balance', 0.0)))
+                nw_legacy_delta = float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))) - float(highest_net_worth_row.get('After-Tax Legacy', highest_net_worth_row.get('after_tax_legacy', 0.0)))
+                nw_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(highest_net_worth_row.get('Final Net Worth', highest_net_worth_row.get('final_net_worth', 0.0)))
+
+                stable_strategy = str(most_stable_row.get('Strategy', ''))
+                highest_nw_strategy = str(highest_net_worth_row.get('Strategy', ''))
+                tradeoff_lines = []
+                if stable_strategy != str(recommended_row.get('Strategy', '')):
+                    tradeoff_lines.append(
+                        f"- **Versus Most Stable ({stable_strategy})**: Final Net Worth {format_signed_dollars(stable_nw_delta)}, Household Social Security Income {format_signed_dollars(stable_ss_delta)}/year, Ending Traditional IRA {format_signed_dollars(stable_trad_delta)}."
+                    )
+                if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
+                    tradeoff_lines.append(
+                        f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
+                    )
+                if tradeoff_lines:
+                    st.subheader("Tradeoff Details")
+                    clean_lines = [str(line).replace("- **", "").replace("**", "") for line in tradeoff_lines]
+                    st.markdown("\n\n".join(clean_lines))
+            with st.expander("Quick Recommendation Snapshot", expanded=False):
+                default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
+                if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
+                    st.session_state["quick_snapshot_name_input"] = default_snapshot_name
+                st.text_input("Snapshot name", key="quick_snapshot_name_input", placeholder="Baseline Plan - Growth")
+                snapshot_json = build_quick_recommendation_snapshot_payload(quick_result, planning_profile)
+                snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
+                snapshot_profile = sanitize_export_filename(planning_profile, 'profile')
+                snapshot_strategy = sanitize_export_filename(str(recommended_row.get('Strategy', '')).replace('/', '-'), 'strategy')
+                snapshot_date = pd.Timestamp.now().strftime('%Y-%m-%d')
+                safe_snapshot_name = f"snapshot__{snapshot_profile}__{snapshot_strategy}__{snapshot_date}"
+                st.download_button(
+                    "Save Snapshot",
+                    data=snapshot_json,
+                    file_name=f"{safe_snapshot_name}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key="download_quick_recommendation_snapshot",
+                )
+                current_snapshot_payload = json.loads(snapshot_json)
+                render_snapshot_summary_card(current_snapshot_payload, heading="Current Quick Recommendation Snapshot")
+                if st.button("Open Current Snapshot in Viewer", use_container_width=True, key="open_current_snapshot_in_viewer"):
+                    open_snapshot_in_viewer(current_snapshot_payload)
+                    st.rerun()
+
+            guidance = quick_result.get("next_step_guidance", [])
+            if guidance:
+                st.subheader("Recommended Next Steps")
+                for item in guidance:
+                    st.write(f"- {item}")
+            top_ranked_rows = quick_result.get("ranked_rows", [])
+            if top_ranked_rows:
+                top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
+                current_governor_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
+                recommended_strategy_label = str(top_strategy['Strategy'])
+                if current_governor_strategy == recommended_strategy_label:
+                    st.success(f"Current active strategy matches the recommended quick scan strategy: {recommended_strategy_label}")
+                else:
+                    st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Current active strategy is {current_governor_strategy}.")
+                st.caption("Quick Scan is the fast directional answer from the 7 anchor strategies above. Use the button below to load this result into the Governor, or run the full 81-combination scan first if you want exhaustive confirmation.")
+                st.button(
+                    "Apply Quick Scan Winner to Retirement Optimizer",
+                    on_click=launch_conversion_optimizer_from_strategy,
+                    args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
+                    use_container_width=True,
+                )
+
+        full_optimizer_result = get_current_result_payload("ss_optimizer_last_result")
+        if full_optimizer_result is not None:
+            st.divider()
+            render_ss_optimizer_results(full_optimizer_result, planning_profile, extract_scoring_preferences(st.session_state))
+
+    with st.expander("Spending Optimization (Target Legacy)", expanded=False):
+        st.caption("Use this to estimate how much more you could spend each year while still meeting an after-tax legacy goal, using your current Social Security ages and Break-Even Governor settings.")
+        spend1, spend2 = st.columns([1, 1])
+        with spend1:
+            target_legacy_mode = st.selectbox(
+                "Target After-Tax Legacy",
+                ["Maximize", "$5M", "$10M", "$20M", "Custom"],
+                index=["Maximize", "$5M", "$10M", "$20M", "Custom"].index(st.session_state.get("target_after_tax_legacy_mode", DEFAULT_APP_STATE["target_after_tax_legacy_mode"])),
+                help="Set a legacy target and the tool will search for the highest base annual spending that still reaches it.",
+                key="target_after_tax_legacy_mode",
+            )
+        if target_legacy_mode == "Custom":
+            with spend2:
+                target_after_tax_legacy_custom = st.number_input(
+                    "Custom Legacy Target",
+                    min_value=0.0,
+                    value=float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"])),
+                    step=500000.0,
+                    help="Used only when Target After-Tax Legacy is set to Custom.",
+                    key="target_after_tax_legacy_custom",
+                )
+        else:
+            target_after_tax_legacy_custom = float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"]))
+        resolved_target_legacy = resolve_target_after_tax_legacy(target_legacy_mode, target_after_tax_legacy_custom)
+        if resolved_target_legacy is None:
+            st.info("Set Target After-Tax Legacy to a dollar goal to use spending optimization. Leaving it on Maximize keeps the current maximize-legacy behavior.")
+        else:
+            st.caption(
+                f"Current search will use your active SS ages ({int(inputs['owner_claim_age'])}/{int(inputs['spouse_claim_age'])}), "
+                f"current Governor settings, and a target after-tax legacy of {format_dollars(resolved_target_legacy)}."
+            )
+            if st.button("Find Maximum Annual Spending for Legacy Target", use_container_width=True):
+                with st.spinner("Searching for the highest spending level that still reaches your target legacy..."):
+                    spending_result = optimize_spending_for_target_legacy(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        target_legacy=resolved_target_legacy,
+                    )
+                st.session_state["spending_target_result"] = spending_result
+
+        spending_target_result = st.session_state.get("spending_target_result")
+        if spending_target_result and resolved_target_legacy is not None and float(spending_target_result.get("target_legacy", 0.0)) == float(resolved_target_legacy):
+            baseline = spending_target_result["baseline"]
+            optimized = spending_target_result["optimized"]
+            baseline_metrics = baseline["metrics"]
+            optimized_metrics = optimized["metrics"]
+            status = spending_target_result.get("status", "ok")
+            st.subheader("Maximum Annual Spending for Legacy Target")
+            if status == "not_achievable_from_current_plan":
+                st.warning(
+                    f"At your current base spending of {format_dollars(baseline['annual_spending'])}, your projected after-tax legacy is {format_dollars(baseline_metrics['after_tax_legacy'])}, which is below the selected target of {format_dollars(resolved_target_legacy)}. "
+                    "Lower spending, reduce the target, or change assumptions before using this tool."
+                )
+            else:
+                st.success(
+                    f"You can spend up to about {format_dollars(optimized['annual_spending'])} per year and still keep after-tax legacy at or above {format_dollars(resolved_target_legacy)}."
+                )
+                st.caption(
+                    "This tool finds the highest sustainable base annual spending that still satisfies your selected after-tax legacy target, using your current SS ages and Governor settings."
+                )
+                delta_spending = optimized["annual_spending"] - baseline["annual_spending"]
+                delta_net_worth = optimized_metrics["final_net_worth"] - baseline_metrics["final_net_worth"]
+                delta_legacy = optimized_metrics["after_tax_legacy"] - baseline_metrics["after_tax_legacy"]
+                delta_trad = optimized_metrics["ending_traditional_ira_balance"] - baseline_metrics["ending_traditional_ira_balance"]
+                delta_drag = float(optimized["run_result"].get("total_government_drag", 0.0)) - float(baseline["run_result"].get("total_government_drag", 0.0))
+                delta_ss = optimized_metrics["final_household_ss_income"] - baseline_metrics["final_household_ss_income"]
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Current Base Spending", format_dollars(baseline["annual_spending"]))
+                c2.metric("Max Base Spending to Hit Target", format_dollars(optimized["annual_spending"]), delta=format_dollars(delta_spending))
+                c3.metric("Search Runs", str(int(spending_target_result.get("search_runs", 0))))
+
+                comparison_df = pd.DataFrame([
+                    {
+                        "Plan": "Current",
+                        "Base Annual Spending": baseline["annual_spending"],
+                        "After-Tax Legacy": baseline_metrics["after_tax_legacy"],
+                        "Final Net Worth": baseline_metrics["final_net_worth"],
+                        "Ending Traditional IRA": baseline_metrics["ending_traditional_ira_balance"],
+                        "Heir Tax Drag": baseline_metrics.get("heir_tax_drag", 0.0),
+                        "Final Household SS Income": baseline_metrics["final_household_ss_income"],
+                        "Total Government Drag": float(baseline["run_result"].get("total_government_drag", 0.0)),
+                    },
+                    {
+                        "Plan": "Maximum Spending Plan",
+                        "Base Annual Spending": optimized["annual_spending"],
+                        "After-Tax Legacy": optimized_metrics["after_tax_legacy"],
+                        "Final Net Worth": optimized_metrics["final_net_worth"],
+                        "Ending Traditional IRA": optimized_metrics["ending_traditional_ira_balance"],
+                        "Heir Tax Drag": optimized_metrics.get("heir_tax_drag", 0.0),
+                        "Final Household SS Income": optimized_metrics["final_household_ss_income"],
+                        "Total Government Drag": float(optimized["run_result"].get("total_government_drag", 0.0)),
+                    },
+                ])
+                st.dataframe(
+                    comparison_df.style.format({
+                        "Base Annual Spending": "${:,.0f}",
+                        "After-Tax Legacy": "${:,.0f}",
+                        "Final Net Worth": "${:,.0f}",
+                        "Ending Traditional IRA": "${:,.0f}",
+                        "Heir Tax Drag": "${:,.0f}",
+                        "Final Household SS Income": "${:,.0f}",
+                        "Total Government Drag": "${:,.0f}",
+                    }),
+                    use_container_width=True,
+                )
+                st.caption(
+                    "Compared with your current plan, this target-legacy spending level changes: "
+                    f"net worth by {format_dollars(delta_net_worth)}, after-tax legacy by {format_dollars(delta_legacy)}, "
+                    f"ending Traditional IRA by {format_dollars(delta_trad)}, government drag by {format_dollars(delta_drag)}, "
+                    f"and final household Social Security income by {format_dollars(delta_ss)}."
+                )
+
+    with st.expander("Break-Even Governor", expanded=False):
+        st.caption("These settings control the Governor only. They do not change the quick recommendation ranking section above.")
+        st.subheader("Governor Execution Controls")
+
+        max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
+        step_size = st.number_input(
+            "Break-Even Step Size",
+            min_value=1000.0,
+            value=float(current_step_size_value),
+            step=1000.0,
+            help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
+            key="step_size",
+        )
+
+        pol1, pol2 = st.columns(2)
+        with pol1:
+            cash_sweep_threshold = st.number_input(
+                "Cash Sweep Threshold",
+                min_value=0.0,
+                value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
+                step=5000.0,
+                help="End-of-year cash above this amount is swept into brokerage.",
+                key="cash_sweep_threshold",
+            )
+        with pol2:
+            existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
+            if not isinstance(existing_state_tax_display, str):
+                existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
+                st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
+            state_tax_display_value = st.text_input(
+                "State Tax Rate",
+                value=f"{current_state_tax_pct:.2f}%",
+                help="Enter the state tax rate as a percent, for example 4.75%.",
+                key="state_tax_rate_pct_display",
+            )
+            cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
+            try:
+                state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
+            except Exception:
+                state_tax_rate_pct = current_state_tax_pct
+            state_tax_rate = state_tax_rate_pct / 100.0
+            st.session_state["state_tax_rate"] = state_tax_rate
+            normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
+            if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
+                st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
+
+        tg1, tg2 = st.columns(2)
+        with tg1:
+            target_trad_balance_enabled = st.checkbox(
+                "Use Target Traditional IRA Balance Goal",
+                value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
+                help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
+                key="target_trad_balance_enabled",
+            )
+        with tg2:
+            target_trad_balance = st.number_input(
+                "Target Traditional IRA Balance By RMD Start",
+                min_value=0.0,
+                value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
+                step=25000.0,
+                help="Planner goal for remaining Traditional IRA balance by household RMD start.",
+                key="target_trad_balance",
+            )
+
+        ov1, ov2 = st.columns(2)
+        with ov1:
+            target_trad_override_enabled = st.checkbox(
+                "Allow Target Traditional IRA Planner Override",
+                value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
+                help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
+                key="target_trad_override_enabled",
+            )
+        with ov2:
+            existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
+            if not isinstance(existing_override_display, str):
+                existing_override_display = f"{float(existing_override_display):.0f}%"
+                st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
+            display_value = st.text_input(
+                "Target Traditional IRA Override Max All-In Rate",
+                value=f"{current_override_pct:.0f}%",
+                help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
+                key="target_trad_override_max_rate_pct_display",
+            )
+            cleaned_display_value = str(display_value).strip().replace("%", "")
+            try:
+                target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
+            except Exception:
+                target_trad_override_max_rate_pct = current_override_pct
+            target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
+            st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
+            normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
+            if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
+                st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
+
+        br1, br2 = st.columns(2)
+        with br1:
+            post_aca_target_bracket = st.selectbox(
+                "Post-ACA Target Bracket",
+                ["12%", "22%", "24%"],
+                index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
+                help="Used in non-ACA years before household RMDs begin.",
+                key="post_aca_target_bracket",
+            )
+        with br2:
+            rmd_era_target_bracket = st.selectbox(
+                "RMD-Era Target Bracket",
+                ["12%", "22%", "24%"],
+                index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
+                help="Used once the household reaches the first RMD year.",
+                key="rmd_era_target_bracket",
+            )
+
+        st.subheader("Execution & Results")
+        st.caption("Run the Flat Strategy or Break-Even Governor here after setting the Governor controls above.")
+
+        flat_annual_conversion = st.number_input(
+            "Flat Annual Conversion",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+            step=5000.0,
+            key="annual_conversion",
+            help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
+        )
+
+        btn1, btn2 = st.columns(2)
+
+        with btn1:
+            st.subheader("Flat Strategy Test")
+            if st.button("Run Flat Strategy Test"):
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                result = run_model_fixed(flat_inputs)
+                result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
+                st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
+                mark_result_state("flat_strategy", flat_inputs)
+            flat_result = get_current_result_payload("flat_strategy_last_result")
+            if flat_result is not None:
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
+                render_summary("Flat Strategy Summary", flat_result)
+                st.subheader("Flat Strategy Yearly Results")
+                st.dataframe(flat_result["df"], use_container_width=True)
+
+        with btn2:
+            st.subheader("Run Break-Even Governor")
+            st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
+            if st.button("Run Break-Even Governor"):
+                result = run_governor_with_validation(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    integrity_mode=integrity_mode,
+                    tol=validation_tolerance,
+                )
+                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
+                mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
+            result = get_current_result_payload("break_even_last_result")
+            if result is not None:
+                render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
+                render_summary("Break-Even Governor Summary", result)
+                beg_export_name = f"beg__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{active_strategy.replace('/', '-')}__v124.json"
+                st.download_button(
+                    "Save Break-Even Governor Results",
+                    data=build_break_even_export_payload(result),
+                    file_name=beg_export_name,
+                    mime="application/json",
+                    use_container_width=True,
+                    key="save_beg_results_button",
+                )
+                st.subheader("Chosen Year-by-Year Path")
+                path_display_df = build_chosen_path_display_df(result["df"])
+                st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
+                with st.expander("Debug: First Year Raw Data", expanded=False):
+                    try:
+                        if result.get("df") is not None and not result["df"].empty:
+                            first_row_raw = result["df"].iloc[0].to_dict()
+                            st.json(first_row_raw)
+                    except Exception as debug_exc:
+                        st.write(f"Debug panel unavailable: {debug_exc}")
+                if path_display_df is not None and not path_display_df.empty:
+                    fmt = {}
+                    non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
+                    for col in path_display_df.columns:
+                        if col in non_currency_cols:
+                            continue
+                        series = path_display_df[col]
+                        if not pd.api.types.is_numeric_dtype(series):
+                            continue
+                        if "Rate" in col:
+                            fmt[col] = "{:.2%}"
+                        else:
+                            fmt[col] = "${:,.0f}"
+                    st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+
+                funding_debug_df = build_funding_debug_view_df(result["df"])
+                if funding_debug_df is not None and not funding_debug_df.empty:
+                    funding_summary = summarize_funding_debug_view(funding_debug_df)
+                    st.subheader("Funding Trace + Income View")
+                    st.caption("Use this to see how annual spending was funded and why MAGI can stay low even when spending is high. Brokerage Used For Spending shows total taxable-account dollars spent, while Brokerage Basis Used is the non-taxable portion and Realized LTCG is the portion that hits income.")
+                    summary_display_df = pd.DataFrame([
+                        {"Metric": "Primary cash refill source", "Value": str(funding_summary.get("Primary Cash Refill Source", "None"))},
+                        {"Metric": "Brokerage basis share", "Value": f"{float(funding_summary.get('Brokerage Basis Share', 0.0)):.0%}"},
+                        {"Metric": "Low-MAGI support years", "Value": f"{int(funding_summary.get('Low MAGI Support Years', 0))}"},
+                        {"Metric": "Roth spending years", "Value": f"{int(funding_summary.get('Roth Spending Years', 0))}"},
+                    ])
+                    st.dataframe(summary_display_df, hide_index=True, use_container_width=True)
+                    for insight in funding_summary.get("Insights", []):
+                        st.write(f"- {insight}")
+                    funding_fmt = {}
+                    funding_non_currency = {"Year", "Tax Funding Source"}
+                    for col in funding_debug_df.columns:
+                        if col in funding_non_currency:
+                            continue
+                        series = funding_debug_df[col]
+                        if pd.api.types.is_numeric_dtype(series):
+                            funding_fmt[col] = "${:,.0f}"
+                    st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
+
+                st.download_button(
+                    "Download Chosen Path (CSV)",
+                    data=result["df"].to_csv(index=False),
+                    file_name="break_even_governor_chosen_path.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.subheader("Year-by-Year Decision Diagnostics")
+                st.dataframe(result["decision_df"], use_container_width=True)
+                st.download_button(
+                    "Download Decision Diagnostics (CSV)",
+                    data=result["decision_df"].to_csv(index=False),
+                    file_name="break_even_governor_decisions.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+
+
+
+    def get_shared_household_inputs_from_state() -> dict:
+        """Read the same household/planning inputs from session state without rendering the full UI."""
+        return {
+            "trad": float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])),
+            "roth": float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])),
+            "brokerage": float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+            "brokerage_basis": min(
+                float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+                float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+            ),
+            "cash": float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])),
+            "growth": float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])) / 100.0,
+            "annual_spending": float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])),
+            "spending_inflation_rate": float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])) / 100.0,
+            "retirement_smile_enabled": bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+            "go_go_end_age": int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+            "slow_go_end_age": int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+            "go_go_multiplier": float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
+            "slow_go_multiplier": float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
+            "no_go_multiplier": float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
+            "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+            "conversion_tax_funding_policy": st.session_state.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"]),
+            "owner_current_age": int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])),
+            "spouse_current_age": int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])),
+            "owner_claim_age": int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])),
+            "spouse_claim_age": int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])),
+            "owner_ss_base": float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])),
+            "spouse_ss_base": float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])),
+            "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+            "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
+            "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
+            "primary_aca_end_year": int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])),
+            "spouse_aca_end_year": int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])),
+            "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
+            "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
+            "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+        }
+
+
+    st.divider()
+
+
+def render_annual_page() -> None:
+    ensure_default_state()
+    st.title("Annual Conversion Calculator")
+    render_top_nav("annual")
+    st.write("Use this page for current-year conversion analysis and annual tax checks without running the full lifetime optimizer.")
+
+    st.info("This page is focused on the current-year tax picture. Broader planning assumptions are used from your saved/session values unless you choose to edit them below.")
+
+    summary_col1, summary_col2, summary_col3 = st.columns(3)
+    with summary_col1:
+        st.metric("Base Annual Spending", f"${float(st.session_state.get('annual_spending', DEFAULT_APP_STATE['annual_spending'])):,.0f}")
+        st.metric("Growth Rate", f"{float(st.session_state.get('growth_pct', DEFAULT_APP_STATE['growth_pct'])):.1f}%")
+    with summary_col2:
+        st.metric("Owner / Spouse Ages", f"{int(st.session_state.get('owner_current_age', DEFAULT_APP_STATE['owner_current_age']))} / {int(st.session_state.get('spouse_current_age', DEFAULT_APP_STATE['spouse_current_age']))}")
+        st.metric("SS Claim Ages", f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))} / {int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}")
+    with summary_col3:
+        st.metric("Traditional IRA", f"${float(st.session_state.get('trad', DEFAULT_APP_STATE['trad'])):,.0f}")
+        st.metric(
+            "Roth + Brokerage",
+            f"${(float(st.session_state.get('roth', DEFAULT_APP_STATE['roth'])) + float(st.session_state.get('brokerage', DEFAULT_APP_STATE['brokerage']))):,.0f}",
+        )
+
+    edit_planning_assumptions = st.checkbox(
+        "Edit long-range planning assumptions for this page",
+        value=False,
+        help="Only expand this if you need to change broader household/planning assumptions from the annual calculator.",
+        key="annual_edit_long_range_assumptions",
+    )
+
+    if edit_planning_assumptions:
+        with st.expander("Long-Range Household / Planning Assumptions", expanded=True):
+            inputs = render_shared_household_inputs()
+    else:
+        inputs = get_shared_household_inputs_from_state()
+        with st.expander("Long-Range Household / Planning Assumptions", expanded=False):
+            st.write("Using current saved/session assumptions.")
+            st.write(
+                f"Balances: Trad ${float(st.session_state.get('trad', DEFAULT_APP_STATE['trad'])):,.0f}, "
+                f"Roth ${float(st.session_state.get('roth', DEFAULT_APP_STATE['roth'])):,.0f}, "
+                f"Brokerage ${float(st.session_state.get('brokerage', DEFAULT_APP_STATE['brokerage'])):,.0f}, "
+                f"Cash ${float(st.session_state.get('cash', DEFAULT_APP_STATE['cash'])):,.0f}"
+            )
+            st.write(
+                f"Retirement smile: {'On' if bool(st.session_state.get('retirement_smile_enabled', DEFAULT_APP_STATE['retirement_smile_enabled'])) else 'Off'} | "
+                f"Earned income ${float(st.session_state.get('earned_income_annual', DEFAULT_APP_STATE['earned_income_annual'])):,.0f} "
+                f"({int(st.session_state.get('earned_income_start_year', DEFAULT_APP_STATE['earned_income_start_year']))}–{int(st.session_state.get('earned_income_end_year', DEFAULT_APP_STATE['earned_income_end_year']))})"
+            )
+
+    st.subheader("Annual Conversion Calculator Inputs")
+    st.caption("Conversion page earned income schedule is the source of truth. This page shows the resolved earned income for the selected year and lets you add separate other ordinary income for that year.")
+
+    # Clean up legacy annual-page earned-income widget state from prior revisions.
+    st.session_state.pop("annual_earned_income_shared_input", None)
+    st.session_state.pop("annual_earned_income_source_signature", None)
+
+    row1_col1, row1_col2 = st.columns(2)
+    with row1_col1:
+        calc_year = st.number_input(
+            "Year to Analyze",
+            min_value=2025,
+            max_value=2100,
+            value=int(st.session_state.get("annual_calc_year", 2026)),
+            step=1,
+            key="annual_calc_year",
+        )
+    with row1_col2:
+        total_ss_for_year = st.number_input(
+            "Social Security for Year",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_total_ss_for_year", 0.0)),
+            step=1000.0,
+            key="annual_total_ss_for_year",
+        )
+    earned_income_for_selected_year = float(get_annual_earned_income_resolved_for_year(calc_year))
+
+    row2_col1, row2_col2 = st.columns(2)
+    with row2_col1:
+        st.number_input(
+            "Earned Income for Selected Year",
+            min_value=0.0,
+            value=float(earned_income_for_selected_year),
+            step=1000.0,
+            key="annual_earned_income_display",
+            disabled=True,
+            help="This is derived from the Conversion page earned-income schedule for the selected year. The Conversion page Annual Wage Income plus its start/end years is the source of truth for earned income.",
+        )
+    with row2_col2:
+        other_ordinary_income_for_year = st.number_input(
+            "Other Ordinary Income for Year",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_other_ordinary_income", DEFAULT_APP_STATE["annual_other_ordinary_income"])),
+            step=1000.0,
+            key="annual_other_ordinary_income",
+            help="Include taxable ordinary income for this year that is not already captured elsewhere. Examples: pension income, non-qualified annuity income, taxable interest, short-term capital gains, non-qualified dividends, rental or business ordinary income, and ordinary IRA withdrawals if you want to model them manually here. Exclude earned wages already coming from the Conversion page schedule, Social Security, and realized long-term capital gains, which has its own input below.",
+        )
+        # Passive legacy mirror only. This must never feed back into earned income.
+        st.session_state["annual_external_other_ordinary_income"] = float(other_ordinary_income_for_year)
+
+    realized_ltcg_so_far = st.number_input(
+        "Realized LTCG for Year",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_realized_ltcg_so_far", 0.0)),
+        step=1000.0,
+        key="annual_realized_ltcg_so_far",
+        help="Use this for realized long-term capital gains already expected for the selected year. Keep ordinary income items in the Other Ordinary Income field instead.",
+    )
+
+    annual_calculator_other_ordinary_income = float(earned_income_for_selected_year + other_ordinary_income_for_year)
+
+    bracket_tops = get_bracket_tops(int(calc_year))
+    bracket_options = [str(k) for k in bracket_tops.keys()]
+    default_target = str(st.session_state.get("annual_target_bracket", "22%"))
+    if default_target not in bracket_options:
+        default_target = bracket_options[min(2, len(bracket_options)-1)] if bracket_options else "22%"
+
+    row3_col1, row3_col2, row3_col3 = st.columns(3)
+    with row3_col1:
+        target_bracket = st.selectbox(
+            "Target Bracket",
+            bracket_options,
+            index=bracket_options.index(default_target) if bracket_options else 0,
+            key="annual_target_bracket",
+        )
+    with row3_col2:
+        income_safety_buffer = st.number_input(
+            "Income Safety Buffer",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_income_safety_buffer", 0.0)),
+            step=1000.0,
+            key="annual_income_safety_buffer",
+        )
+    with row3_col3:
+        step_size = st.number_input(
+            "Step Size",
+            min_value=100.0,
+            value=float(st.session_state.get("annual_step_size", 1000.0)),
+            step=100.0,
+            key="annual_step_size",
+        )
+
+    max_conversion = st.number_input(
+        "Maximum Additional Conversion to Test",
+        min_value=0.0,
+        value=float(st.session_state.get("annual_max_conversion", 200000.0)),
+        step=1000.0,
+        key="annual_max_conversion",
+    )
+
+    st.caption("Guardrails determine whether the calculator stops at a bracket target, ACA limit, IRMAA limit, or a combination of those constraints.")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        apply_bracket_guardrail = st.checkbox(
+            "Use Bracket Guardrail",
+            value=bool(st.session_state.get("annual_apply_bracket_guardrail", True)),
+            key="annual_apply_bracket_guardrail",
+        )
+    with c2:
+        apply_aca_guardrail = st.checkbox(
+            "Use ACA Guardrail",
+            value=bool(st.session_state.get("annual_apply_aca_guardrail", True)),
+            key="annual_apply_aca_guardrail",
+        )
+    with c3:
+        apply_irmaa_guardrail = st.checkbox(
+            "Use IRMAA Guardrail",
+            value=bool(st.session_state.get("annual_apply_irmaa_guardrail", True)),
+            key="annual_apply_irmaa_guardrail",
+        )
+
+    if st.button("Run Annual Conversion Calculator", use_container_width=True):
+        result = run_annual_conversion_calculator(
+            inputs=inputs,
+            calc_year=int(calc_year),
+            external_other_ordinary_income=float(annual_calculator_other_ordinary_income),
+            realized_ltcg_so_far=float(realized_ltcg_so_far),
+            total_ss_for_year=float(total_ss_for_year),
+            target_bracket=str(target_bracket),
+            income_safety_buffer=float(income_safety_buffer),
+            max_conversion=float(max_conversion),
+            step_size=float(step_size),
+            apply_bracket_guardrail=bool(apply_bracket_guardrail),
+            apply_aca_guardrail=bool(apply_aca_guardrail),
+            apply_irmaa_guardrail=bool(apply_irmaa_guardrail),
+        )
+        st.session_state["annual_conversion_calculator_result"] = result
+
+    annual_result = st.session_state.get("annual_conversion_calculator_result")
+    if annual_result:
+        render_annual_conversion_calculator_results(annual_result)
+
 
 def render_snapshot_viewer_page() -> None:
     ensure_default_state()
