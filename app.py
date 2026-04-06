@@ -712,30 +712,100 @@ def render_optimizer_status_panel(inputs: dict, max_conversion: float, step_size
     cols[2].metric("Last scoring profile", str(prior_profile or planning_profile))
 
 
-def rerank_existing_optimizer_result(result_payload: dict, preferences: dict | None = None) -> dict:
+def build_optimizer_comparison_df(results_df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
+    results_df = canonicalize_optimizer_result_df(results_df, "optimizer comparison source")
+    top_slice = results_df.head(max(1, int(top_n))).copy()
+    compare_metrics = [
+        ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
+        ("Final Net Worth", lambda r: format_dollars(r["Final Net Worth"])),
+        ("Ending Traditional IRA Balance", lambda r: format_dollars(r["Ending Traditional IRA Balance"])),
+        ("Total Government Drag", lambda r: format_dollars(r["Total Government Drag"])),
+        ("Total Conversions", lambda r: format_dollars(r["Total Conversions"])),
+        ("Total Federal Tax", lambda r: format_dollars(r["Total Federal Tax"])),
+        ("Total State Tax", lambda r: format_dollars(r["Total State Tax"])),
+        ("Total ACA Cost", lambda r: format_dollars(r["Total ACA Cost"])),
+        ("Total IRMAA Cost", lambda r: format_dollars(r["Total IRMAA Cost"])),
+        ("Max MAGI", lambda r: format_dollars(r["Max MAGI"])),
+        ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
+        ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
+        ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
+        ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
+        ("Selected Score", lambda r: format_dollars(get_selected_score_value(r))),
+    ]
+    compare_rows = []
+    for metric_name, getter in compare_metrics:
+        row = {"Metric": metric_name}
+        for idx in range(max(1, int(top_n))):
+            col_name = f"#{idx + 1}"
+            row[col_name] = getter(top_slice.iloc[idx]) if idx < len(top_slice) else ""
+        compare_rows.append(row)
+    return pd.DataFrame(compare_rows)
+
+
+def rerank_existing_optimizer_result(
+    result_payload: dict,
+    profile_name: str | None = None,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float | None = None,
+    scoring_context: dict | None = None,
+) -> dict:
     """
-    Rebuild profile shortlists from an already-computed 81-row optimizer result set.
-    This does not rerun the engine. It only reapplies profile scoring / modifiers.
+    Rebuild current-profile ranking outputs from an already-computed 81-row optimizer result set.
+    This does not rerun the engine. It only reapplies shared profile scoring / modifiers.
     """
     if result_payload is None:
         return result_payload
     working = copy.deepcopy(result_payload)
-    all_results_df = working.get("all_results_df")
-    if all_results_df is None:
+
+    raw_results_df = working.get("raw_results_df")
+    source_df = raw_results_df if raw_results_df is not None else working.get("all_results_df")
+    if source_df is None:
         return working
-    if isinstance(all_results_df, pd.DataFrame):
-        results_rows = all_results_df.to_dict("records")
-    else:
-        try:
-            results_rows = pd.DataFrame(all_results_df).to_dict("records")
-        except Exception:
-            return working
-    working["profile_shortlists"] = build_profile_shortlists_from_optimizer_rows(
-        results_rows,
-        preferences=preferences or {},
-        scoring_context=build_strategy_scoring_context(inputs=collect_scenario_state(), metrics_list=results_rows),
+    try:
+        source_df = pd.DataFrame(source_df)
+    except Exception:
+        return working
+    if source_df.empty:
+        return working
+
+    results_rows = source_df.to_dict("records")
+    selected_profile_name = str(profile_name or working.get("profile_name") or working.get("planning_profile_snapshot") or "Balanced")
+    effective_preferences = copy.deepcopy(preferences or {})
+    effective_lambda = float(
+        trad_balance_penalty_lambda
+        if trad_balance_penalty_lambda is not None
+        else working.get("trad_balance_penalty_lambda", 0.0)
     )
-    working["scoring_preferences_snapshot"] = copy.deepcopy(preferences or {})
+    effective_scoring_context = scoring_context or build_strategy_scoring_context(
+        inputs=collect_scenario_state(),
+        metrics_list=results_rows,
+    )
+
+    shared_outputs = build_scored_strategy_outputs(
+        results_rows,
+        inputs=collect_scenario_state(),
+        selected_profile_name=selected_profile_name,
+        preferences=effective_preferences,
+        trad_balance_penalty_lambda=effective_lambda,
+        shortlist_top_n=5,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "reranked ss optimizer results")
+    top_10_df = canonicalize_optimizer_result_df(ranked_df.head(10).copy(), "reranked ss optimizer top 10")
+    comparison_df = build_optimizer_comparison_df(ranked_df, top_n=3)
+
+    working["all_results_df"] = ranked_df
+    working["all_results_export_df"] = ranked_df.copy()
+    working["top_10_df"] = top_10_df
+    working["top_10_export_df"] = top_10_df.copy()
+    working["comparison_df"] = comparison_df
+    working["comparison_display_df"] = comparison_df.copy()
+    working["profile_shortlists"] = shared_outputs["profile_shortlists"]
+    working["best_result"] = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
+    working["profile_name"] = selected_profile_name
+    working["planning_profile_snapshot"] = selected_profile_name
+    working["scoring_context"] = copy.deepcopy(shared_outputs.get("scoring_context") or effective_scoring_context)
+    working["scoring_preferences_snapshot"] = copy.deepcopy(effective_preferences)
+    working["trad_balance_penalty_lambda"] = effective_lambda
     return working
 
 
@@ -5324,32 +5394,7 @@ def run_ss_optimizer(
         top_10_df = canonicalize_optimizer_result_df(results_df.head(10).copy(), "ss optimizer top 10")
         top_3 = canonicalize_optimizer_result_df(results_df.head(3).copy(), "ss optimizer top 3")
 
-        compare_metrics = [
-            ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
-            ("Final Net Worth", lambda r: format_dollars(r["Final Net Worth"])),
-            ("Ending Traditional IRA Balance", lambda r: format_dollars(r["Ending Traditional IRA Balance"])),
-            ("Total Government Drag", lambda r: format_dollars(r["Total Government Drag"])),
-            ("Total Conversions", lambda r: format_dollars(r["Total Conversions"])),
-            ("Total Federal Tax", lambda r: format_dollars(r["Total Federal Tax"])),
-            ("Total State Tax", lambda r: format_dollars(r["Total State Tax"])),
-            ("Total ACA Cost", lambda r: format_dollars(r["Total ACA Cost"])),
-            ("Total IRMAA Cost", lambda r: format_dollars(r["Total IRMAA Cost"])),
-            ("Max MAGI", lambda r: format_dollars(r["Max MAGI"])),
-            ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
-            ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
-            ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
-            ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
-            ("Selected Score", lambda r: format_dollars(get_selected_score_value(r))),
-        ]
-
-        compare_rows = []
-        for metric_name, getter in compare_metrics:
-            row = {"Metric": metric_name}
-            for idx in range(3):
-                col_name = f"#{idx + 1}"
-                row[col_name] = getter(top_3.iloc[idx]) if idx < len(top_3) else ""
-            compare_rows.append(row)
-        comparison_df = pd.DataFrame(compare_rows)
+        comparison_df = build_optimizer_comparison_df(results_df, top_n=3)
 
         best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
         best_validation = None
@@ -5434,24 +5479,18 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     st.caption("Use this section for exhaustive validation or to explore alternatives after you review the quick scan and Break-Even Governor results.")
 
     quick_result = get_current_result_payload("quick_strategy_recommendation_result")
-    all_results_df = result.get("all_results_df", pd.DataFrame())
-    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty:
-        base_context_inputs = collect_scenario_state()
-        dynamic_scoring_context = result.get("scoring_context")
-        if not isinstance(dynamic_scoring_context, dict) or not dynamic_scoring_context:
-            dynamic_scoring_context = build_strategy_scoring_context(inputs=base_context_inputs, metrics_list=all_results_df.to_dict("records"))
-        dynamic_shortlists = build_profile_shortlists_from_optimizer_rows(
-            all_results_df.to_dict("records"),
-            preferences=current_preferences or {},
-            trad_balance_penalty_lambda=float(result.get("trad_balance_penalty_lambda", 0.0)),
-            scoring_context=dynamic_scoring_context,
-        )
-    else:
-        dynamic_shortlists = {}
+    reranked_result = rerank_existing_optimizer_result(
+        result,
+        profile_name=planning_profile,
+        preferences=current_preferences or {},
+        trad_balance_penalty_lambda=float(result.get("trad_balance_penalty_lambda", 0.0)),
+    )
+    all_results_df = reranked_result.get("all_results_df", pd.DataFrame())
+    dynamic_shortlists = reranked_result.get("profile_shortlists", {}) or {}
 
     current_profile_shortlist = dynamic_shortlists.get(planning_profile, pd.DataFrame())
     profile_best = current_profile_shortlist.iloc[0].to_dict() if isinstance(current_profile_shortlist, pd.DataFrame) and not current_profile_shortlist.empty else None
-    raw_best = result.get("best_result")
+    raw_best = reranked_result.get("best_result")
 
     if quick_result is not None and profile_best is not None:
         ranked_rows = quick_result.get("ranked_rows", []) or []
@@ -5509,7 +5548,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
             else:
                 st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
 
-    st.markdown(f"**Traditional IRA lambda weight:** {result['trad_balance_penalty_lambda']:.2f}")
+    st.markdown(f"**Traditional IRA lambda weight:** {reranked_result['trad_balance_penalty_lambda']:.2f}")
     st.caption("Full 81 results below are now ranked with the same scoring pipeline used everywhere else. The lambda weight is part of that unified score rather than a separate raw-only ranking.")
     if raw_best is not None:
         best = raw_best
@@ -5518,22 +5557,22 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
         st.write(f"Final Net Worth: {format_dollars(best['Final Net Worth'])}")
         st.write(f"Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
 
-    if result.get("best_validation") is not None:
-        validation = result["best_validation"]
+    if reranked_result.get("best_validation") is not None:
+        validation = reranked_result["best_validation"]
         if validation["passed"]:
             st.success("Best-strategy rerun validation passed. Optimizer winner matched a fresh rerun within tolerance.")
         else:
             st.error("Best-strategy rerun validation failed. The optimizer winner did not match a fresh rerun.")
             st.dataframe(validation["mismatch_df"], use_container_width=True)
 
-    if result.get("interrupted_partial_df") is not None or not result.get("completed", True):
-        msg = result.get("error_message") or "A prior optimizer run was interrupted before all 81 combinations finished."
+    if reranked_result.get("interrupted_partial_df") is not None or not reranked_result.get("completed", True):
+        msg = reranked_result.get("error_message") or "A prior optimizer run was interrupted before all 81 combinations finished."
         st.warning(f"{msg} Resume it to complete the full run.")
 
-    if not result.get("completed", True):
+    if not reranked_result.get("completed", True):
         return
 
-    top_10_df = result.get("top_10_df", pd.DataFrame())
+    top_10_df = reranked_result.get("top_10_df", pd.DataFrame())
     st.subheader(f"Top 10 SS Strategies for {planning_profile}")
     st.caption("This table uses the same current-profile scoring pipeline as Quick Scan and the exhaustive shortlist below: profile weights, modifiers, and lambda penalty all flow through the same ranking logic.")
     st.dataframe(
@@ -5558,17 +5597,17 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     )
     st.download_button(
         "Download Raw Top 10 SS Strategies (CSV)",
-        data=result["top_10_export_df"].to_csv(index=False),
+        data=reranked_result["top_10_export_df"].to_csv(index=False),
         file_name="top_10_ss_strategies.csv",
         mime="text/csv",
         use_container_width=True,
     )
 
     st.subheader("Top 3 Side-by-Side Comparison")
-    st.dataframe(result["comparison_display_df"], use_container_width=True)
+    st.dataframe(reranked_result["comparison_display_df"], use_container_width=True)
     st.download_button(
         "Download Top 3 Comparison (CSV)",
-        data=result["comparison_display_df"].to_csv(index=False),
+        data=reranked_result["comparison_display_df"].to_csv(index=False),
         file_name="top_3_ss_comparison.csv",
         mime="text/csv",
         use_container_width=True,
