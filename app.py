@@ -2185,8 +2185,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
         "strategy_universe_size": len(quick_rows),
-        "profile_shortlists": shared_outputs.get("profile_shortlists", {}),
-        "scoring_context": shared_outputs.get("scoring_context", {}),
+        "profile_shortlists": shared_payload.get("profile_shortlists", {}),
+        "scoring_context": shared_payload.get("scoring_context", {}),
     }
 
 def get_ss_optimizer_combo_count() -> int:
