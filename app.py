@@ -2031,23 +2031,15 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
 
 
 def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
-    anchors = build_quick_profile_anchor_rows(ranked_rows)
-    if not anchors:
+    """
+    Deprecated compatibility wrapper.
+    Quick and Full should use the SAME comparison-table builder code, so this wrapper
+    now routes directly into the shared canonical comparison helper instead of using
+    a quick-only anchor-comparison implementation.
+    """
+    if not ranked_rows:
         return pd.DataFrame()
-
-    rows = []
-    for label, key in [("Recommended strategy", "recommended"), ("Highest net worth strategy", "best_growth"), ("Most stable strategy", "most_stable")]:
-        row = anchors.get(key, {}) or {}
-        rows.append({
-            "Lens": label,
-            "Strategy": row.get("Strategy", ""),
-            "Net Worth": float(row.get("Final Net Worth", 0.0)),
-            "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
-            "Lifetime taxes / government drag": float(row.get("Total Government Drag", 0.0)),
-            "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
-            "Ending Traditional IRA": float(row.get("Ending Traditional IRA Balance", 0.0)),
-        })
-    return pd.DataFrame(rows)
+    return build_top_strategy_comparison_df(pd.DataFrame(ranked_rows), top_n=3)
 
 
 def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
@@ -2596,7 +2588,7 @@ def build_quick_recommendation_snapshot_payload(quick_result: dict, planning_pro
             "applied_preset_note": str(quick_result.get("applied_preset_note", "")),
         },
         "strategy_summary_rows": _json_safe(pd.DataFrame(quick_result.get("summary_df", pd.DataFrame())).to_dict("records")),
-        "anchor_comparison_rows": _json_safe(build_quick_anchor_comparison_df(ranked_rows).to_dict("records")),
+        "anchor_comparison_rows": _json_safe(pd.DataFrame(quick_result.get("comparison_display_df", pd.DataFrame())).to_dict("records")),
         "top_ranked_rows": _json_safe(ranked_rows[:5]),
         "scenario_state_used_for_quick_rec": _json_safe(source_scenario_state),
         "quick_recommendation_input_state": _json_safe(quick_rec_input_state),
@@ -7680,19 +7672,10 @@ def render_conversion_page() -> None:
                 }),
                 use_container_width=True,
             )
-            anchor_compare_df = build_quick_anchor_comparison_df(quick_result.get("ranked_rows", []))
+            anchor_compare_df = pd.DataFrame(quick_result.get("comparison_display_df", pd.DataFrame())).copy()
             if not anchor_compare_df.empty:
-                st.caption("Anchor comparison shows the recommendation next to the highest net worth and stability anchors from the same quick-run set.")
-                st.dataframe(
-                    anchor_compare_df.style.format({
-                        "Net Worth": "${:,.0f}",
-                        "After-Tax Legacy": "${:,.0f}",
-                        "Lifetime taxes / government drag": "${:,.0f}",
-                        "Final Household SS Income": "${:,.0f}",
-                        "Ending Traditional IRA": "${:,.0f}",
-                    }),
-                    use_container_width=True,
-                )
+                st.caption("This comparison uses the same shared Top 3 comparison builder as the Full 81 scan.")
+                st.dataframe(anchor_compare_df, use_container_width=True)
             if quick_result.get("close_result"):
                 st.info(
                     "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
