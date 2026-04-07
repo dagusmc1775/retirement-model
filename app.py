@@ -5782,6 +5782,39 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                     use_container_width=True,
                 )
                 top_row = shortlist_df.iloc[0]
+                with st.expander(f"Why {top_row['Strategy']} is winning for {tab_profile_name}", expanded=False):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Selected Score", f"{float(top_row.get('Selected Score', 0.0)):.2f}")
+                    c2.metric("Base profile score", f"{float(top_row.get(f'{tab_profile_name} Profile Score', 0.0)):.2f}")
+                    modifier_total = float(top_row.get("Max SS Modifier Score", 0.0)) + float(top_row.get("Income Stability Modifier Score", 0.0)) + float(top_row.get("Min Trad IRA Modifier Score", 0.0))
+                    c3.metric("Modifier contribution total", f"{modifier_total:.2f}")
+
+                    component_rows = [
+                        {"Component": "NW Score +", "Value": float(top_row.get("NW Score +", 0.0))},
+                        {"Component": "Legacy Score +", "Value": float(top_row.get("Legacy Score +", 0.0))},
+                        {"Component": "Stability Score +", "Value": float(top_row.get("Stability Score +", 0.0))},
+                        {"Component": "Trad Penalty -", "Value": float(top_row.get("Trad Penalty -", 0.0))},
+                        {"Component": "Trad Share Penalty -", "Value": float(top_row.get("Trad Share Penalty -", 0.0))},
+                        {"Component": "Gov Drag Penalty -", "Value": float(top_row.get("Gov Drag Penalty -", 0.0))},
+                        {"Component": "Heir Tax Penalty -", "Value": float(top_row.get("Heir Tax Penalty -", 0.0))},
+                        {"Component": "Risk Penalty -", "Value": float(top_row.get("Risk Penalty -", 0.0))},
+                        {"Component": "Max SS Modifier Score", "Value": float(top_row.get("Max SS Modifier Score", 0.0))},
+                        {"Component": "Income Stability Modifier Score", "Value": float(top_row.get("Income Stability Modifier Score", 0.0))},
+                        {"Component": "Min Trad IRA Modifier Score", "Value": float(top_row.get("Min Trad IRA Modifier Score", 0.0))},
+                    ]
+                    st.dataframe(pd.DataFrame(component_rows).style.format({"Value": "{:.2f}"}), use_container_width=True, hide_index=True)
+
+                    metric_rows = [
+                        {"Metric": "Final Net Worth", "Value": float(top_row.get("Net Worth", 0.0))},
+                        {"Metric": "After-Tax Legacy", "Value": float(top_row.get("After-Tax Legacy", 0.0))},
+                        {"Metric": "Trad IRA @ End", "Value": float(top_row.get("Trad IRA @ End", 0.0))},
+                        {"Metric": "Final Household SS Income", "Value": float(top_row.get("Final Household SS Income", 0.0))},
+                        {"Metric": "Survivor SS Income", "Value": float(top_row.get("Survivor SS Income", 0.0))},
+                        {"Metric": "Total Government Drag", "Value": float(top_row.get("Total Government Drag", 0.0))},
+                        {"Metric": "Total Conversions", "Value": float(top_row.get("Total Conversions", 0.0))},
+                    ]
+                    st.dataframe(pd.DataFrame(metric_rows).style.format({"Value": "${:,.0f}"}), use_container_width=True, hide_index=True)
+
                 st.caption("This button loads the selected exhaustive shortlist winner into the Governor below. It does not rerun the optimizer.")
                 st.button(
                     f"Apply {tab_profile_name} winner {top_row['Strategy']} to Governor",
