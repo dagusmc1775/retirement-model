@@ -28,8 +28,8 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v112"
-APP_STATE_VERSION = "v103"
+APP_VERSION = "v219-shared-post-candidate-pipeline"
+APP_STATE_VERSION = "v106"
 
 
 
@@ -214,6 +214,74 @@ def format_percent(value: float) -> str:
         return f"{float(value):.2%}"
     except Exception:
         return str(value)
+
+OPTIMIZER_REQUIRED_COLUMNS = [
+    "Strategy",
+    "Owner SS Age",
+    "Spouse SS Age",
+    "Final Net Worth",
+    "Ending Traditional IRA Balance",
+    "Total Government Drag",
+    "Total Conversions",
+]
+
+OPTIMIZER_PROFILE_SCORE_COLUMNS = [
+    "Balanced Profile Score",
+    "Growth Profile Score",
+    "Tax-Efficient Profile Score",
+    "Legacy Profile Score",
+    "Spend With Confidence Profile Score",
+]
+
+
+def ensure_dataframe_columns(df: pd.DataFrame, required: list[str], name: str) -> pd.DataFrame:
+    if df is None:
+        raise ValueError(f"{name} is None")
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{name} missing required columns: {missing}")
+    return df
+
+
+def canonicalize_optimizer_result_df(df: pd.DataFrame, name: str = "optimizer results") -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    df = df.copy()
+
+    if "Selected Score" not in df.columns and "Score" in df.columns:
+        df["Selected Score"] = df["Score"]
+    if "Score" not in df.columns and "Selected Score" in df.columns:
+        df["Score"] = df["Selected Score"]
+
+    for col in OPTIMIZER_PROFILE_SCORE_COLUMNS:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    required = OPTIMIZER_REQUIRED_COLUMNS + ["Selected Score", "Score"]
+    return ensure_dataframe_columns(df, required, name)
+
+
+def get_selected_score_value(row) -> float:
+    if isinstance(row, pd.Series):
+        if "Selected Score" in row.index:
+            return float(row.get("Selected Score", 0.0))
+        if "Score" in row.index:
+            return float(row.get("Score", 0.0))
+        return 0.0
+    if isinstance(row, dict):
+        if "Selected Score" in row:
+            return float(row.get("Selected Score", 0.0))
+        if "Score" in row:
+            return float(row.get("Score", 0.0))
+        return 0.0
+    try:
+        return float(getattr(row, "Selected Score"))
+    except Exception:
+        return 0.0
 
 
 def _coerce_numeric_or_none(value):
@@ -507,7 +575,9 @@ PROFILE_PRESETS = {
     },
 }
 
-QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70)]
+QUICK_STRATEGY_COMBOS = [(62, 62), (67, 67), (70, 70), (70, 67), (67, 70), (62, 67), (67, 62)]
+QUICK_RECOMMENDATION_MAX_CONVERSION = 300000.0
+QUICK_RECOMMENDATION_STEP_SIZE = 1000.0
 
 HEIR_EFFECTIVE_TRAD_TAX_RATE = 0.40
 TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE = 0.32
@@ -663,6 +733,7 @@ def rerank_existing_optimizer_result(result_payload: dict, preferences: dict | N
     working["profile_shortlists"] = build_profile_shortlists_from_optimizer_rows(
         results_rows,
         preferences=preferences or {},
+        scoring_context=build_strategy_scoring_context(inputs=collect_scenario_state(), metrics_list=results_rows),
     )
     working["scoring_preferences_snapshot"] = copy.deepcopy(preferences or {})
     return working
@@ -749,6 +820,210 @@ def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict
     adjusted["selected_recommendation_profile"] = profile_name
     adjusted["break_even_governor_preset_note"] = preset.get("preset_note", "")
     return adjusted, preset
+
+
+def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_name: str) -> tuple[dict, dict]:
+    """
+    Build a clean quick-recommendation input package from the live scenario inputs.
+    Quick Scan should use the same core engine inputs as the Full 81 scan; the only
+    intended difference is the reduced SS-claim candidate universe.
+    """
+    adjusted = copy.deepcopy(current_inputs)
+    adjusted["planning_profile"] = profile_name
+    adjusted["selected_recommendation_profile"] = profile_name
+    return adjusted, {"preset_note": ""}
+
+
+def build_ss_optimizer_result_row(
+    run_result: dict,
+    owner_age: int,
+    spouse_age: int,
+    trad_balance_penalty_lambda: float = 1.00,
+) -> dict:
+    metrics = build_strategy_metrics(run_result)
+    trad_penalty_applied = float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"])
+    return {
+        "Owner SS Age": int(owner_age),
+        "Spouse SS Age": int(spouse_age),
+        "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
+        "Final Net Worth": float(run_result["final_net_worth"]),
+        "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+        "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+        "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+        "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+        "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+        "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+        "Stability Value": float(metrics["stability_value"]),
+        "Risk Value": float(metrics["risk_value"]),
+        "Final Household SS Income": float(metrics["final_household_ss_income"]),
+        "Survivor SS Income": float(metrics["survivor_ss_income"]),
+        "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+        "Total Federal Tax": float(run_result["total_federal_taxes"]),
+        "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+        "Total ACA Cost": float(run_result["total_aca_cost"]),
+        "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
+        "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+        "Total Conversions": float(run_result["total_conversions"]),
+        "Ending Traditional IRA Balance": float(run_result["ending_trad_balance"]),
+        "First IRMAA Year": run_result["first_irmaa_year"],
+        "Max MAGI": float(run_result["max_magi"]),
+        "ACA Hit Years": int(run_result["aca_hit_years"]),
+        "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
+        "Traditional IRA Penalty Applied": trad_penalty_applied,
+        "Score": float(run_result["final_net_worth"]) - trad_penalty_applied,
+    }
+
+
+def build_ss_optimizer_fact_rows(
+    inputs: dict,
+    combos: list[tuple[int, int]],
+    max_conversion: float,
+    step_size: float,
+    trad_balance_penalty_lambda: float = 1.00,
+    progress_text: str | None = None,
+    cache_namespace: str = "_ss_optimizer_fact_rows_cache",
+) -> tuple[list[dict], list[str]]:
+    cache = st.session_state.setdefault(cache_namespace, {})
+    base_snapshot = copy.deepcopy(inputs)
+    base_snapshot["integrity_mode"] = False
+    base_snapshot["strict_repeatability_check"] = False
+    fact_key = build_scenario_fingerprint(
+        {**base_snapshot, "combos": [(int(a), int(b)) for a, b in combos], "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda)},
+        max_conversion,
+        step_size,
+    )
+    cached = cache.get(fact_key)
+    if isinstance(cached, dict):
+        cached_rows = copy.deepcopy(cached.get("rows", []))
+        cached_errors = copy.deepcopy(cached.get("errors", []))
+        if cached_rows:
+            return cached_rows, cached_errors
+
+    rows: list[dict] = []
+    errors: list[str] = []
+    total = len(combos)
+    progress_bar = st.progress(0.0, text=progress_text or "Running optimizer...") if total else None
+    for idx, (owner_age, spouse_age) in enumerate(combos, start=1):
+        scenario_inputs = dict(base_snapshot)
+        scenario_inputs["owner_claim_age"] = int(owner_age)
+        scenario_inputs["spouse_claim_age"] = int(spouse_age)
+        try:
+            run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+            rows.append(build_ss_optimizer_result_row(run_result, owner_age, spouse_age, trad_balance_penalty_lambda=trad_balance_penalty_lambda))
+        except Exception as exc:
+            errors.append(f"{owner_age}/{spouse_age}: {exc}")
+        finally:
+            if progress_bar is not None:
+                progress_bar.progress(idx / total, text=(progress_text or "Running optimizer...").split('...')[0] + f"... {idx}/{total}")
+    if progress_bar is not None:
+        progress_bar.empty()
+    cache[fact_key] = {"rows": copy.deepcopy(rows), "errors": copy.deepcopy(errors)}
+    if len(cache) > 6:
+        while len(cache) > 6:
+            cache.pop(next(iter(cache)))
+    return rows, errors
+
+
+def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion: float, quick_step_size: float) -> tuple[list[dict], list[str]]:
+    """
+    Build or reuse the quick-scan fact set used by SS Optimizer Quick Scan.
+    This intentionally tests only a small anchor set so the quick scan stays fast.
+    The underlying per-strategy evaluation path must match the Full 81 scan.
+    """
+    result_rows, errors = build_ss_optimizer_fact_rows(
+        base_inputs,
+        QUICK_STRATEGY_COMBOS,
+        quick_max_conversion,
+        quick_step_size,
+        trad_balance_penalty_lambda=float(base_inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+        progress_text="Running Quick Scan... 0/7",
+        cache_namespace="_quick_recommendation_factset_cache",
+    )
+    metric_rows: list[dict] = []
+    for row in result_rows:
+        metric_rows.append({
+            "Strategy": str(row.get("Strategy", "")),
+            "Owner SS Age": int(row.get("Owner SS Age", 0)),
+            "Spouse SS Age": int(row.get("Spouse SS Age", 0)),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", 0.0)),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+    return metric_rows, errors
+
+    metric_rows: list[dict] = []
+    errors: list[str] = []
+    total_quick_combos = len(QUICK_STRATEGY_COMBOS)
+    quick_progress = st.progress(0.0, text=f"Running Quick Scan... 0/{total_quick_combos}")
+    for idx, (owner_age, spouse_age) in enumerate(QUICK_STRATEGY_COMBOS, start=1):
+            try:
+                scenario_inputs = copy.deepcopy(base_inputs)
+                scenario_inputs["owner_claim_age"] = int(owner_age)
+                scenario_inputs["spouse_claim_age"] = int(spouse_age)
+                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+                metrics = build_strategy_metrics(run_result)
+                metric_rows.append({
+                    **metrics,
+                    "Strategy": f"{owner_age}/{spouse_age}",
+                    "Owner SS Age": int(owner_age),
+                    "Spouse SS Age": int(spouse_age),
+                    "Final Net Worth": float(metrics["final_net_worth"]),
+                    "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                    "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                    "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+                    "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+                    "Roth @ End": float(metrics["ending_roth_balance"]),
+                    "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+                    "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
+                    "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+                    "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+                    "Stability Value": float(metrics["stability_value"]),
+                    "Risk Value": float(metrics["risk_value"]),
+                    "Final Household SS Income": float(metrics["final_household_ss_income"]),
+                    "Survivor SS Income": float(metrics["survivor_ss_income"]),
+                    "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+                    "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
+                    "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                    "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
+                    "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
+                    "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                    "Total Conversions": float(run_result.get("total_conversions", 0.0)),
+                    "Max MAGI": float(run_result.get("max_magi", 0.0)),
+                    "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
+                    "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
+                    "First IRMAA Year": run_result.get("first_irmaa_year"),
+                })
+            except Exception as exc:
+                errors.append(f"{owner_age}/{spouse_age}: {exc}")
+            finally:
+                quick_progress.progress(idx / total_quick_combos, text=f"Running Quick Scan... {idx}/{total_quick_combos}")
+
+    quick_progress.empty()
+    cache[fact_key] = {"metric_rows": copy.deepcopy(metric_rows), "errors": copy.deepcopy(errors)}
+    if len(cache) > 6:
+        while len(cache) > 6:
+            cache.pop(next(iter(cache)))
+    return metric_rows, errors
 
 
 def build_strategy_metrics(run_result: dict) -> dict:
@@ -877,7 +1152,7 @@ def optimize_spending_for_target_legacy(inputs: dict, max_conversion: float, ste
     }
 
 
-def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None) -> dict[str, pd.DataFrame]:
+def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None, trad_balance_penalty_lambda: float = 0.0, scoring_context: dict | None = None) -> dict[str, pd.DataFrame]:
     if not results_rows:
         return {}
 
@@ -914,7 +1189,7 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
 
     shortlists = {}
     for profile_name in PROFILE_PRESETS.keys():
-        ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
+        ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
         rows = []
         for idx, ranked_row in enumerate(ranked[:top_n], start=1):
             rows.append({
@@ -922,7 +1197,8 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Strategy": ranked_row["Strategy"],
                 "Owner SS Age": int(ranked_row["Owner SS Age"]),
                 "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
-                "Score": float(ranked_row["score_100"]),
+                "Selected Score": float(ranked_row["score_100"]),
+            "Score": float(ranked_row["score_100"]),
                 "Net Worth": float(ranked_row["final_net_worth"]),
                 "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
                 "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
@@ -951,137 +1227,718 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
     return shortlists
 
 
-def score_strategy_metrics(metrics_list: list[dict], profile_name: str, preferences: dict | None = None) -> list[dict]:
-    weights = get_profile_summary(profile_name)["weights"]
-    preferences = preferences or {}
+def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    preferred = [
+        "Rank",
+        "Owner SS Age",
+        "Spouse SS Age",
+        "Strategy",
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Roth Balance",
+        "Ending Traditional IRA Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Stability Value",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Social Security Present Value",
+        "Total Federal Tax",
+        "Total State Tax",
+        "Total ACA Cost",
+        "Total IRMAA Cost",
+        "Total Government Drag",
+        "Total Conversions",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+        "Traditional IRA Penalty Applied",
+        "Risk Value",
+        "Score",
+    ]
+    ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    return df.loc[:, ordered].copy()
 
-    nw_norm = normalize_series([m["final_net_worth"] for m in metrics_list])
-    base_legacy_norm = normalize_series([m["after_tax_legacy"] for m in metrics_list])
-    effective_legacy_norm = normalize_series([float(m.get("effective_legacy_value", m["after_tax_legacy"])) for m in metrics_list])
-    heir_tax_drag_norm = normalize_series([float(m.get("heir_tax_drag", 0.0)) for m in metrics_list])
-    trad_norm = normalize_series([m["ending_traditional_ira_balance"] for m in metrics_list])
-    stability_norm = normalize_series([m["stability_value"] for m in metrics_list])
-    ss_income_norm = normalize_series([m["final_household_ss_income"] for m in metrics_list])
-    survivor_ss_norm = normalize_series([m["survivor_ss_income"] for m in metrics_list])
-    ss_present_value_norm = normalize_series([float(m.get("social_security_present_value", estimate_social_security_present_value(m["final_household_ss_income"], m["survivor_ss_income"]))) for m in metrics_list])
-    risk_norm = normalize_series([m["risk_value"] for m in metrics_list])
-    drag_norm = normalize_series([float(m.get("Total Government Drag", 0.0)) for m in metrics_list])
-    trad_share_values = []
-    for m in metrics_list:
-        end_total = max(
-            1.0,
-            float(m.get("ending_traditional_ira_balance", 0.0))
-            + float(m.get("ending_roth_balance", 0.0))
-            + float(m.get("ending_brokerage_balance", 0.0))
-            + float(m.get("ending_cash_balance", 0.0)),
-        )
-        trad_share_values.append(float(m.get("ending_traditional_ira_balance", 0.0)) / end_total)
-    trad_share_norm = normalize_series(trad_share_values)
+def build_ranked_optimizer_results_df(
+    results_rows: list[dict],
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> pd.DataFrame:
+    if not results_rows:
+        return pd.DataFrame()
 
-    scored = []
-    for i, metrics in enumerate(metrics_list):
-        nw_adjusted = nw_norm[i] ** 0.72
-        if profile_name == "Legacy Focused":
-            legacy_signal = 0.76 * effective_legacy_norm[i] + 0.24 * base_legacy_norm[i]
-            legacy_adjusted = legacy_signal ** 1.34
-            trad_penalty = trad_norm[i] ** 1.75
-            drag_penalty = drag_norm[i] ** 1.08
-            trad_share_penalty = trad_share_norm[i] ** 2.45
-            heir_tax_penalty = heir_tax_drag_norm[i] ** 1.72
-            stability_adjusted = 0.45 * (stability_norm[i] ** 1.12) + 0.30 * (ss_income_norm[i] ** 1.16) + 0.25 * (survivor_ss_norm[i] ** 1.16)
-            risk_penalty = risk_norm[i] ** 1.02
-            positive_score = (0.05 * weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-            negative_score = (
-                (weights["trad"] * trad_penalty)
-                + (1.05 * weights.get("trad_share", 0.0) * trad_share_penalty)
-                + (0.75 * weights.get("drag", 0.0) * drag_penalty)
-                + (1.25 * weights["trad"] * heir_tax_penalty)
-                + (weights["risk"] * risk_penalty)
-            )
-        elif profile_name == "Spend With Confidence":
-            legacy_adjusted = base_legacy_norm[i] ** 1.00
-            trad_penalty = trad_norm[i] ** 1.35
-            drag_penalty = drag_norm[i] ** 1.00
-            trad_share_penalty = trad_share_norm[i] ** 1.20
-            heir_tax_penalty = 0.0
-            stability_adjusted = 0.35 * (stability_norm[i] ** 1.25) + 0.40 * (ss_income_norm[i] ** 1.55) + 0.25 * (survivor_ss_norm[i] ** 1.40)
-            risk_penalty = risk_norm[i] ** 1.15
-            positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-            negative_score = (weights["trad"] * trad_penalty) + (weights["risk"] * risk_penalty) + (weights.get("drag", 0.0) * drag_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty)
-        else:
-            legacy_adjusted = base_legacy_norm[i] ** 1.05
-            trad_penalty = trad_norm[i] ** 1.85
-            drag_penalty = drag_norm[i] ** 1.20
-            trad_share_penalty = trad_share_norm[i] ** 1.65
-            heir_tax_penalty = 0.0
-            stability_adjusted = 0.50 * (stability_norm[i] ** 1.35) + 0.35 * (ss_income_norm[i] ** 1.35) + 0.15 * (survivor_ss_norm[i] ** 1.20)
-            risk_penalty = risk_norm[i] ** 1.10
-            positive_score = (weights["nw"] * nw_adjusted) + (weights["legacy"] * legacy_adjusted) + (weights["stability"] * stability_adjusted)
-            negative_score = (weights["trad"] * trad_penalty) + (weights["risk"] * risk_penalty) + (weights.get("drag", 0.0) * drag_penalty) + (weights.get("trad_share", 0.0) * trad_share_penalty)
+    scoring_payload = build_strategy_scoring_payload(
+        results_rows,
+        selected_profile_name=profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    ranked = scoring_payload["selected_ranked_rows"]
+    profile_score_maps = scoring_payload["profile_score_maps"]
 
-        preference_bonus = 0.0
-        preference_penalty = 0.0
-        # --- Maximize Social Security Modifier ---
-        if preferences.get("maximize_social_security"):
-            ss_bonus = 0.24 * (ss_present_value_norm[i] ** 1.30)
-
-            if profile_name == "Legacy Focused":
-                ss_bonus *= 1.40
-            elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
-                ss_bonus *= 1.15
-
-            preference_bonus += ss_bonus
-
-
-
-
-
-
-
-
-
-
-        if preferences.get("income_stability_focus"):
-            stability_bonus = 0.10 * ((0.65 * stability_norm[i]) + (0.35 * ss_income_norm[i]))
-            preference_bonus += stability_bonus
-        if preferences.get("minimize_trad_ira_for_heirs"):
-            heir_structure_penalty = (
-                0.24 * (trad_share_norm[i] ** 2.20)
-                + 0.24 * (heir_tax_drag_norm[i] ** 1.45)
-                + 0.10 * (trad_norm[i] ** 1.30)
-            )
-            if profile_name == "Legacy Focused":
-                heir_structure_penalty *= 1.40
-            preference_penalty += heir_structure_penalty
-
-        positive_score += preference_bonus
-        negative_score += preference_penalty
-        score = positive_score - negative_score
-
-        scored.append({
-            **metrics,
-            "score": float(score),
-            "score_100": float(score * 100.0),
-            "stability_label": qualitative_bucket(stability_adjusted),
-            "risk_label": qualitative_bucket(risk_penalty, reverse=True),
-            "nw_component": float((0.10 * weights["nw"] * nw_adjusted) if profile_name == "Legacy Focused" else (weights["nw"] * nw_adjusted)),
-            "legacy_component": float(weights["legacy"] * legacy_adjusted),
-            "stability_component": float(weights["stability"] * stability_adjusted),
-            "trad_component": float(weights["trad"] * trad_penalty),
-            "drag_component": float((0.60 * weights.get("drag", 0.0) * drag_penalty) if profile_name == "Legacy Focused" else (weights.get("drag", 0.0) * drag_penalty)),
-            "trad_share_component": float(weights.get("trad_share", 0.0) * trad_share_penalty),
-            "risk_component": float(weights["risk"] * risk_penalty),
-            "heir_tax_component": float((0.90 * weights["trad"] * heir_tax_penalty) if profile_name == "Legacy Focused" else 0.0),
-            "ss_value_component": float((0.14 * (ss_present_value_norm[i] ** 1.15) * (1.15 if (preferences.get("maximize_social_security") and profile_name in ("Spend With Confidence", "Tax-Efficient Stability")) else 1.0)) if preferences.get("maximize_social_security") else 0.0),
-            "preference_bonus_component": float(preference_bonus),
-            "preference_penalty_component": float(preference_penalty),
-            "social_security_present_value": float(metrics.get("social_security_present_value", estimate_social_security_present_value(metrics["final_household_ss_income"], metrics["survivor_ss_income"]))),
-            "positive_score": float(positive_score),
-            "negative_score": float(negative_score),
-            "ending_traditional_ira_share": float(trad_share_values[i]),
+    rows = []
+    for idx, ranked_row in enumerate(ranked, start=1):
+        rows.append({
+            "Rank": idx,
+            "Owner SS Age": int(ranked_row["Owner SS Age"]),
+            "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
+            "Strategy": ranked_row["Strategy"],
+            "Final Net Worth": float(ranked_row["final_net_worth"]),
+            "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+            "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+            "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
+            "Ending Roth Balance": float(ranked_row["ending_roth_balance"]),
+            "Ending Traditional IRA Balance": float(ranked_row["ending_traditional_ira_balance"]),
+            "Ending Brokerage Balance": float(ranked_row["ending_brokerage_balance"]),
+            "Ending Cash Balance": float(ranked_row["ending_cash_balance"]),
+            "Stability Value": float(ranked_row["stability_value"]),
+            "Risk Value": float(ranked_row["risk_value"]),
+            "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
+            "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
+            "Social Security Present Value": float(ranked_row.get("social_security_present_value", 0.0)),
+            "Total Federal Tax": float(ranked_row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(ranked_row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(ranked_row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(ranked_row.get("Total IRMAA Cost", 0.0)),
+            "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+            "First IRMAA Year": ranked_row.get("First IRMAA Year"),
+            "Max MAGI": float(ranked_row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(ranked_row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(ranked_row.get("IRMAA Hit Years", 0)),
+            "Traditional IRA Penalty Applied": float(ranked_row.get("lambda_penalty_dollars", 0.0)),
+            "Selected Score": float(ranked_row["score_100"]),
+            "Score": float(ranked_row["score_100"]),
+            "Stability": ranked_row.get("stability_label", ""),
+            "Risk": ranked_row.get("risk_label", ""),
+            "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
+            "NW Score +": float(ranked_row.get("nw_component", 0.0) * 100.0),
+            "Legacy Score +": float(ranked_row.get("legacy_component", 0.0) * 100.0),
+            "Stability Score +": float(ranked_row.get("stability_component", 0.0) * 100.0),
+            "Trad Penalty -": float(ranked_row.get("trad_component", 0.0) * 100.0),
+            "Trad Share Penalty -": float(ranked_row.get("trad_share_component", 0.0) * 100.0),
+            "Gov Drag Penalty -": float(ranked_row.get("drag_component", 0.0) * 100.0),
+            "Heir Tax Penalty -": float(ranked_row.get("heir_tax_component", 0.0) * 100.0),
+            "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
+            "Preference Bonus +": float(ranked_row.get("preference_bonus_component", 0.0) * 100.0),
+            "Preference Penalty -": float(ranked_row.get("preference_penalty_component", 0.0) * 100.0),
+            "Lambda Penalty -": float(ranked_row.get("lambda_penalty_score", 0.0) * 100.0),
+            "Balanced Profile Score": float(profile_score_maps.get("Balanced", {}).get(ranked_row["Strategy"], 0.0)),
+            "Growth Profile Score": float(profile_score_maps.get("Growth", {}).get(ranked_row["Strategy"], 0.0)),
+            "Tax-Efficient Profile Score": float(profile_score_maps.get("Tax-Efficient Stability", {}).get(ranked_row["Strategy"], 0.0)),
+            "Legacy Profile Score": float(profile_score_maps.get("Legacy Focused", {}).get(ranked_row["Strategy"], 0.0)),
+            "Spend With Confidence Profile Score": float(profile_score_maps.get("Spend With Confidence", {}).get(ranked_row["Strategy"], 0.0)),
+            "Max SS Modifier Score": float(ranked_row.get("max_ss_modifier_component", 0.0) * 100.0),
+            "Income Stability Modifier Score": float(ranked_row.get("income_stability_modifier_component", 0.0) * 100.0),
+            "Min Trad IRA Modifier Score": float(ranked_row.get("min_trad_ira_modifier_component", 0.0) * 100.0),
         })
 
+    ranked_df = pd.DataFrame(rows)
+    if ranked_df.empty:
+        return ranked_df
+    return reorder_ss_optimizer_results_df(ranked_df)
+
+
+def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) -> pd.DataFrame:
+    """
+    Shared primary strategy table schema for BOTH Quick and Full.
+    The goal is that overlapping strategies calculate, record, and display the same
+    canonical result fields regardless of whether they came from Quick or Full.
+    """
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    working = canonicalize_optimizer_result_df(df.copy(), "primary strategy table")
+    if top_n is not None:
+        working = working.head(int(top_n)).copy()
+    preferred = [
+        "Rank",
+        "Strategy",
+        "Owner SS Age",
+        "Spouse SS Age",
+        "Selected Score",
+        "Score",
+        "Balanced Profile Score",
+        "Growth Profile Score",
+        "Tax-Efficient Profile Score",
+        "Legacy Profile Score",
+        "Spend With Confidence Profile Score",
+        "Max SS Modifier Score",
+        "Income Stability Modifier Score",
+        "Min Trad IRA Modifier Score",
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Traditional IRA Balance",
+        "Ending Roth Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Stability Value",
+        "Risk Value",
+        "Stability",
+        "Risk",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Social Security Present Value",
+        "Total Government Drag",
+        "Total Conversions",
+        "Total Federal Tax",
+        "Total State Tax",
+        "Total ACA Cost",
+        "Total IRMAA Cost",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+    ]
+    existing = [c for c in preferred if c in working.columns]
+    return working.loc[:, existing].copy()
+
+
+
+def get_profile_score_column_name(profile_name: str) -> str:
+    mapping = {
+        "Balanced": "Balanced Profile Score",
+        "Growth": "Growth Profile Score",
+        "Tax-Efficient Stability": "Tax-Efficient Profile Score",
+        "Legacy Focused": "Legacy Profile Score",
+        "Spend With Confidence": "Spend With Confidence Profile Score",
+    }
+    return mapping.get(profile_name, f"{profile_name} Profile Score")
+
+
+def build_profile_winner_contribution_df(row: pd.Series | dict) -> pd.DataFrame:
+    row = row if isinstance(row, dict) else row.to_dict()
+    contribution_order = [
+        ("NW Score +", "Positive"),
+        ("Legacy Score +", "Positive"),
+        ("Stability Score +", "Positive"),
+        ("Trad Penalty -", "Negative"),
+        ("Trad Share Penalty -", "Negative"),
+        ("Gov Drag Penalty -", "Negative"),
+        ("Heir Tax Penalty -", "Negative"),
+        ("Risk Penalty -", "Negative"),
+        ("Max SS Modifier Score", "Modifier"),
+        ("Income Stability Modifier Score", "Modifier"),
+        ("Min Trad IRA Modifier Score", "Modifier"),
+    ]
+    rows = []
+    for label, bucket in contribution_order:
+        if label in row:
+            rows.append({"Component": label, "Bucket": bucket, "Value": float(row.get(label, 0.0))})
+    return pd.DataFrame(rows)
+
+
+def build_profile_winner_metric_df(row: pd.Series | dict) -> pd.DataFrame:
+    row = row if isinstance(row, dict) else row.to_dict()
+    metric_order = [
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Traditional IRA Balance",
+        "Ending Roth Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Total Government Drag",
+        "Total Conversions",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+    ]
+    rows = []
+    for label in metric_order:
+        if label in row:
+            rows.append({"Metric": label, "Value": row.get(label)})
+    return pd.DataFrame(rows)
+
+
+def render_profile_winner_diagnostics(row: pd.Series | dict, profile_name: str) -> None:
+    row = row if isinstance(row, dict) else row.to_dict()
+    profile_score_col = get_profile_score_column_name(profile_name)
+    selected_score = float(row.get("Selected Score", row.get("Score", 0.0)))
+    base_profile_score = float(row.get(profile_score_col, 0.0))
+    modifier_total = float(row.get("Max SS Modifier Score", 0.0)) + float(row.get("Income Stability Modifier Score", 0.0)) + float(row.get("Min Trad IRA Modifier Score", 0.0))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Selected Score", f"{selected_score:.2f}")
+    c2.metric("Base Profile Score", f"{base_profile_score:.2f}")
+    c3.metric("Total Modifier Contribution", f"{modifier_total:.2f}")
+
+    contribution_df = build_profile_winner_contribution_df(row)
+    if not contribution_df.empty:
+        st.markdown("**Score contribution breakdown**")
+        st.dataframe(contribution_df.style.format({"Value": "{:.2f}"}), use_container_width=True, hide_index=True)
+
+    metric_df = build_profile_winner_metric_df(row)
+    if not metric_df.empty:
+        st.markdown("**Winner metric snapshot**")
+        formatter = {}
+        currency_metrics = {
+            "Final Net Worth", "After-Tax Legacy", "Effective Legacy Value", "Heir Tax Drag",
+            "Ending Traditional IRA Balance", "Ending Roth Balance", "Ending Brokerage Balance", "Ending Cash Balance",
+            "Final Household SS Income", "Survivor SS Income", "Total Government Drag", "Total Conversions", "Max MAGI",
+        }
+        metric_df_display = metric_df.copy()
+        def _fmt_metric_value(metric, value):
+            try:
+                if metric in currency_metrics and value is not None:
+                    return f"${float(value):,.0f}"
+                if metric in {"ACA Hit Years", "IRMAA Hit Years", "First IRMAA Year"} and value not in (None, ""):
+                    return f"{int(float(value))}"
+            except Exception:
+                return value
+            return value
+        metric_df_display["Value"] = [
+            _fmt_metric_value(m, v) for m, v in zip(metric_df_display["Metric"], metric_df_display["Value"])
+        ]
+        st.dataframe(metric_df_display, use_container_width=True, hide_index=True)
+
+def clamp01(value: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.0
+
+
+def safe_ratio(numerator: float, denominator: float, default: float = 0.0) -> float:
+    try:
+        denom = float(denominator)
+        if abs(denom) <= 1e-12:
+            return float(default)
+        return float(numerator) / denom
+    except Exception:
+        return float(default)
+
+
+def build_strategy_scoring_context(inputs: dict | None = None, metrics_list: list[dict] | None = None) -> dict:
+    """
+    Shared scoring context for both Quick and Full.
+    This is intentionally profile-neutral: it only derives common scale facts
+    needed by the ranking layer. Profile weights and modifier behavior are
+    injected later through build_scoring_context().
+    """
+    inputs = inputs or {}
+    metrics_list = metrics_list or []
+    starting_assets = float(
+        inputs.get("trad", 0.0)
+        + inputs.get("roth", 0.0)
+        + inputs.get("brokerage", 0.0)
+        + inputs.get("cash", 0.0)
+    )
+    if starting_assets <= 0.0 and metrics_list:
+        derived_values = []
+        for m in metrics_list:
+            ending_total = (
+                float(m.get("ending_traditional_ira_balance", 0.0))
+                + float(m.get("ending_roth_balance", 0.0))
+                + float(m.get("ending_brokerage_balance", 0.0))
+                + float(m.get("ending_cash_balance", 0.0))
+            )
+            if ending_total > 0.0:
+                derived_values.append(ending_total / 9.0)
+        if derived_values:
+            starting_assets = sum(derived_values) / len(derived_values)
+    starting_assets = max(1.0, starting_assets)
+
+    annual_spending = float(inputs.get("annual_spending", 0.0) or 0.0)
+    if annual_spending <= 0.0 and metrics_list:
+        ss_values = [float(m.get("final_household_ss_income", 0.0)) for m in metrics_list if float(m.get("final_household_ss_income", 0.0)) > 0.0]
+        if ss_values:
+            annual_spending = max(ss_values)
+    annual_spending = max(1.0, annual_spending)
+
+    return {
+        "starting_assets": float(starting_assets),
+        "annual_spending": float(annual_spending),
+    }
+
+
+def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None = None) -> list[dict]:
+    """
+    Build the shared scoring-input rows used by BOTH Quick and Full.
+    These inputs must be strategy-local and scenario-local only.
+    They must NOT depend on the size or composition of the candidate set,
+    otherwise overlapping Quick/Full strategies can never match exactly.
+    """
+    if not metrics_list:
+        return []
+
+    scoring_context = scoring_context or {}
+    starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
+    annual_spending = max(1.0, float(scoring_context.get("annual_spending", 1.0)))
+
+    scoring_inputs = []
+    for metrics in metrics_list:
+        ending_trad = float(metrics.get("ending_traditional_ira_balance", 0.0))
+        ending_roth = float(metrics.get("ending_roth_balance", 0.0))
+        ending_brokerage = float(metrics.get("ending_brokerage_balance", 0.0))
+        ending_cash = float(metrics.get("ending_cash_balance", 0.0))
+        ending_total = max(1.0, ending_trad + ending_roth + ending_brokerage + ending_cash)
+        trad_share = ending_trad / ending_total
+
+        final_net_worth = float(metrics.get("final_net_worth", 0.0))
+        after_tax_legacy = float(metrics.get("after_tax_legacy", 0.0))
+        effective_legacy_value = float(metrics.get("effective_legacy_value", after_tax_legacy))
+        heir_tax_drag = float(metrics.get("heir_tax_drag", 0.0))
+        stability_value = float(metrics.get("stability_value", 0.0))
+        final_household_ss_income = float(metrics.get("final_household_ss_income", 0.0))
+        survivor_ss_income = float(metrics.get("survivor_ss_income", 0.0))
+        ss_present_value = float(metrics.get("social_security_present_value", estimate_social_security_present_value(final_household_ss_income, survivor_ss_income)))
+        total_government_drag = float(metrics.get("Total Government Drag", 0.0))
+        min_liquid_assets = max(0.0, -float(metrics.get("risk_value", 0.0)))
+
+        liquidity_coverage_years = safe_ratio(min_liquid_assets, annual_spending, default=0.0)
+        income_coverage_ratio = safe_ratio(final_household_ss_income, annual_spending, default=0.0)
+        survivor_coverage_ratio = safe_ratio(survivor_ss_income, annual_spending, default=0.0)
+        stability_support_ratio = safe_ratio(stability_value, annual_spending, default=0.0)
+
+        scoring_inputs.append({
+            **metrics,
+            "ending_traditional_ira_share": float(trad_share),
+            "net_worth_ratio": safe_ratio(final_net_worth, starting_assets),
+            "legacy_ratio": safe_ratio(after_tax_legacy, starting_assets),
+            "effective_legacy_ratio": safe_ratio(effective_legacy_value, starting_assets),
+            "heir_tax_drag_ratio": safe_ratio(heir_tax_drag, starting_assets),
+            "trad_ratio": safe_ratio(ending_trad, starting_assets),
+            "drag_ratio": safe_ratio(total_government_drag, starting_assets),
+            "ss_present_value_ratio": safe_ratio(ss_present_value, starting_assets),
+            "liquidity_coverage_years": float(liquidity_coverage_years),
+            "income_coverage_ratio": float(income_coverage_ratio),
+            "survivor_coverage_ratio": float(survivor_coverage_ratio),
+            "stability_support_ratio": float(stability_support_ratio),
+        })
+    return scoring_inputs
+
+
+def build_scoring_context(
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> dict:
+    """
+    Shared scoring context for BOTH Quick and Full after scoring inputs exist.
+    This is where profile weights, modifier flags, and the optional lambda live.
+    """
+    base_context = dict(scoring_context or {})
+    base_context.update({
+        "profile_name": str(profile_name),
+        "weights": copy.deepcopy(get_profile_summary(profile_name)["weights"]),
+        "preferences": copy.deepcopy(preferences or {}),
+        "trad_balance_penalty_lambda": max(0.0, float(trad_balance_penalty_lambda or 0.0)),
+    })
+    return base_context
+
+
+def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
+    """
+    Compute the selected ranking score for a single strategy row.
+    This function must be candidate-set invariant: the same strategy with the
+    same metrics and the same scoring context must receive the same score,
+    whether it came from Quick or Full.
+    """
+    profile_name = str(scoring_context.get("profile_name", "Balanced"))
+    weights = scoring_context.get("weights", get_profile_summary(profile_name)["weights"])
+    preferences = scoring_context.get("preferences", {}) or {}
+    starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
+    trad_balance_penalty_lambda = max(0.0, float(scoring_context.get("trad_balance_penalty_lambda", 0.0)))
+
+    net_worth_ratio = float(scoring_input.get("net_worth_ratio", 0.0))
+    legacy_ratio = float(scoring_input.get("legacy_ratio", 0.0))
+    effective_legacy_ratio = float(scoring_input.get("effective_legacy_ratio", legacy_ratio))
+    heir_tax_drag_ratio = float(scoring_input.get("heir_tax_drag_ratio", 0.0))
+    trad_ratio = float(scoring_input.get("trad_ratio", 0.0))
+    drag_ratio = float(scoring_input.get("drag_ratio", 0.0))
+    trad_share = float(scoring_input.get("ending_traditional_ira_share", 0.0))
+    ss_present_value_ratio = float(scoring_input.get("ss_present_value_ratio", 0.0))
+    liquidity_coverage_years = float(scoring_input.get("liquidity_coverage_years", 0.0))
+    income_coverage_ratio = float(scoring_input.get("income_coverage_ratio", 0.0))
+    survivor_coverage_ratio = float(scoring_input.get("survivor_coverage_ratio", 0.0))
+    stability_support_ratio = float(scoring_input.get("stability_support_ratio", 0.0))
+
+    nw_signal = math.log1p(max(0.0, net_worth_ratio))
+    base_legacy_signal = math.log1p(max(0.0, legacy_ratio))
+    effective_legacy_signal = math.log1p(max(0.0, effective_legacy_ratio))
+    heir_tax_penalty_base = math.log1p(max(0.0, heir_tax_drag_ratio))
+    trad_penalty_base = math.log1p(max(0.0, trad_ratio))
+    drag_penalty_base = math.log1p(max(0.0, drag_ratio))
+    ss_value_signal = math.log1p(max(0.0, ss_present_value_ratio))
+    stability_signal = (
+        0.45 * math.log1p(max(0.0, stability_support_ratio))
+        + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+        + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
+    )
+    liquidity_signal = clamp01(liquidity_coverage_years / 25.0)
+    risk_penalty_base = 1.0 - liquidity_signal
+    trad_share_penalty_base = trad_share
+
+    if profile_name == "Legacy Focused":
+        legacy_component = weights["legacy"] * (0.76 * effective_legacy_signal + 0.24 * base_legacy_signal)
+        nw_component = 0.05 * weights["nw"] * nw_signal
+        stability_component = weights["stability"] * stability_signal
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.55)
+        trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 2.30)
+        drag_component = 0.75 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.05)
+        heir_tax_component = 1.25 * weights["trad"] * (heir_tax_penalty_base ** 1.55)
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.00)
+    elif profile_name == "Spend With Confidence":
+        legacy_component = weights["legacy"] * base_legacy_signal
+        nw_component = weights["nw"] * nw_signal
+        stability_component = weights["stability"] * (
+            0.35 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.40 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.25 * math.log1p(max(0.0, survivor_coverage_ratio))
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.20)
+        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.10)
+        drag_component = weights.get("drag", 0.0) * drag_penalty_base
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.10)
+    else:
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = weights["nw"] * (nw_signal ** 0.90)
+        stability_component = weights["stability"] * (
+            0.50 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.35)
+        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.45)
+        drag_component = weights.get("drag", 0.0) * (drag_penalty_base ** 1.10)
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
+
+    preference_bonus = 0.0
+    preference_penalty = 0.0
+
+    raw_max_ss_bonus = 0.24 * (ss_value_signal ** 1.20)
+    if profile_name == "Legacy Focused":
+        raw_max_ss_bonus *= 1.40
+    elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
+        raw_max_ss_bonus *= 1.15
+    if preferences.get("maximize_social_security"):
+        preference_bonus += raw_max_ss_bonus
+
+    income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
+    raw_income_stability_bonus = 0.10 * income_stability_score
+    if preferences.get("income_stability_focus"):
+        preference_bonus += raw_income_stability_bonus
+
+    raw_min_trad_penalty = (
+        0.24 * (trad_share_penalty_base ** 2.10)
+        + 0.24 * (heir_tax_penalty_base ** 1.35)
+        + 0.10 * (trad_penalty_base ** 1.20)
+    )
+    if profile_name == "Legacy Focused":
+        raw_min_trad_penalty *= 1.40
+    if preferences.get("minimize_trad_ira_for_heirs"):
+        preference_penalty += raw_min_trad_penalty
+
+    lambda_penalty_dollars = trad_balance_penalty_lambda * float(scoring_input.get("ending_traditional_ira_balance", 0.0))
+    lambda_penalty_score = safe_ratio(lambda_penalty_dollars, starting_assets * 10.0)
+
+    positive_score = nw_component + legacy_component + stability_component + preference_bonus
+    negative_score = trad_component + trad_share_component + drag_component + heir_tax_component + risk_component + preference_penalty + lambda_penalty_score
+    score = positive_score - negative_score
+
+    stability_label = "High" if income_coverage_ratio >= 0.95 and survivor_coverage_ratio >= 0.60 else ("Medium" if income_coverage_ratio >= 0.60 else "Low")
+    risk_label = "Low" if liquidity_coverage_years >= 12.0 else ("Medium" if liquidity_coverage_years >= 6.0 else "High")
+
+    return {
+        **scoring_input,
+        "score": float(score),
+        "score_100": float(score * 100.0),
+        "lambda_penalty_dollars": float(lambda_penalty_dollars),
+        "lambda_penalty_score": float(lambda_penalty_score),
+        "stability_label": stability_label,
+        "risk_label": risk_label,
+        "nw_component": float(nw_component),
+        "legacy_component": float(legacy_component),
+        "stability_component": float(stability_component),
+        "trad_component": float(trad_component),
+        "drag_component": float(drag_component),
+        "trad_share_component": float(trad_share_component),
+        "risk_component": float(risk_component),
+        "heir_tax_component": float(heir_tax_component),
+        "ss_value_component": float(0.14 * (ss_value_signal ** 1.10) if preferences.get("maximize_social_security") else 0.0),
+        "max_ss_modifier_component": float(raw_max_ss_bonus),
+        "income_stability_modifier_component": float(raw_income_stability_bonus),
+        "min_trad_ira_modifier_component": float(raw_min_trad_penalty),
+        "preference_bonus_component": float(preference_bonus),
+        "preference_penalty_component": float(preference_penalty),
+        "social_security_present_value": float(scoring_input.get("social_security_present_value", estimate_social_security_present_value(
+            float(scoring_input.get("final_household_ss_income", 0.0)),
+            float(scoring_input.get("survivor_ss_income", 0.0)),
+        ))),
+        "positive_score": float(positive_score),
+        "negative_score": float(negative_score),
+        "ending_traditional_ira_share": float(scoring_input.get("ending_traditional_ira_share", 0.0)),
+        "income_stability_score": float(income_stability_score),
+    }
+
+
+def score_strategy_metrics(
+    metrics_list: list[dict],
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> list[dict]:
+    shared_context = dict(scoring_context or build_strategy_scoring_context(metrics_list=metrics_list))
+    scoring_inputs = build_scoring_inputs(metrics_list, scoring_context=shared_context)
+    ranking_context = build_scoring_context(
+        profile_name=profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=shared_context,
+    )
+    scored = [compute_selected_score(row, ranking_context) for row in scoring_inputs]
     return sorted(scored, key=lambda x: x["score"], reverse=True)
+
+
+def build_profile_score_maps(metrics_list: list[dict], scoring_context: dict | None = None, trad_balance_penalty_lambda: float = 0.0) -> dict[str, dict[str, float]]:
+    scoring_context = scoring_context or build_strategy_scoring_context(metrics_list=metrics_list)
+    out: dict[str, dict[str, float]] = {}
+    for profile_name in PROFILE_PRESETS.keys():
+        ranked = score_strategy_metrics(metrics_list, profile_name, preferences={}, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
+        out[profile_name] = {str(row.get("Strategy", "")): float(row.get("score_100", 0.0)) for row in ranked}
+    return out
+
+
+def build_strategy_scoring_payload(
+    results_rows: list[dict],
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> dict:
+    """
+    Central scoring payload used by both Quick and Full SS scans.
+    This keeps profile scoring, selected ranking, and profile score maps on one shared path.
+    """
+    metric_rows = []
+    for row in results_rows:
+        metric_rows.append({
+            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
+            "Owner SS Age": int(row["Owner SS Age"]),
+            "Spouse SS Age": int(row["Spouse SS Age"]),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+
+    scoring_context = scoring_context or build_strategy_scoring_context(metrics_list=metric_rows)
+    selected_ranked_rows = score_strategy_metrics(
+        metric_rows,
+        selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    profile_score_maps = build_profile_score_maps(
+        metric_rows,
+        scoring_context=scoring_context,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+    )
+    return {
+        "metric_rows": metric_rows,
+        "selected_ranked_rows": selected_ranked_rows,
+        "profile_score_maps": profile_score_maps,
+        "scoring_context": scoring_context,
+    }
+
+
+def build_scored_strategy_outputs(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+) -> dict:
+    """
+    Shared end-to-end scoring / ranking path for both Quick and Full SS scans.
+    The only intended difference between Quick and Full is candidate generation.
+    """
+    safe_inputs = copy.deepcopy(inputs or {})
+    scoring_context = build_strategy_scoring_context(inputs=safe_inputs, metrics_list=results_rows)
+    ranked_df = build_ranked_optimizer_results_df(
+        results_rows,
+        selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    profile_shortlists = build_profile_shortlists_from_optimizer_rows(
+        results_rows,
+        top_n=max(1, int(shortlist_top_n)),
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    return {
+        "scoring_context": scoring_context,
+        "ranked_df": ranked_df,
+        "profile_shortlists": profile_shortlists,
+    }
+
+
+def extract_selected_score_map(df: pd.DataFrame) -> dict[str, float]:
+    if df is None or df.empty:
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        strategy = str(row.get("Strategy", ""))
+        if strategy:
+            out[strategy] = float(get_selected_score_value(row))
+    return out
+
+
+def validate_overlap_score_identity(quick_df: pd.DataFrame, full_df: pd.DataFrame, tolerance: float = 1e-9) -> pd.DataFrame:
+    quick_scores = extract_selected_score_map(quick_df)
+    full_scores = extract_selected_score_map(full_df)
+    overlaps = sorted(set(quick_scores).intersection(full_scores))
+    mismatches = []
+    for strategy in overlaps:
+        q = float(quick_scores[strategy])
+        f = float(full_scores[strategy])
+        if abs(q - f) > tolerance:
+            mismatches.append({"Strategy": strategy, "Quick Score": q, "Full Score": f, "Delta": f - q})
+    return pd.DataFrame(mismatches)
 
 
 def build_quick_profile_anchor_rows(ranked_rows: list[dict]) -> dict:
@@ -1275,31 +2132,13 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
     return "\n".join(sections)
 
 
-def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
-    anchors = build_quick_profile_anchor_rows(ranked_rows)
-    if not anchors:
-        return pd.DataFrame()
-
-    rows = []
-    for label, key in [("Recommended strategy", "recommended"), ("Best legacy strategy", "best_legacy"), ("Most stable strategy", "most_stable")]:
-        row = anchors.get(key, {}) or {}
-        rows.append({
-            "Lens": label,
-            "Strategy": row.get("Strategy", ""),
-            "Net Worth": float(row.get("Final Net Worth", 0.0)),
-            "After-Tax Legacy": float(row.get("After-Tax Legacy", 0.0)),
-            "Lifetime taxes / government drag": float(row.get("Total Government Drag", 0.0)),
-            "Final Household SS Income": float(row.get("Final Household SS Income", 0.0)),
-            "Ending Traditional IRA": float(row.get("Ending Traditional IRA Balance", 0.0)),
-        })
-    return pd.DataFrame(rows)
 
 
 def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
     if len(ranked_rows) < 2:
         return False
-    top_score = float(ranked_rows[0].get("score", 0.0))
-    second_score = float(ranked_rows[1].get("score", 0.0))
+    top_score = float(ranked_rows[0].get("score", ranked_rows[0].get("Score", 0.0)))
+    second_score = float(ranked_rows[1].get("score", ranked_rows[1].get("Score", 0.0)))
     denom = max(abs(top_score), 1e-9)
     return abs(top_score - second_score) / denom <= tolerance_pct
 
@@ -1354,83 +2193,99 @@ def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> l
     return guidance
 
 
+def build_strategy_scan_payload(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+    include_profile_shortlists: bool = True,
+) -> dict:
+    """
+    Shared post-candidate pipeline for BOTH Quick and Full.
+    After candidate generation, both scan types should call this same function so the
+    code path for evaluation outputs, scoring, ranking, primary rows, and comparison
+    rows is identical.
+    """
+    shared_outputs = build_scored_strategy_outputs(
+        results_rows,
+        inputs=inputs,
+        selected_profile_name=selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=shortlist_top_n,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "strategy scan ranked results")
+    primary_table_df = build_primary_strategy_table_df(ranked_df, top_n=primary_table_top_n)
+    comparison_df = build_top_strategy_comparison_df(ranked_df, top_n=comparison_top_n)
+    best_result = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
+    return {
+        "scoring_context": shared_outputs["scoring_context"],
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+        "best_result": best_result,
+        "profile_shortlists": shared_outputs["profile_shortlists"] if include_profile_shortlists else {},
+    }
+
+
+
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
-    step_size = sanitize_governor_step_size(step_size)
     preferences = extract_scoring_preferences(inputs)
-    base_inputs, preset = build_profile_adjusted_inputs(profile_name, inputs)
-    metric_rows = []
-    errors = []
-    for owner_age, spouse_age in QUICK_STRATEGY_COMBOS:
-        try:
-            scenario_inputs = copy.deepcopy(base_inputs)
-            scenario_inputs["owner_claim_age"] = int(owner_age)
-            scenario_inputs["spouse_claim_age"] = int(spouse_age)
-            run_result = run_model_break_even_governor(scenario_inputs, sanitize_governor_max_conversion(max_conversion), step_size)
-            metrics = build_strategy_metrics(run_result)
-            metric_rows.append({
-                **metrics,
-                "Strategy": f"{owner_age}/{spouse_age}",
-                "Owner SS Age": int(owner_age),
-                "Spouse SS Age": int(spouse_age),
-                "Final Net Worth": float(metrics["final_net_worth"]),
-                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
-                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
-                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
-                "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
-                "Roth @ End": float(metrics["ending_roth_balance"]),
-                "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
-                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
-                "Stability Value": float(metrics["stability_value"]),
-                "Risk Value": float(metrics["risk_value"]),
-                "Final Household SS Income": float(metrics["final_household_ss_income"]),
-                "Survivor SS Income": float(metrics["survivor_ss_income"]),
-                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
-                "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
-                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
-                "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
-                "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
-                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
-                "Total Conversions": float(run_result.get("total_conversions", 0.0)),
-                "Max MAGI": float(run_result.get("max_magi", 0.0)),
-                "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
-                "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
-                "First IRMAA Year": run_result.get("first_irmaa_year"),
-            })
-        except Exception as exc:
-            errors.append(f"{owner_age}/{spouse_age}: {exc}")
-    if not metric_rows:
+    base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
+    quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
+    quick_step_size = sanitize_governor_step_size(float(step_size))
+    trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
+
+    quick_rows, errors = build_ss_optimizer_fact_rows(
+        base_inputs,
+        QUICK_STRATEGY_COMBOS,
+        quick_max_conversion,
+        quick_step_size,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
+        cache_namespace="_quick_recommendation_result_rows_cache",
+    )
+    if not quick_rows:
         raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
-    ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences)
-    summary_rows = []
-    for row in ranked:
-        summary_rows.append({
-            "Strategy": row["Strategy"],
-            "Score": row["score_100"],
-            "Net Worth": row["Final Net Worth"],
-            "After-Tax Legacy": row["After-Tax Legacy"],
-            "Trad IRA @ End": row["Ending Traditional IRA Balance"],
-            "Roth @ End": row["Roth @ End"],
-            "Brokerage @ End": row["Brokerage @ End"],
-            "Stability": row["stability_label"],
-            "Risk": row["risk_label"],
-            "Final Household SS Income": row["Final Household SS Income"],
-            "Survivor SS Income": row["Survivor SS Income"],
-        })
-    summary_df = pd.DataFrame(summary_rows)
+
+    shared_payload = build_strategy_scan_payload(
+        quick_rows,
+        inputs=base_inputs,
+        selected_profile_name=profile_name,
+        preferences=preferences,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=10,
+        primary_table_top_n=10,
+        comparison_top_n=3,
+        include_profile_shortlists=False,
+    )
+    ranked_df = shared_payload["ranked_df"]
+    ranked = ranked_df.to_dict("records")
+    data_source = "quick_subset_shared_scoring_pipeline"
+
+    summary_df = shared_payload["primary_table_df"]
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
         "summary_df": summary_df,
+        "comparison_display_df": shared_payload["comparison_df"],
+        "all_results_df": canonicalize_optimizer_result_df(ranked_df.copy(), "quick scored results"),
         "ranked_rows": ranked,
         "advisor_text": explanation,
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
-        "data_source": "break_even_governor",
+        "data_source": data_source,
         "applied_preset_note": preset.get("preset_note", ""),
         "active_preferences_text": describe_active_scoring_preferences(preferences),
+        "strategy_universe_size": len(quick_rows),
+        "profile_shortlists": shared_payload.get("profile_shortlists", {}),
+        "scoring_context": shared_payload.get("scoring_context", {}),
     }
-
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -1585,6 +2440,7 @@ def preserve_session_state_across_pages() -> None:
         "scenario_name_input_seed",
         "snapshot_viewer_payload",
         "snapshot_viewer_name",
+        "snapshot_open_notice",
     })
     for key in keys_to_preserve:
         if key in st.session_state:
@@ -1627,6 +2483,18 @@ def clear_loaded_scenario_identity() -> None:
     st.session_state["loaded_scenario_fingerprint"] = None
 
 
+def clear_transient_recommendation_state() -> None:
+    for key in [
+        "selected_recommendation_strategy",
+        "selected_recommendation_source",
+        "selected_recommendation_profile",
+        "break_even_governor_preset_note",
+        "suppress_quick_recommendation_stale_once",
+    ]:
+        if key in st.session_state:
+            st.session_state.pop(key, None)
+
+
 def sync_scenario_name_widget_default() -> None:
     loaded_name = str(st.session_state.get("loaded_scenario_name", "") or "").strip()
     current_value = str(st.session_state.get("scenario_name_input", "") or "").strip()
@@ -1642,6 +2510,14 @@ def render_scenario_identity_bar(current_page: str) -> None:
     profile = str(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")))
     parts = [f"**Scenario:** {scenario_name}", f"**Active SS Strategy:** {active_strategy}"]
     if current_page == "conversion":
+        quick_result_snapshot = get_current_result_payload("quick_strategy_recommendation_result")
+        quick_winner_strategy = None
+        if quick_result_snapshot is not None:
+            ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
+            if ranked_rows:
+                quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
+        if quick_winner_strategy:
+            parts.append(f"**Quick Rec Winner:** {quick_winner_strategy}")
         parts.append(f"**Profile:** {profile}")
     st.caption(" | ".join(parts))
     if scenario_has_unsaved_changes():
@@ -1658,6 +2534,7 @@ def sync_widget_state_from_canonical_state() -> None:
 
 def apply_scenario_state(state: dict) -> None:
     ensure_default_state()
+    clear_transient_recommendation_state()
     for key in SCENARIO_STATE_KEYS:
         st.session_state[key] = copy.deepcopy(state.get(key, DEFAULT_APP_STATE[key]))
     if "annual_external_other_ordinary_income" in state and "annual_other_ordinary_income" not in state:
@@ -1670,6 +2547,9 @@ def apply_scenario_state(state: dict) -> None:
         st.session_state.get("annual_other_ordinary_income", DEFAULT_APP_STATE["annual_other_ordinary_income"])
     )
     sync_widget_state_from_canonical_state()
+    loaded_owner_age = int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"]))
+    loaded_spouse_age = int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"]))
+    st.session_state["selected_recommendation_strategy"] = f"{loaded_owner_age}/{loaded_spouse_age}"
 
 
 def reset_scenario_state() -> None:
@@ -1800,7 +2680,7 @@ def build_quick_recommendation_snapshot_payload(quick_result: dict, planning_pro
             "applied_preset_note": str(quick_result.get("applied_preset_note", "")),
         },
         "strategy_summary_rows": _json_safe(pd.DataFrame(quick_result.get("summary_df", pd.DataFrame())).to_dict("records")),
-        "anchor_comparison_rows": _json_safe(build_quick_anchor_comparison_df(ranked_rows).to_dict("records")),
+        "anchor_comparison_rows": _json_safe(pd.DataFrame(quick_result.get("comparison_display_df", pd.DataFrame())).to_dict("records")),
         "top_ranked_rows": _json_safe(ranked_rows[:5]),
         "scenario_state_used_for_quick_rec": _json_safe(source_scenario_state),
         "quick_recommendation_input_state": _json_safe(quick_rec_input_state),
@@ -1838,10 +2718,10 @@ def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapsho
         strategy_rows = snapshot_payload.get("strategy_summary_rows", []) if isinstance(snapshot_payload, dict) else []
         if strategy_rows:
             strategy_df = pd.DataFrame(strategy_rows)
-            st.subheader("Strategy Summary")
+            st.subheader("Quick Scan Summary")
             st.dataframe(
                 strategy_df.style.format({
-                    "Score": "{:.1f}",
+                    "Selected Score": "{:.1f}",
                     "Net Worth": "${:,.0f}",
                     "After-Tax Legacy": "${:,.0f}",
                     "Trad IRA @ End": "${:,.0f}",
@@ -1857,18 +2737,83 @@ def render_snapshot_summary_card(snapshot_payload: dict, heading: str = "Snapsho
             st.caption("This snapshot stores the exact input state used to generate the quick recommendation. It does not silently overwrite itself with current live governor settings.")
         rows = snapshot_payload.get("anchor_comparison_rows", []) if isinstance(snapshot_payload, dict) else []
         if rows:
-            anchor_df = pd.DataFrame(rows)
-            st.subheader("Tradeoff Summary")
-            st.dataframe(
-                anchor_df.style.format({
-                    "Net Worth": "${:,.0f}",
-                    "After-Tax Legacy": "${:,.0f}",
-                    "Lifetime taxes / government drag": "${:,.0f}",
-                    "Final Household SS Income": "${:,.0f}",
-                    "Ending Traditional IRA": "${:,.0f}",
-                }),
-                use_container_width=True,
-            )
+            render_tradeoff_summary_columns_from_rows(rows)
+
+
+def render_tradeoff_summary_columns_from_rows(rows: list[dict]) -> None:
+    if not rows:
+        return
+
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        normalized.append({str(k): v for k, v in row.items()})
+    if not normalized:
+        return
+
+    def _normalize_label(value: str) -> str:
+        text = str(value or "").strip().lower()
+        text = text.replace("-", " ").replace("_", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        return text
+
+    canonical_label_map = {
+        "recommended strategy": "Recommended Strategy",
+        "best legacy strategy": "Best Legacy Strategy",
+        "most stable strategy": "Most Stable Strategy",
+        "highest net worth strategy": "Highest Net Worth Strategy",
+    }
+
+    row_map = {}
+    for r in normalized:
+        raw_label = r.get("Column", r.get("Lens", r.get("Title", "")))
+        canonical = canonical_label_map.get(_normalize_label(raw_label), str(raw_label or "").strip())
+        row_map[canonical] = r
+
+    def _get(label: str, *field_names, default=""):
+        row = row_map.get(label, {})
+        for field in field_names:
+            if field in row and row.get(field) not in (None, ""):
+                return row.get(field)
+        return default
+
+    def _as_float(value, default=0.0):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    preferred_recommended_label = "Recommended Strategy" if "Recommended Strategy" in row_map else "Best Legacy Strategy"
+    recommended_strategy = str(_get(preferred_recommended_label, "Strategy", default=""))
+
+    def _render(col, title: str):
+        if title not in row_map:
+            with col:
+                st.markdown(f"**{title}**")
+                st.caption("Not available in this snapshot")
+            return
+        same_as_recommended = title != preferred_recommended_label and str(_get(title, "Strategy", default="")) == recommended_strategy
+        with col:
+            st.markdown(f"**{title}**")
+            if same_as_recommended:
+                st.caption("Same as recommended")
+            st.write(str(_get(title, "Strategy", default="")))
+            st.write(f"After-Tax Legacy: ${_as_float(_get(title, 'After-Tax Legacy', default=0.0)):,.0f}")
+            st.write(f"Ending Trad IRA: ${_as_float(_get(title, 'Ending Traditional IRA', 'Ending Trad IRA', default=0.0)):,.0f}")
+            st.write(f"Final Net Worth: ${_as_float(_get(title, 'Net Worth', 'Final Net Worth', default=0.0)):,.0f}")
+            st.write(f"Household SS Income: ${_as_float(_get(title, 'Final Household SS Income', 'Household SS Income', default=0.0)):,.0f}")
+
+    st.subheader("Tradeoff Summary")
+    c1, c2, c3 = st.columns(3)
+    _render(c1, preferred_recommended_label)
+    if "Highest Net Worth Strategy" in row_map:
+        _render(c2, "Most Stable Strategy")
+        _render(c3, "Highest Net Worth Strategy")
+    else:
+        _render(c2, "Best Legacy Strategy")
+        _render(c3, "Most Stable Strategy")
 
 
 def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
@@ -1876,15 +2821,35 @@ def open_snapshot_in_viewer(snapshot_payload: dict) -> None:
     meta = snapshot_payload.get("meta", {}) if isinstance(snapshot_payload, dict) else {}
     name = meta.get("snapshot_name", "Snapshot Viewer") if isinstance(meta, dict) else "Snapshot Viewer"
     st.session_state["snapshot_viewer_name"] = str(name)
+    st.session_state["snapshot_open_notice"] = f"Opened snapshot: {str(name)}"
     st.session_state["app_page"] = "snapshot"
 
+
+
+
+def sanitize_export_filename(value: str, fallback: str = "file") -> str:
+    raw = str(value or "").strip()
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in raw)
+    while "--" in safe:
+        safe = safe.replace("--", "-")
+    safe = safe.strip("-_")
+    return safe or fallback
 
 def render_snapshot_open_controls() -> None:
     st.caption("Open a saved snapshot file to view a read-only saved recommendation report.")
     opened_snapshot = st.file_uploader("Open Snapshot", type=["json"], key="global_snapshot_open")
-    if opened_snapshot is not None:
+    open_col1, open_col2 = st.columns([1, 3])
+    with open_col1:
+        open_clicked = st.button("Open Snapshot File", use_container_width=True, disabled=opened_snapshot is None, key="open_snapshot_file_button")
+    with open_col2:
+        if opened_snapshot is not None:
+            st.caption(f"Selected file: {opened_snapshot.name}")
+    if open_clicked and opened_snapshot is not None:
         try:
-            opened_payload = json.load(opened_snapshot)
+            raw_bytes = opened_snapshot.getvalue()
+            if not raw_bytes:
+                raise ValueError("The selected file is empty.")
+            opened_payload = json.loads(raw_bytes.decode("utf-8"))
             if str((opened_payload.get("meta", {}) or {}).get("snapshot_type", "")) != "quick_recommendation":
                 raise ValueError("This file is not a Quick Recommendation snapshot.")
             open_snapshot_in_viewer(opened_payload)
@@ -1893,13 +2858,110 @@ def render_snapshot_open_controls() -> None:
             st.error(f"Could not open snapshot: {exc}")
 
 
+def _export_df_records(df) -> list[dict]:
+    if df is None:
+        return []
+    try:
+        if isinstance(df, pd.DataFrame):
+            return df.to_dict("records")
+        return pd.DataFrame(df).to_dict("records")
+    except Exception:
+        return []
+
+
+def build_ss_optimizer_export_payload(result: dict) -> str:
+    payload = {
+        "meta": {
+            "export_type": "ss_optimizer_results",
+            "app_version": APP_VERSION,
+            "scenario_name": get_loaded_scenario_name(),
+        },
+        "context": {
+            "planning_profile": st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")),
+            "preference_modifiers": extract_scoring_preferences(st.session_state),
+            "active_ss_strategy": f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}",
+            "scenario_state": collect_scenario_state(),
+        },
+        "results": {
+            "completed": bool(result.get("completed", False)),
+            "best_result": _json_safe(result.get("best_result")),
+            "comparison_rows": _export_df_records(result.get("comparison_df")),
+            "top_10_rows": _export_df_records(result.get("top_10_df")),
+            "all_results_rows": _export_df_records(result.get("all_results_df")),
+            "profile_shortlists": {k: _export_df_records(v) for k, v in (result.get("profile_shortlists", {}) or {}).items()},
+        },
+    }
+    return json.dumps(_json_safe(payload), indent=2)
+
+
+def build_break_even_export_payload(result: dict) -> str:
+    summary_fields = [
+        "final_net_worth", "total_federal_taxes", "total_state_taxes", "total_aca_cost",
+        "total_irmaa_cost", "total_government_drag", "total_shortfall", "max_magi",
+        "aca_hit_years", "irmaa_hit_years", "first_irmaa_year", "owner_ss_start",
+        "spouse_ss_start", "household_rmd_start", "owner_claim_age", "spouse_claim_age",
+        "total_conversions", "ending_trad_balance",
+    ]
+    payload = {
+        "meta": {
+            "export_type": "break_even_governor_results",
+            "app_version": APP_VERSION,
+            "scenario_name": get_loaded_scenario_name(),
+        },
+        "context": {
+            "planning_profile": st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced")),
+            "active_ss_strategy": f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}",
+            "scenario_state": collect_scenario_state(),
+        },
+        "summary": {k: _json_safe(result.get(k)) for k in summary_fields},
+        "chosen_path_rows": _export_df_records(result.get("df")),
+        "decision_rows": _export_df_records(result.get("decision_df")),
+        "validation": _json_safe(result.get("validation")),
+        "validation_rerun_summary": _json_safe(result.get("validation_rerun_summary")),
+    }
+    return json.dumps(_json_safe(payload), indent=2)
+
+
+
 def render_scenario_manager(current_page: str) -> None:
-    with st.expander("Scenario Save / Open / Reset", expanded=False):
-        st.caption("Save one full scenario file that carries inputs across both pages, open a saved scenario into this session, or reset all inputs back to zero-style defaults.")
+    with st.expander("Scenarios / Snapshots", expanded=False):
+        st.caption("Open or save scenarios, and open saved recommendation snapshots from the same section.")
+
+        st.markdown("**Scenarios**")
+        upload_key = f"scenario_upload_{current_page}"
+        opened_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
+        open_col1, open_col2 = st.columns([1, 3])
+        with open_col1:
+            open_clicked = st.button("Open Scenario File", use_container_width=True, disabled=opened_file is None, key=f"open_scenario_{current_page}")
+        with open_col2:
+            if opened_file is not None:
+                st.caption(f"Selected file: {opened_file.name}")
+        if open_clicked and opened_file is not None:
+            try:
+                payload = json.loads(opened_file.getvalue().decode("utf-8"))
+                state = payload.get("state", payload)
+                if not isinstance(state, dict):
+                    raise ValueError("Opened JSON does not contain a valid scenario state.")
+                meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+                scope = str(meta.get("scope", "full"))
+                if scope == "full":
+                    apply_scenario_state(state)
+                else:
+                    ensure_default_state()
+                    for key in get_page_specific_state_keys(scope):
+                        if key in state:
+                            st.session_state[key] = copy.deepcopy(state[key])
+                set_loaded_scenario_identity(meta.get("scenario_name", opened_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
+                st.session_state["app_page"] = current_page
+                st.success(f"Scenario opened ({scope}): {get_loaded_scenario_name()}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not open scenario: {exc}")
+
         sync_scenario_name_widget_default()
         st.text_input("Scenario name", key="scenario_name_input", placeholder="Baseline plan")
         export_name = str(st.session_state.get("scenario_name_input", "") or "retirement_model_scenario").strip() or "retirement_model_scenario"
-        safe_filename = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in export_name).strip("_") or "retirement_model_scenario"
+        safe_filename = f"scenario__{sanitize_export_filename(export_name, 'retirement-model-scenario')}__v124"
         st.download_button(
             "Save Scenario",
             data=build_scenario_export_payload("full", export_name),
@@ -1907,36 +2969,10 @@ def render_scenario_manager(current_page: str) -> None:
             mime="application/json",
             use_container_width=True,
         )
-        upload_key = f"scenario_upload_{current_page}"
-        uploaded_file = st.file_uploader("Open Scenario", type=["json"], key=upload_key)
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Load Uploaded Scenario", use_container_width=True, disabled=uploaded_file is None, key=f"load_scenario_{current_page}"):
-                try:
-                    payload = json.load(uploaded_file)
-                    state = payload.get("state", payload)
-                    if not isinstance(state, dict):
-                        raise ValueError("Uploaded JSON does not contain a valid scenario state.")
-                    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
-                    scope = str(meta.get("scope", "full"))
-                    if scope == "full":
-                        apply_scenario_state(state)
-                    else:
-                        ensure_default_state()
-                        for key in get_page_specific_state_keys(scope):
-                            if key in state:
-                                st.session_state[key] = copy.deepcopy(state[key])
-                    set_loaded_scenario_identity(meta.get("scenario_name", uploaded_file.name.rsplit('.', 1)[0]), scope=scope, app_version=meta.get("version", APP_VERSION))
-                    st.session_state["app_page"] = current_page
-                    st.success(f"Scenario loaded ({scope}): {get_loaded_scenario_name()}")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Could not load scenario: {exc}")
-        with c2:
-            if st.button("Reset Inputs To Defaults", use_container_width=True, key=f"reset_scenario_{current_page}"):
-                reset_scenario_state()
-                st.success("Inputs reset to defaults.")
-                st.rerun()
+
+        st.divider()
+        st.markdown("**Snapshots**")
+        render_snapshot_open_controls()
 
 
 
@@ -3083,7 +4119,7 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         # Cash inflows / income sources
         "Earned Income", "Owner SS", "Spouse SS", "Total SS",
-        "Annual Spending Need", "Household Reference Age", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
+        "Annual Spending Need", "Household Reference Age", "RMD Income Component", "Spending Funded From Cash", "Spending Funded From Brokerage", "Spending Trad Withdrawal Component", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
 
         # Aggregated income
         "Other Ordinary Income", "Taxable SS", "AGI", "MAGI",
@@ -3615,37 +4651,52 @@ def get_year_conversion_cap(state: dict, params: dict, max_conversion: float) ->
     trad_after_growth = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
     return max(0.0, min(float(max_conversion), trad_after_growth))
 
-def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dict, step_size: float, cap: float) -> float:
+def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dict, step_size: float, cap: float, projected_trad_at_rmd_start: float | None = None) -> float:
     """
-    Annual conversion needed to work toward the target Traditional IRA balance by the
-    first household RMD year. This is intentionally simple but no longer ultra-timid:
-    the governor can use it as an explicit pace target for pre-RMD depletion.
+    Annual conversion pace required to work toward the target Traditional IRA balance by
+    the first household RMD year.
+
+    The key input is the projected Traditional IRA balance at RMD start under a no-extra-
+    conversion path from *this* year forward, not just the current year's Trad balance.
+    That keeps the target lane from going timid simply because the current year has not
+    yet reflected the full future growth / RMD problem.
     """
     if not bool(params.get("target_trad_balance_enabled", False)):
         return 0.0
     rmd_start = int(params.get("household_rmd_start", year))
     if year >= rmd_start:
         return 0.0
+
     years_left = max(1, rmd_start - year)
-    current_trad = max(0.0, float(state.get("trad", 0.0)))
     target_trad = max(0.0, float(params.get("target_trad_balance", 300000.0)))
-    excess = max(0.0, current_trad - target_trad)
-    annual_needed = excess / years_left
-    rounded = floor_to_step(annual_needed, step_size)
-    return max(0.0, min(float(cap), float(rounded)))
+    projected_trad = max(
+        0.0,
+        float(projected_trad_at_rmd_start if projected_trad_at_rmd_start is not None else state.get("trad", 0.0)),
+    )
+    target_gap = max(0.0, projected_trad - target_trad)
+    if target_gap <= 0.0:
+        return 0.0
+
+    annual_needed = target_gap / years_left
+    # Round UP to the next step so the target lane does not drift behind schedule.
+    rounded_up = math.ceil(max(0.0, annual_needed) / max(1.0, float(step_size))) * max(1.0, float(step_size))
+    return max(0.0, min(float(cap), float(rounded_up)))
 
 
 def project_trad_balance_at_rmd_start(year: int, state: dict, params: dict, projection_cache: dict | None = None) -> float:
     """
-    Project the ending Traditional IRA balance in the year immediately before the
-    first household RMD year, assuming no additional optional conversions from the
-    current year forward. This is used only as a planning diagnostic / pressure gauge.
+    Project the Traditional IRA balance at the point household RMDs begin, assuming no
+    additional optional conversions from the current year forward.
+
+    This must use the shared yearly simulation path, not a simplified compound-growth
+    shortcut, otherwise spending, taxes, SS, and forced withdrawals stop matching the
+    real engine.
     """
     rmd_start = int(params.get("household_rmd_start", year))
     if year >= rmd_start:
         return max(0.0, float(state.get("trad", 0.0)))
 
-    summary = run_projection_summary_from_state(
+    path = run_projection_from_state(
         start_year=year,
         starting_state=dict(state),
         params=params,
@@ -3653,13 +4704,21 @@ def project_trad_balance_at_rmd_start(year: int, state: dict, params: dict, proj
         later_year_conversion=0.0,
         projection_cache=projection_cache,
     )
-    first_row = summary.get("first_row", {}) or {}
-    years_until_rmd = max(0, rmd_start - year - 1)
-    projected_trad = float(first_row.get("EOY Trad", state.get("trad", 0.0)))
-    growth = float(params.get("growth", 0.0))
-    for _ in range(years_until_rmd):
-        projected_trad *= (1.0 + growth)
-    return max(0.0, projected_trad)
+    df = path.get("df")
+    if df is None or getattr(df, 'empty', True):
+        return max(0.0, float(state.get("trad", 0.0)))
+
+    # Prefer the first actual RMD year if it exists in the path, because that reflects the
+    # start-of-RMD problem the governor is trying to solve. Fall back to the last pre-RMD year.
+    rmd_rows = df.loc[df["Year"] >= rmd_start]
+    if not rmd_rows.empty:
+        return max(0.0, float(rmd_rows.iloc[0].get("SOY Trad", rmd_rows.iloc[0].get("EOY Trad", 0.0))))
+
+    pre_rmd_rows = df.loc[df["Year"] == (rmd_start - 1)]
+    if not pre_rmd_rows.empty:
+        return max(0.0, float(pre_rmd_rows.iloc[0].get("EOY Trad", 0.0)))
+
+    return max(0.0, float(df.iloc[-1].get("EOY Trad", state.get("trad", 0.0))))
 
 
 
@@ -3768,43 +4827,77 @@ def get_target_bracket_top(year: int, label: str) -> float:
 
 
 
-def estimate_future_marginal_rate(year: int, state: dict, params: dict) -> dict:
+def estimate_future_marginal_rate(year: int, state: dict, params: dict, projection_cache: dict | None = None) -> dict:
     """
-    Estimate future marginal ordinary-income tax rate based on the first RMD-era year.
-    Uses projected traditional balance, projected Social Security, and current earned-income schedule.
+    Estimate the future *combined* marginal cost of ordinary income in the first RMD-era
+    year using the shared simulation path.
+
+    This uses a finite-difference bump in ordinary income so the estimate captures:
+    - federal marginal brackets,
+    - Social Security taxation interaction,
+    - and state tax.
     """
-    growth = float(params["growth"])
     future_year = max(int(params["household_rmd_start"]), year + 1)
 
-    years_forward = max(0, future_year - year)
-    projected_trad = float(state.get("trad", 0.0)) * ((1.0 + growth) ** years_forward)
+    path = run_projection_from_state(
+        start_year=year,
+        starting_state=dict(state),
+        params=params,
+        first_year_conversion=0.0,
+        later_year_conversion=0.0,
+        projection_cache=projection_cache,
+    )
+    df = path.get("df")
+    if df is None or getattr(df, 'empty', True):
+        projected_trad = max(0.0, float(state.get("trad", 0.0)))
+        owner_ss = float(params["owner_ss_annual"]) if future_year >= int(params["owner_ss_start"]) else 0.0
+        spouse_ss = float(params["spouse_ss_annual"]) if future_year >= int(params["spouse_ss_start"]) else 0.0
+        total_ss = owner_ss + spouse_ss
+        earned_income = get_earned_income_for_year(future_year, params)
+        projected_rmd = estimate_household_rmd_for_year(future_year, projected_trad, params)
+        base_tax_info = calculate_federal_tax(
+            other_ordinary_income=earned_income + projected_rmd,
+            total_ss=total_ss,
+            year=future_year,
+            realized_ltcg=0.0,
+        )
+    else:
+        future_rows = df.loc[df["Year"] == future_year]
+        target_row = future_rows.iloc[0].to_dict() if not future_rows.empty else df.iloc[-1].to_dict()
+        projected_trad = float(target_row.get("SOY Trad", target_row.get("EOY Trad", 0.0)))
+        projected_rmd = float(target_row.get("RMD Income Component", 0.0))
+        total_ss = float(target_row.get("Total SS", 0.0))
+        earned_income = float(target_row.get("Earned Income", 0.0))
+        realized_ltcg = float(target_row.get("Brokerage Realized LTCG", 0.0))
+        base_tax_info = calculate_federal_tax(
+            other_ordinary_income=earned_income + projected_rmd,
+            total_ss=total_ss,
+            year=future_year,
+            realized_ltcg=realized_ltcg,
+        )
 
-    owner_ss = float(params["owner_ss_annual"]) if future_year >= int(params["owner_ss_start"]) else 0.0
-    spouse_ss = float(params["spouse_ss_annual"]) if future_year >= int(params["spouse_ss_start"]) else 0.0
-    total_ss = owner_ss + spouse_ss
-
-    earned_income = 0.0
-    if int(params.get("earned_income_start_year", START_YEAR)) <= future_year <= int(params.get("earned_income_end_year", START_YEAR - 1)):
-        earned_income = float(params.get("earned_income_annual", 0.0))
-
-    projected_rmd = estimate_household_rmd_for_year(future_year, projected_trad, params)
-
-    tax_info = calculate_federal_tax(
-        other_ordinary_income=earned_income + projected_rmd,
+    state_tax_rate = float(params.get("state_tax_rate", 0.0399))
+    bump = 1000.0
+    bumped_tax_info = calculate_federal_tax(
+        other_ordinary_income=earned_income + projected_rmd + bump,
         total_ss=total_ss,
         year=future_year,
-        realized_ltcg=0.0,
+        realized_ltcg=0.0 if 'realized_ltcg' not in locals() else realized_ltcg,
     )
+    base_combined_tax = float(base_tax_info["federal_tax"]) + max(0.0, float(base_tax_info["ordinary_taxable_income"] + base_tax_info.get("ltcg_taxable_income", 0.0))) * state_tax_rate
+    bumped_combined_tax = float(bumped_tax_info["federal_tax"]) + max(0.0, float(bumped_tax_info["ordinary_taxable_income"] + bumped_tax_info.get("ltcg_taxable_income", 0.0))) * state_tax_rate
+    combined_marginal_rate = max(0.0, (bumped_combined_tax - base_combined_tax) / bump)
 
     return {
         "future_year": future_year,
         "projected_trad_balance": projected_trad,
         "projected_future_rmd": projected_rmd,
         "projected_future_total_ss": total_ss,
-        "projected_future_taxable_ss": float(tax_info["taxable_ss"]),
-        "projected_future_ordinary_income": float(earned_income + projected_rmd + tax_info["taxable_ss"]),
-        "estimated_future_marginal_rate": float(tax_info["marginal_rate"]),
-        "estimated_future_ordinary_taxable_income": float(tax_info["ordinary_taxable_income"]),
+        "projected_future_taxable_ss": float(base_tax_info["taxable_ss"]),
+        "projected_future_ordinary_income": float(earned_income + projected_rmd + base_tax_info["taxable_ss"]),
+        "estimated_future_marginal_rate": float(combined_marginal_rate),
+        "estimated_future_federal_marginal_rate": float(base_tax_info["marginal_rate"]),
+        "estimated_future_ordinary_taxable_income": float(base_tax_info["ordinary_taxable_income"]),
     }
 
 
@@ -4038,12 +5131,19 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     baseline_row = dict(baseline_path["first_row"])
     baseline_ordinary_taxable = float(baseline_row.get("Ordinary Taxable Income", 0.0))
     target_headroom = max(0.0, float(target_top) - baseline_ordinary_taxable)
-    future_rate_info = estimate_future_marginal_rate(year, state, params)
+    future_rate_info = estimate_future_marginal_rate(year, state, params, projection_cache=projection_cache)
     future_rate = float(future_rate_info["estimated_future_marginal_rate"])
 
     max_test = min(cap, floor_to_step(target_headroom, step_size))
-    target_pressure_conversion = estimate_target_trad_pressure_conversion(year, state, params, step_size, max_test)
     projected_trad_at_rmd_start = project_trad_balance_at_rmd_start(year, state, params, projection_cache=projection_cache)
+    target_pressure_conversion = estimate_target_trad_pressure_conversion(
+        year,
+        state,
+        params,
+        step_size,
+        max_test,
+        projected_trad_at_rmd_start=projected_trad_at_rmd_start,
+    )
     target_gap_at_rmd_start = max(0.0, projected_trad_at_rmd_start - float(params.get("target_trad_balance", 0.0)))
     target_lane_active = bool(
         params.get("target_trad_balance_enabled", False)
@@ -4118,10 +5218,12 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         else:
             effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
 
-            # Clean future-rate logic:
-            # Use the projected future marginal rate as the avoided-rate anchor instead of
-            # lifetime-delta percentages, which can be distorted by multi-year threshold effects.
-            future_effective_blended = float(future_rate)
+            # Blend the true delta-based avoided-cost signal with the future RMD-era marginal-rate
+            # estimate. The stronger of the two is the relevant avoided-rate anchor.
+            future_effective_blended = max(
+                float(future_rate),
+                float(stabilized_future_avoided_rate(future_effective, future_rate, current_rate)),
+            )
             net_benefit_rate = future_effective_blended - effective_current_adjusted
         # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
         post_rmd_hurdle = 0.05 if year >= int(params["household_rmd_start"]) else 0.0
@@ -4347,7 +5449,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             "brokerage": chosen_row["SOY Brokerage"],
             "brokerage_basis": chosen_row["SOY Brokerage Basis"],
             "cash": chosen_row["SOY Cash"],
-        }), params)
+        }), params, projection_cache=projection_cache)
         chosen_row["Estimated Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"])
         tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(chosen_row)
         chosen_row["Tax Funding Source"] = " + ".join(tax_sources) if tax_sources else "none"
@@ -4451,7 +5553,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                 pass
             decision_frames.append(diag_df)
 
-        chosen_row["Override Active"] = bool(chosen_row.get("Selection Mode Detail", "") == "TRAD_TARGET_OVERRIDE")
+        chosen_row["Override Active"] = bool(chosen_row.get("Selection Mode Detail", "") == "HARD_TARGET_OVERRIDE")
         chosen_row["Override Cost"] = float(chosen_row.get("Delta Total Tax", 0.0)) if chosen_row["Override Active"] else 0.0
         chosen_row["Future Benefit"] = (
             max(
@@ -4465,7 +5567,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             )
             if chosen_row["Override Active"] else 0.0
         )
-        chosen_row["Net Lifetime Value"] = float(chosen_row["Future Benefit"] - chosen_row["Override Cost"]) if chosen_row["Override Active"] else 0.0
+        chosen_row["Governor Mode Summary"] = str(chosen_row.get("Selection Mode Detail", "ACA_HEADROOM" if coverage["aca_lives"] > 0 else "BETR"))
 
         chosen_rows.append(chosen_row)
 
@@ -4508,6 +5610,8 @@ def run_ss_optimizer(
     base_snapshot = copy.deepcopy(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
+    max_conversion = sanitize_governor_max_conversion(float(max_conversion))
+    step_size = sanitize_governor_step_size(float(step_size))
 
     results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
@@ -4524,7 +5628,7 @@ def run_ss_optimizer(
             scenario_inputs["spouse_claim_age"] = int(spouse_age)
 
             try:
-                run_result = run_model_break_even_governor(scenario_inputs, sanitize_governor_max_conversion(max_conversion), step_size)
+                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
             except Exception as exc:
                 st.session_state["ss_optimizer_progress_index"] = combo_index
                 st.session_state["ss_optimizer_partial_results"] = results
@@ -4552,53 +5656,33 @@ def run_ss_optimizer(
                     "error_message": st.session_state["ss_optimizer_error"],
                 }, engine="ss_optimizer")
 
-            trad_penalty_applied = float(trad_balance_penalty_lambda) * float(run_result["ending_trad_balance"])
-            metrics = build_strategy_metrics(run_result)
-            row = {
-                "Owner SS Age": int(owner_age),
-                "Spouse SS Age": int(spouse_age),
-                "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
-                "Final Net Worth": float(run_result["final_net_worth"]),
-                "After-Tax Legacy": float(metrics["after_tax_legacy"]),
-                "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
-                "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
-                "Ending Roth Balance": float(metrics["ending_roth_balance"]),
-                "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
-                "Ending Cash Balance": float(metrics["ending_cash_balance"]),
-                "Stability Value": float(metrics["stability_value"]),
-                "Risk Value": float(metrics["risk_value"]),
-                "Final Household SS Income": float(metrics["final_household_ss_income"]),
-                "Survivor SS Income": float(metrics["survivor_ss_income"]),
-                "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
-                "Total Federal Tax": float(run_result["total_federal_taxes"]),
-                "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
-                "Total ACA Cost": float(run_result["total_aca_cost"]),
-                "Total IRMAA Cost": float(run_result["total_irmaa_cost"]),
-                "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
-                "Total Conversions": float(run_result["total_conversions"]),
-                "Ending Traditional IRA Balance": float(run_result["ending_trad_balance"]),
-                "First IRMAA Year": run_result["first_irmaa_year"],
-                "Max MAGI": float(run_result["max_magi"]),
-                "ACA Hit Years": int(run_result["aca_hit_years"]),
-                "IRMAA Hit Years": int(run_result["irmaa_hit_years"]),
-                "Traditional IRA Penalty Applied": trad_penalty_applied,
-                "Score": float(run_result["final_net_worth"]) - trad_penalty_applied,
-            }
+            row = build_ss_optimizer_result_row(
+                run_result,
+                owner_age,
+                spouse_age,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            )
             results.append(row)
             st.session_state["ss_optimizer_partial_results"] = results
             st.session_state["ss_optimizer_progress_index"] = combo_index + 1
             st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
             progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
 
-        results_df = pd.DataFrame(results).sort_values(
-            by=["Score", "Final Net Worth"],
-            ascending=[False, False],
-        ).reset_index(drop=True)
-        results_df.insert(0, "Rank", range(1, len(results_df) + 1))
+        scoring_preferences = extract_scoring_preferences(inputs)
+        shared_outputs = build_scored_strategy_outputs(
+            results,
+            inputs=inputs,
+            selected_profile_name=profile_name,
+            preferences=scoring_preferences,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            shortlist_top_n=5,
+        )
+        scoring_context = shared_outputs["scoring_context"]
+        results_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "ss optimizer ranked results")
+        profile_shortlists = shared_outputs["profile_shortlists"]
 
-        top_10_df = results_df.head(10).copy()
-        top_3 = results_df.head(3).copy()
-        profile_shortlists = build_profile_shortlists_from_optimizer_rows(results, preferences=extract_scoring_preferences(inputs))
+        top_10_df = canonicalize_optimizer_result_df(results_df.head(10).copy(), "ss optimizer top 10")
+        top_3 = canonicalize_optimizer_result_df(results_df.head(3).copy(), "ss optimizer top 3")
 
         compare_metrics = [
             ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
@@ -4615,7 +5699,7 @@ def run_ss_optimizer(
             ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
             ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
             ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
-            ("Score", lambda r: format_dollars(r["Score"])),
+            ("Selected Score", lambda r: format_dollars(get_selected_score_value(r))),
         ]
 
         compare_rows = []
@@ -4660,10 +5744,12 @@ def run_ss_optimizer(
             "top_10_df": top_10_df,
             "comparison_df": comparison_df,
             "profile_shortlists": profile_shortlists,
+            "raw_results_df": pd.DataFrame(results),
             "best_result": best_result,
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": copy.deepcopy(scoring_context),
             "profile_name": None,
             "optimizer_is_profile_neutral": True,
             "completed": True,
@@ -4680,10 +5766,12 @@ def run_ss_optimizer(
             "comparison_df": comparison_df,
             "comparison_display_df": comparison_df,
             "profile_shortlists": profile_shortlists,
+            "raw_results_df": pd.DataFrame(results),
             "best_result": best_result,
             "best_validation": best_validation,
             "best_rerun_summary": best_rerun_summary,
             "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": copy.deepcopy(scoring_context),
             "profile_name": profile_name,
             "applied_preset_note": "",
             "interrupted_partial_df": None,
@@ -4700,17 +5788,95 @@ def run_ss_optimizer(
             pass
 
 
-def render_ss_optimizer_results(result: dict):
-    st.subheader("Social Security Optimizer Summary")
-    st.write(f"Scoring lambda (Trad IRA penalty): {result['trad_balance_penalty_lambda']:.2f}")
-    if result.get("optimizer_is_profile_neutral", False):
-        st.caption("The full 81-combination optimizer run is profile-neutral at the engine level. The Top 5 profile tabs below rescore that same 81-row result set independently for each planning profile using the same scoring logic as Quick Strategy Recommendation.")
-    if result["best_result"] is not None:
-        best = result["best_result"]
-        st.write(f"Best SS Ages: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
-        st.write(f"Best Score: {format_dollars(best['Score'])}")
-        st.write(f"Best Final Net Worth: {format_dollars(best['Final Net Worth'])}")
-        st.write(f"Best Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
+
+def render_ss_optimizer_results(result: dict, planning_profile: str, current_preferences: dict):
+    st.subheader("Full 81-Combination Scan Results")
+    st.caption("Use this section for exhaustive validation or to explore alternatives after you review the quick scan and Break-Even Governor results.")
+
+    quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+    all_results_df = result.get("all_results_df", pd.DataFrame())
+    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty:
+        base_context_inputs = collect_scenario_state()
+        dynamic_scoring_context = result.get("scoring_context")
+        if not isinstance(dynamic_scoring_context, dict) or not dynamic_scoring_context:
+            dynamic_scoring_context = build_strategy_scoring_context(inputs=base_context_inputs, metrics_list=all_results_df.to_dict("records"))
+        dynamic_shortlists = build_profile_shortlists_from_optimizer_rows(
+            all_results_df.to_dict("records"),
+            preferences=current_preferences or {},
+            trad_balance_penalty_lambda=float(result.get("trad_balance_penalty_lambda", 0.0)),
+            scoring_context=dynamic_scoring_context,
+        )
+    else:
+        dynamic_shortlists = {}
+
+    current_profile_shortlist = dynamic_shortlists.get(planning_profile, pd.DataFrame())
+    profile_best = current_profile_shortlist.iloc[0].to_dict() if isinstance(current_profile_shortlist, pd.DataFrame) and not current_profile_shortlist.empty else None
+    raw_best = result.get("best_result")
+
+    if quick_result is not None and profile_best is not None:
+        ranked_rows = quick_result.get("ranked_rows", []) or []
+        quick_winner = ranked_rows[0] if ranked_rows else None
+
+        def _f(row: dict, key: str) -> float:
+            try:
+                return float(row.get(key, 0.0))
+            except Exception:
+                return 0.0
+
+        if quick_winner is not None:
+            quick_strategy = str(quick_winner.get("Strategy", ""))
+            best_strategy = str(profile_best.get("Strategy", ""))
+            if quick_strategy == best_strategy:
+                st.success(f"Exhaustive search across all 81 combinations confirms the current-profile recommendation ({quick_strategy}).")
+            else:
+                st.warning(f"Exhaustive search across all 81 combinations found a stronger current-profile strategy than the current quick scan ({quick_strategy} → {best_strategy}).")
+
+            quick_net = _f(quick_winner, "Final Net Worth")
+            quick_legacy = _f(quick_winner, "After-Tax Legacy")
+            quick_ss = _f(quick_winner, "Final Household SS Income")
+            quick_trad = _f(quick_winner, "Ending Traditional IRA Balance")
+
+            best_net = _f(profile_best, "Net Worth")
+            best_legacy = _f(profile_best, "After-Tax Legacy")
+            best_ss = _f(profile_best, "Final Household SS Income")
+            best_trad = _f(profile_best, "Trad IRA @ End")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Quick scan winner**")
+                st.write(quick_strategy)
+            with c2:
+                st.markdown(f"**Best exhaustive result for {planning_profile}**")
+                st.write(best_strategy)
+
+            st.markdown(
+                "\n".join([
+                    "**Difference summary**",
+                    f"- Final Net Worth: {format_signed_dollars(best_net - quick_net)}",
+                    f"- After-Tax Legacy: {format_signed_dollars(best_legacy - quick_legacy)}",
+                    f"- Household Social Security Income: {format_signed_dollars(best_ss - quick_ss)}/year",
+                    f"- Ending Traditional IRA: {format_signed_dollars(best_trad - quick_trad)}",
+                ])
+            )
+
+            materiality_score = max(
+                abs(best_net - quick_net),
+                abs(best_legacy - quick_legacy),
+                abs(best_ss - quick_ss) * 15.0,
+            )
+            if materiality_score < 100000:
+                st.info("Differences are small. The quick scan is already close to the full 81-combination search, so the exhaustive result is mostly a confirmation.")
+            else:
+                st.info("Differences are meaningful. The exhaustive result is worth a real look before you lock in a Social Security strategy.")
+
+    st.markdown(f"**Traditional IRA lambda weight:** {result['trad_balance_penalty_lambda']:.2f}")
+    st.caption("Full 81 results below are now ranked with the same scoring pipeline used everywhere else. The lambda weight is part of that unified score rather than a separate raw-only ranking.")
+    if raw_best is not None:
+        best = raw_best
+        st.write(f"Current-profile exhaustive winner: {int(best['Owner SS Age'])}/{int(best['Spouse SS Age'])}")
+        st.write(f"Unified score: {get_selected_score_value(best):.2f}")
+        st.write(f"Final Net Worth: {format_dollars(best['Final Net Worth'])}")
+        st.write(f"Ending Traditional IRA Balance: {format_dollars(best['Ending Traditional IRA Balance'])}")
 
     if result.get("best_validation") is not None:
         validation = result["best_validation"]
@@ -4722,62 +5888,44 @@ def render_ss_optimizer_results(result: dict):
 
     if result.get("interrupted_partial_df") is not None or not result.get("completed", True):
         msg = result.get("error_message") or "A prior optimizer run was interrupted before all 81 combinations finished."
-        st.warning(f"{msg} Resume it to complete the full result set.")
+        st.warning(f"{msg} Resume it to complete the full run.")
 
     if not result.get("completed", True):
         return
 
-    st.subheader("Top 10 SS Strategies")
-    st.caption("This table is the raw optimizer ranking sorted by Final Net Worth minus the Traditional IRA penalty lambda. It is not a planning-profile ranking.")
-    st.dataframe(
-        result["top_10_df"].style.format({
-            "Final Net Worth": "${:,.0f}",
-            "Total Federal Tax": "${:,.0f}",
-            "Total State Tax": "${:,.0f}",
-            "Total ACA Cost": "${:,.0f}",
-            "Total IRMAA Cost": "${:,.0f}",
-            "Total Government Drag": "${:,.0f}",
-            "Total Conversions": "${:,.0f}",
-            "Ending Traditional IRA Balance": "${:,.0f}",
-            "Traditional IRA Penalty Applied": "${:,.0f}",
-            "Max MAGI": "${:,.0f}",
-            "Score": "${:,.0f}",
-        }),
-        use_container_width=True,
-    )
-    st.download_button(
-        "Download Top 10 SS Strategies (CSV)",
-        data=result["top_10_export_df"].to_csv(index=False),
-        file_name="top_10_ss_strategies.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    st.caption("Archived exploratory views removed from the live app: Top 10 SS Strategies and Top 3 Side-by-Side Comparison are preserved separately, but no longer shown in the main workflow.")
 
-    st.subheader("Top 3 Side-by-Side Comparison")
-    st.dataframe(result["comparison_display_df"], use_container_width=True)
+    ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v139.json"
     st.download_button(
-        "Download Top 3 Comparison (CSV)",
-        data=result["comparison_display_df"].to_csv(index=False),
-        file_name="top_3_ss_comparison.csv",
-        mime="text/csv",
+        "Export SS Optimizer Results (JSON)",
+        data=build_ss_optimizer_export_payload(result),
+        file_name=ss_export_name,
+        mime="application/json",
         use_container_width=True,
     )
+    st.caption("This JSON is an export for outside review. It does not open in Snapshot Viewer.")
 
-    profile_shortlists = result.get("profile_shortlists", {}) or {}
-    if profile_shortlists:
-        st.subheader("Top 5 combinations by planning profile")
-        st.caption("These shortlists are derived from the full 81-combination optimizer run, then rescored for each planning profile using the same underlying results. If you change ranking preferences later, use the rerank button below instead of rerunning the full 81-combination engine.")
-        tabs = st.tabs(list(profile_shortlists.keys()))
-        for tab, profile_name in zip(tabs, profile_shortlists.keys()):
+    if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
+        try:
+            if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
+                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only.")
+        except Exception:
+            pass
+
+    if dynamic_shortlists:
+        st.subheader("Top 5 exhaustive combinations by planning profile")
+        st.caption("These shortlists are rebuilt automatically from the saved 81-row fact set using the same unified scoring pipeline. The Selected Score column is the active ranking score for that tab. The separate profile score columns in other tables are stored reference scores, not alternate ranking paths for this tab.")
+        st.caption(f"Active modifiers applied now: {describe_active_scoring_preferences(current_preferences)}")
+        tabs = st.tabs(list(dynamic_shortlists.keys()))
+        for tab, tab_profile_name in zip(tabs, dynamic_shortlists.keys()):
             with tab:
-                shortlist_df = profile_shortlists.get(profile_name, pd.DataFrame())
+                shortlist_df = dynamic_shortlists.get(tab_profile_name, pd.DataFrame())
                 if shortlist_df.empty:
                     st.info("No shortlist available for this profile yet.")
                     continue
-                st.caption("Score breakdown columns show which forces are helping or hurting each strategy for this profile. Positive columns help the score. Penalty columns subtract from it.")
                 st.dataframe(
                     shortlist_df.style.format({
-                        "Score": "{:.2f}",
+                        "Selected Score": "{:.2f}",
                         "Net Worth": "${:,.0f}",
                         "After-Tax Legacy": "${:,.0f}",
                         "Effective Legacy Value": "${:,.0f}",
@@ -4802,49 +5950,54 @@ def render_ss_optimizer_results(result: dict):
                     use_container_width=True,
                 )
                 top_row = shortlist_df.iloc[0]
-                st.caption("This button loads the selected optimizer shortlist winner into the Governor below. It does not rerun the optimizer.")
+                with st.expander(f"Why {top_row['Strategy']} is currently winning for {tab_profile_name}", expanded=False):
+                    render_profile_winner_diagnostics(top_row, tab_profile_name)
+                st.caption("This button loads the selected exhaustive shortlist winner into the Governor below. It does not rerun the optimizer.")
                 st.button(
-                    f"Apply {profile_name} winner {top_row['Strategy']} to Governor",
-                    key=f"profile_shortlist_open_{profile_name}_{top_row['Strategy']}",
+                    f"Apply {tab_profile_name} winner {top_row['Strategy']} to Governor",
+                    key=f"profile_shortlist_open_{tab_profile_name}_{top_row['Strategy']}",
                     on_click=launch_conversion_optimizer_from_strategy,
-                    args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", profile_name),
+                    args=(int(top_row["Owner SS Age"]), int(top_row["Spouse SS Age"]), "optimizer_profile_shortlist", tab_profile_name),
                     use_container_width=True,
                 )
                 st.download_button(
-                    f"Download {profile_name} Top 5 (CSV)",
+                    f"Download {tab_profile_name} Top 5 (CSV)",
                     data=shortlist_df.to_csv(index=False),
-                    file_name=f"ss_optimizer_top5_{profile_name.lower().replace(' ', '_').replace('-', '_')}.csv",
+                    file_name=f"ss_optimizer_top5_{tab_profile_name.lower().replace(' ', '_').replace('-', '_')}.csv",
                     mime="text/csv",
                     use_container_width=True,
-                    key=f"download_profile_shortlist_{profile_name}",
+                    key=f"download_profile_shortlist_{tab_profile_name}",
                 )
 
     with st.expander("All 81 SS combinations"):
+        st.caption("Full ranked universe using the current profile, active modifiers, and lambda penalty.")
         st.dataframe(
-            result["all_results_df"].style.format({
+            all_results_df.style.format({
                 "Final Net Worth": "${:,.0f}",
+                "After-Tax Legacy": "${:,.0f}",
+                "Ending Roth Balance": "${:,.0f}",
+                "Ending Traditional IRA Balance": "${:,.0f}",
+                "Ending Brokerage Balance": "${:,.0f}",
                 "Total Federal Tax": "${:,.0f}",
                 "Total State Tax": "${:,.0f}",
                 "Total ACA Cost": "${:,.0f}",
                 "Total IRMAA Cost": "${:,.0f}",
                 "Total Government Drag": "${:,.0f}",
                 "Total Conversions": "${:,.0f}",
-                "Ending Traditional IRA Balance": "${:,.0f}",
                 "Traditional IRA Penalty Applied": "${:,.0f}",
+                "Risk Value": "{:,.0f}",
                 "Max MAGI": "${:,.0f}",
                 "Score": "${:,.0f}",
             }),
             use_container_width=True,
         )
         st.download_button(
-            "Download All SS Results (CSV)",
+            "Download All 81 SS Results (CSV)",
             data=result["all_results_export_df"].to_csv(index=False),
             file_name="all_ss_results.csv",
             mime="text/csv",
             use_container_width=True,
         )
-
-
 
 def get_first_irmaa_cliff_threshold(year: int) -> float | None:
     table = get_irmaa_table(year)
@@ -6233,7 +7386,6 @@ def get_app_page() -> str:
 
 def render_top_nav(current_page: str) -> None:
     ensure_default_state()
-    render_scenario_identity_bar(current_page)
     nav1, nav2, nav3, nav4 = st.columns([1, 1, 1, 1])
     with nav1:
         st.button("Home", on_click=go_to_page, args=("home",), disabled=current_page == "home", use_container_width=True)
@@ -6254,16 +7406,15 @@ def render_top_nav(current_page: str) -> None:
             use_container_width=True,
         )
     with nav4:
-        st.button(
-            "Snapshot Viewer",
-            on_click=go_to_page,
-            args=("snapshot",),
-            disabled=current_page == "snapshot",
-            use_container_width=True,
-        )
+        if st.button("Reset App State", key=f"reset_app_state_nav_{current_page}", use_container_width=True):
+            preserved_page = st.session_state.get("app_page", "home")
+            st.session_state.clear()
+            st.session_state["app_state_version"] = APP_STATE_VERSION
+            st.session_state["app_page"] = preserved_page
+            st.rerun()
+    render_scenario_identity_bar(current_page)
     st.divider()
     render_scenario_manager(current_page)
-    render_snapshot_open_controls()
 
 
 def render_home_page() -> None:
@@ -6271,7 +7422,7 @@ def render_home_page() -> None:
     st.title("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
-        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Break-Even Governor for the full lifetime governor and SS optimizer."
+        "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
     )
     render_top_nav("home")
     st.info(
@@ -6279,128 +7430,128 @@ def render_home_page() -> None:
     )
 
 
+
 def render_shared_household_inputs() -> dict:
-    st.header("Household Inputs")
+    with st.expander("Household Inputs", expanded=False):
+        owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
+        spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
 
-    owner_claim_age = st.slider("Owner SS Claim Age", 62, 70, int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])), key="owner_claim_age")
-    spouse_claim_age = st.slider("Spouse SS Claim Age", 62, 70, int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])), key="spouse_claim_age")
+        owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
+        spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
 
-    owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
-    spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
+        col1, col2 = st.columns(2)
 
-    col1, col2 = st.columns(2)
+        with col1:
+            trad = st.number_input("Traditional IRA Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
+            roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
+            brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
+            brokerage_basis = st.number_input(
+                "Brokerage Cost Basis",
+                min_value=0.0,
+                value=float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+                step=1000.0,
+                help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
+                key="brokerage_basis",
+            )
+            cash = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])), step=1000.0, key="cash")
 
-    with col1:
-        trad = st.number_input("Traditional IRA Balance", min_value=0.0, value=float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])), step=1000.0, key="trad")
-        roth = st.number_input("Roth Balance", min_value=0.0, value=float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])), step=1000.0, key="roth")
-        brokerage = st.number_input("Brokerage Balance", min_value=0.0, value=float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])), step=1000.0, key="brokerage")
-        brokerage_basis = st.number_input(
-            "Brokerage Cost Basis",
-            min_value=0.0,
-            value=float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
-            step=1000.0,
-            help="Tax basis of the current brokerage balance. Realized gains on withdrawals are based on this.",
-            key="brokerage_basis",
+        with col2:
+            growth = st.number_input("Growth Rate (%)", min_value=0.0, value=float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])), step=0.1, key="growth_pct") / 100
+            annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])), step=1000.0, key="annual_spending")
+            spending_inflation_rate = st.number_input(
+                "Spending Inflation Rate (%)",
+                min_value=0.0,
+                value=float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])),
+                step=0.1,
+                help="Applied to spending each year before any retirement-smile multiplier.",
+                key="spending_inflation_rate_pct",
+            ) / 100
+            owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
+            spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
+
+    with st.expander("Retirement Smile Spending", expanded=False):
+        sm1, sm2 = st.columns(2)
+        with sm1:
+            retirement_smile_enabled = st.checkbox(
+                "Enable Retirement Smile Spending",
+                value=bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+                help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
+                key="retirement_smile_enabled",
+            )
+            go_go_end_age = st.number_input(
+                "Go-Go Ends At Age",
+                min_value=0,
+                value=int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+                step=1,
+                help="Applies to the older household member's age for the modeled year.",
+                key="go_go_end_age",
+            )
+            slow_go_end_age = st.number_input(
+                "Slow-Go Ends At Age",
+                min_value=0,
+                value=int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+                step=1,
+                help="No-go spending starts at this age and later.",
+                key="slow_go_end_age",
+            )
+        with sm2:
+            go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])), step=0.05, format="%.2f", key="go_go_multiplier")
+            slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])), step=0.05, format="%.2f", key="slow_go_multiplier")
+            no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])), step=0.05, format="%.2f", key="no_go_multiplier")
+
+        st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
+
+    with st.expander("ACA Coverage", expanded=False):
+        cov1, cov2 = st.columns(2)
+        with cov1:
+            primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
+        with cov2:
+            spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
+
+    with st.expander("Earned Income", expanded=False):
+        sync_conversion_earned_income_widget_state()
+        earn1, earn2, earn3 = st.columns(3)
+        with earn1:
+            earned_income_annual = st.number_input(
+                "Annual Wage Income",
+                min_value=0.0,
+                value=float(st.session_state.get("conversion_earned_income_annual_input", st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))),
+                step=1000.0,
+                key="conversion_earned_income_annual_input",
+                on_change=on_conversion_earned_income_change,
+            )
+        with earn2:
+            earned_income_start_year = st.number_input(
+                "Wage Income Start Year",
+                min_value=START_YEAR,
+                value=int(st.session_state.get("conversion_earned_income_start_year_input", st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))),
+                step=1,
+                key="conversion_earned_income_start_year_input",
+                on_change=on_conversion_earned_income_change,
+            )
+        with earn3:
+            earned_income_end_year = st.number_input(
+                "Wage Income End Year",
+                min_value=START_YEAR,
+                value=int(st.session_state.get("conversion_earned_income_end_year_input", st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))),
+                step=1,
+                key="conversion_earned_income_end_year_input",
+                on_change=on_conversion_earned_income_change,
+            )
+
+    with st.expander("Tax Funding", expanded=False):
+        conversion_tax_funding_policy = st.selectbox(
+            "Preferred tax funding source",
+            [
+                "Cash then Brokerage",
+                "Brokerage only",
+                "Cash only",
+                "Cash then Brokerage then Trad then Roth",
+            ],
+            index=0,
+            key="conversion_tax_funding_policy",
         )
-        cash = st.number_input("Cash", min_value=0.0, value=float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])), step=1000.0, key="cash")
-
-    with col2:
-        growth = st.number_input("Growth Rate (%)", min_value=0.0, value=float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])), step=0.1, key="growth_pct") / 100
-        annual_spending = st.number_input("Base Annual Spending Need", min_value=0.0, value=float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])), step=1000.0, key="annual_spending")
-        spending_inflation_rate = st.number_input(
-            "Spending Inflation Rate (%)",
-            min_value=0.0,
-            value=float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])),
-            step=0.1,
-            help="Applied to spending each year before any retirement-smile multiplier.",
-            key="spending_inflation_rate_pct",
-        ) / 100
-        owner_ss_base = st.number_input("Owner Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])), step=1000.0, key="owner_ss_base")
-        spouse_ss_base = st.number_input("Spouse Annual SS at Age 67", min_value=0.0, value=float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])), step=1000.0, key="spouse_ss_base")
-
-    st.header("Retirement Smile Spending")
-    sm1, sm2 = st.columns(2)
-    with sm1:
-        retirement_smile_enabled = st.checkbox(
-            "Enable Retirement Smile Spending",
-            value=bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
-            help="Uses higher spending in go-go years, lower spending in slow-go years, and higher spending again in no-go years.",
-            key="retirement_smile_enabled",
-        )
-        go_go_end_age = st.number_input(
-            "Go-Go Ends At Age",
-            min_value=0,
-            value=int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
-            step=1,
-            help="Applies to the older household member's age for the modeled year.",
-            key="go_go_end_age",
-        )
-        slow_go_end_age = st.number_input(
-            "Slow-Go Ends At Age",
-            min_value=0,
-            value=int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
-            step=1,
-            help="No-go spending starts at this age and later.",
-            key="slow_go_end_age",
-        )
-    with sm2:
-        go_go_multiplier = st.number_input("Go-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])), step=0.05, format="%.2f", key="go_go_multiplier")
-        slow_go_multiplier = st.number_input("Slow-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])), step=0.05, format="%.2f", key="slow_go_multiplier")
-        no_go_multiplier = st.number_input("No-Go Spending Multiplier", min_value=0.0, value=float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])), step=0.05, format="%.2f", key="no_go_multiplier")
-
-    st.caption("Modeled spending = base spending x annual spending inflation x phase multiplier.")
-
-    st.header("Coverage Timing")
-    cov1, cov2 = st.columns(2)
-    with cov1:
-        primary_aca_end_year = st.number_input("Primary ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])), step=1, key="primary_aca_end_year")
-    with cov2:
-        spouse_aca_end_year = st.number_input("Spouse ACA End Year", min_value=START_YEAR, value=int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])), step=1, key="spouse_aca_end_year")
-
-    st.header("Earned Income")
-    sync_conversion_earned_income_widget_state()
-    earn1, earn2, earn3 = st.columns(3)
-    with earn1:
-        earned_income_annual = st.number_input(
-            "Annual Wage Income",
-            min_value=0.0,
-            value=float(st.session_state.get("conversion_earned_income_annual_input", st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"]))),
-            step=1000.0,
-            key="conversion_earned_income_annual_input",
-            on_change=on_conversion_earned_income_change,
-        )
-    with earn2:
-        earned_income_start_year = st.number_input(
-            "Wage Income Start Year",
-            min_value=START_YEAR,
-            value=int(st.session_state.get("conversion_earned_income_start_year_input", st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"]))),
-            step=1,
-            key="conversion_earned_income_start_year_input",
-            on_change=on_conversion_earned_income_change,
-        )
-    with earn3:
-        earned_income_end_year = st.number_input(
-            "Wage Income End Year",
-            min_value=START_YEAR,
-            value=int(st.session_state.get("conversion_earned_income_end_year_input", st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"]))),
-            step=1,
-            key="conversion_earned_income_end_year_input",
-            on_change=on_conversion_earned_income_change,
-        )
-
-    st.header("Tax Funding Policy")
-    conversion_tax_funding_policy = st.selectbox(
-        "Preferred tax funding source",
-        [
-            "Cash then Brokerage",
-            "Brokerage only",
-            "Cash only",
-            "Cash then Brokerage then Trad then Roth",
-        ],
-        index=0,
-        key="conversion_tax_funding_policy",
-    )
-    st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
+        st.caption("This build falls back to Trad then Roth if the preferred source is insufficient.")
 
     inputs = {
         "trad": trad,
@@ -6433,567 +7584,148 @@ def render_shared_household_inputs() -> dict:
         "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
         "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
         "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+        "trad_balance_penalty_lambda": float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
     }
     return inputs
 
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.title("Break-Even Governor")
+    st.subheader("Retirement Optimizer")
+    render_top_nav("conversion")
+
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
     selected_source = st.session_state.get("selected_recommendation_source")
     selected_profile = st.session_state.get("selected_recommendation_profile")
     preset_note = st.session_state.get("break_even_governor_preset_note")
     active_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
-    quick_result_snapshot = get_current_result_payload("quick_strategy_recommendation_result")
-    quick_winner_strategy = None
-    if quick_result_snapshot is not None:
-        ranked_rows = quick_result_snapshot.get("ranked_rows", []) or []
-        if ranked_rows:
-            quick_winner_strategy = str(ranked_rows[0].get("Strategy", "")).strip() or None
-    st.success(f"Active SS Strategy in Governor: {active_strategy}")
     applied_notice = st.session_state.get("governor_strategy_applied_notice")
     if applied_notice:
         st.caption(applied_notice)
-    if quick_winner_strategy and quick_winner_strategy != active_strategy:
-        st.warning(f"Quick recommendation winner is {quick_winner_strategy}. Governor is currently set to {active_strategy}.")
-    if selected_strategy:
+    elif selected_strategy and selected_strategy != active_strategy:
         source_text = "" if not selected_source else f" from {str(selected_source).replace('_', ' ')}"
         profile_text = "" if not selected_profile else f" under the {selected_profile} planning profile"
-        st.info(f"Using Social Security claim ages {selected_strategy}{source_text}{profile_text}. You can adjust them below before running the Break-Even Governor.")
+        st.caption(f"Selected strategy context: {selected_strategy}{source_text}{profile_text}.")
     if preset_note:
         st.caption(preset_note)
-    render_top_nav("conversion")
-    
+
     inputs = render_shared_household_inputs()
 
-    st.header("Break-Even Governor Inputs")
     current_max_conversion_value = sanitize_governor_max_conversion(st.session_state.get("max_conversion", DEFAULT_APP_STATE["max_conversion"]))
     if float(current_max_conversion_value) != float(st.session_state.get("max_conversion", current_max_conversion_value)):
         st.session_state["max_conversion"] = float(current_max_conversion_value)
-    max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
+    max_conversion = float(current_max_conversion_value)
     current_step_size_value = sanitize_governor_step_size(st.session_state.get("step_size", DEFAULT_APP_STATE["step_size"]))
     if float(current_step_size_value) != float(st.session_state.get("step_size", current_step_size_value)):
         st.session_state["step_size"] = float(current_step_size_value)
-    step_size = st.number_input(
-        "Break-Even Step Size",
-        min_value=1000.0,
-        value=float(current_step_size_value),
-        step=1000.0,
-        help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
-        key="step_size",
-    )
+    step_size = float(current_step_size_value)
+    cash_sweep_threshold = float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"]))
+    current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
+    state_tax_rate = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"]))
+    target_trad_balance_enabled = bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"]))
+    target_trad_balance = float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"]))
+    target_trad_override_enabled = bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"]))
+    current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
+    target_trad_override_max_rate = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"]))
+    post_aca_target_bracket = str(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))
+    rmd_era_target_bracket = str(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))
+    integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+    validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
 
-    pol1, pol2 = st.columns(2)
-    with pol1:
-        cash_sweep_threshold = st.number_input(
-            "Cash Sweep Threshold",
-            min_value=0.0,
-            value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
-            step=5000.0,
-            help="End-of-year cash above this amount is swept into brokerage.",
-            key="cash_sweep_threshold",
+    st.divider()
+    ss_optimizer_expanded = bool(st.session_state.get("ss_optimizer_expanded", False))
+    if get_current_result_payload("quick_strategy_recommendation_result") is not None or get_current_result_payload("ss_optimizer_last_result") is not None:
+        ss_optimizer_expanded = True
+    with st.expander("SS Optimizer", expanded=ss_optimizer_expanded):
+        st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
+        st.caption("Workflow: set assumptions first, then run Quick Scan for a fast answer or Full 81-Combination Scan for exhaustive validation.")
+        planning_profile = st.selectbox(
+            "Optimize For",
+            list(PROFILE_PRESETS.keys()),
+            index=list(PROFILE_PRESETS.keys()).index(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))),
+            help="Choose the planning lens the recommendation engine should use when ranking quick Social Security strategies.",
+            key="planning_profile",
         )
-    with pol2:
-        current_state_tax_pct = float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])) * 100.0
-        existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
-        if not isinstance(existing_state_tax_display, str):
-            existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
-            st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
-        state_tax_display_value = st.text_input(
-            "State Tax Rate",
-            value=f"{current_state_tax_pct:.2f}%",
-            help="Enter the state tax rate as a percent, for example 4.75%.",
-            key="state_tax_rate_pct_display",
-        )
-        cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
-        try:
-            state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
-        except Exception:
-            state_tax_rate_pct = current_state_tax_pct
-        state_tax_rate = state_tax_rate_pct / 100.0
-        st.session_state["state_tax_rate"] = state_tax_rate
-        normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
-        if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
-            st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
-
-    tg1, tg2 = st.columns(2)
-    with tg1:
-        target_trad_balance_enabled = st.checkbox(
-            "Use Target Traditional IRA Balance Goal",
-            value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
-            help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
-            key="target_trad_balance_enabled",
-        )
-    with tg2:
-        target_trad_balance = st.number_input(
-            "Target Traditional IRA Balance By RMD Start",
-            min_value=0.0,
-            value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
-            step=25000.0,
-            help="Planner goal for remaining Traditional IRA balance by household RMD start.",
-            key="target_trad_balance",
-        )
-
-    ov1, ov2 = st.columns(2)
-    with ov1:
-        target_trad_override_enabled = st.checkbox(
-            "Allow Target Traditional IRA Planner Override",
-            value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
-            help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
-            key="target_trad_override_enabled",
-        )
-    with ov2:
-        current_override_pct = float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])) * 100.0
-        existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
-        if not isinstance(existing_override_display, str):
-            existing_override_display = f"{float(existing_override_display):.0f}%"
-            st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
-        display_value = st.text_input(
-            "Target Traditional IRA Override Max All-In Rate",
-            value=f"{current_override_pct:.0f}%",
-            help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
-            key="target_trad_override_max_rate_pct_display",
-        )
-        cleaned_display_value = str(display_value).strip().replace("%", "")
-        try:
-            target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
-        except Exception:
-            target_trad_override_max_rate_pct = current_override_pct
-        target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
-        st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
-        normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
-        if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
-            st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
-
-    br1, br2 = st.columns(2)
-    with br1:
-        post_aca_target_bracket = st.selectbox(
-            "Post-ACA Target Bracket",
-            ["12%", "22%", "24%"],
-            index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
-            help="Used in non-ACA years before household RMDs begin.",
-            key="post_aca_target_bracket",
-        )
-    with br2:
-        rmd_era_target_bracket = st.selectbox(
-            "RMD-Era Target Bracket",
-            ["12%", "22%", "24%"],
-            index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
-            help="Used once the household reaches the first RMD year.",
-            key="rmd_era_target_bracket",
-        )
-
-    st.header("Recommendation Engine v1")
-    planning_profile = st.selectbox(
-        "Optimize For",
-        list(PROFILE_PRESETS.keys()),
-        index=list(PROFILE_PRESETS.keys()).index(st.session_state.get("planning_profile", DEFAULT_APP_STATE.get("planning_profile", "Balanced"))),
-        help="Choose the planning lens the recommendation engine should use when ranking quick Social Security strategies.",
-        key="planning_profile",
-    )
-    profile_summary = get_profile_summary(planning_profile)
-    st.info(
-        f"{profile_summary['description']}\n\n"
-        f"This means the model will: \n- {profile_summary['bullets'][0]}\n- {profile_summary['bullets'][1]}\n- {profile_summary['bullets'][2]}\n\n"
-        f"Tradeoff to expect: {profile_summary['tradeoff']}"
-    )
-
-    st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
-    pref1, pref2, pref3 = st.columns(3)
-    with pref1:
-        st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
-    with pref2:
-        st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
-    with pref3:
-        st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
-    current_preferences = extract_scoring_preferences(st.session_state)
-    st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
-    selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
-    with st.container(border=True):
-        st.markdown(f"**{selection_summary['title']}**")
-        st.caption("Base profile tendencies")
-        for item in selection_summary["defaults"]:
-            st.write(f"- {item}")
-        st.caption("Active modifier nudges")
-        for item in selection_summary["modifiers"]:
-            st.write(f"- {item}")
-        st.caption("How this combination behaves")
-        for item in selection_summary["notes"]:
-            st.write(f"- {item}")
-
-    rec_col1, rec_col2 = st.columns([1, 2])
-    with rec_col1:
-        if st.button("Run Quick Strategy Recommendation", use_container_width=True):
-            with st.spinner("Running quick strategy recommendation..."):
-                recommendation_result = run_quick_strategy_recommendation(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    profile_name=planning_profile,
-                )
-            quick_hash_inputs, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-            quick_hash_inputs.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
-            recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
-            recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
-            st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
-            mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
-    with rec_col2:
-        st.caption("Quick Strategy Mode compares 62/62, 67/67, 70/70, 70/67, and 67/70. Use it for a fast advisor-style recommendation, then open the Break-Even Governor around the winner with a small nearby set if needed.")
-
-    quick_result = get_current_result_payload("quick_strategy_recommendation_result")
-    if quick_result is not None:
-        quick_inputs_snapshot, _ = build_profile_adjusted_inputs(planning_profile, inputs)
-        quick_inputs_snapshot.update({"max_conversion": max_conversion, "step_size": step_size, "planning_profile": planning_profile})
-        if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
-            st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
-            st.session_state["suppress_quick_recommendation_stale_once"] = False
-        else:
-            render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick recommendation results")
-        st.subheader("Strategy Summary")
-        st.caption("These strategy rows are produced by the same Break-Even Governor engine used below, with the selected planning-profile presets applied before the quick run. If this app version changes, cached strategy summaries are automatically discarded and must be rerun.")
-        if quick_result.get("applied_preset_note"):
-            st.caption(quick_result["applied_preset_note"])
-        st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
-        st.dataframe(
-            quick_result["summary_df"].style.format({
-                "Score": "{:.1f}",
-                "Net Worth": "${:,.0f}",
-                "After-Tax Legacy": "${:,.0f}",
-                "Trad IRA @ End": "${:,.0f}",
-                "Roth @ End": "${:,.0f}",
-                "Brokerage @ End": "${:,.0f}",
-                "Final Household SS Income": "${:,.0f}",
-                "Survivor SS Income": "${:,.0f}",
-            }),
-            use_container_width=True,
-        )
-        anchor_compare_df = build_quick_anchor_comparison_df(quick_result.get("ranked_rows", []))
-        if not anchor_compare_df.empty:
-            st.caption("Anchor comparison shows the recommendation next to the strongest legacy and stability anchors from the same quick-run set.")
-            st.dataframe(
-                anchor_compare_df.style.format({
-                    "Net Worth": "${:,.0f}",
-                    "After-Tax Legacy": "${:,.0f}",
-                    "Lifetime taxes / government drag": "${:,.0f}",
-                    "Final Household SS Income": "${:,.0f}",
-                    "Ending Traditional IRA": "${:,.0f}",
-                }),
-                use_container_width=True,
-            )
-        if quick_result.get("close_result"):
-            st.info(
-                "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
-            )
-        st.download_button(
-            "Download Strategy Summary (CSV)",
-            data=quick_result["summary_df"].to_csv(index=False),
-            file_name="quick_strategy_summary.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        st.subheader("Advisor Interpretation")
-        advisor_text = str(quick_result.get("advisor_text", "")).replace("$", r"\$")
-        st.markdown(advisor_text)
-
-        ranked_rows_for_tradeoff = quick_result.get("ranked_rows", [])
-        if ranked_rows_for_tradeoff:
-            recommended_row = ranked_rows_for_tradeoff[0]
-            most_stable_row = max(
-                ranked_rows_for_tradeoff,
-                key=lambda r: (
-                    float(r.get("Final Household SS Income", r.get("final_household_ss_income", 0.0))),
-                    float(r.get("Survivor SS Income", r.get("survivor_ss_income", 0.0))),
-                    -float(r.get("Ending Traditional IRA Balance", r.get("ending_traditional_ira_balance", 0.0))),
-                )
-            )
-            highest_net_worth_row = max(
-                ranked_rows_for_tradeoff,
-                key=lambda r: float(r.get("Final Net Worth", r.get("final_net_worth", 0.0)))
-            )
-
-            def _strategy_metrics_for_display(row: dict) -> tuple[str, float, float, float, float]:
-                return (
-                    str(row.get("Strategy", "")),
-                    float(row.get("After-Tax Legacy", row.get("after_tax_legacy", 0.0))),
-                    float(row.get("Ending Traditional IRA Balance", row.get("ending_traditional_ira_balance", 0.0))),
-                    float(row.get("Final Net Worth", row.get("final_net_worth", 0.0))),
-                    float(row.get("Final Household SS Income", row.get("final_household_ss_income", 0.0))),
-                )
-
-            def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
-                same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
-                with col:
-                    st.markdown(f"**{title}**")
-                    if same_as_recommended and title != "Recommended Strategy":
-                        st.caption("Same as recommended")
-                    st.write(row.get("Strategy", ""))
-                    st.write(f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
-                    st.write(f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
-                    st.write(f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
-                    st.write(f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
-
-            st.subheader("Tradeoff Summary")
-            tc1, tc2, tc3 = st.columns(3)
-            _render_tradeoff_column(tc1, "Recommended Strategy", recommended_row, recommended_row)
-            _render_tradeoff_column(tc2, "Most Stable Strategy", most_stable_row, recommended_row)
-            _render_tradeoff_column(tc3, "Highest Net Worth Strategy", highest_net_worth_row, recommended_row)
-
-            stable_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(most_stable_row.get('Ending Traditional IRA Balance', most_stable_row.get('ending_traditional_ira_balance', 0.0)))
-            stable_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(most_stable_row.get('Final Net Worth', most_stable_row.get('final_net_worth', 0.0)))
-            stable_ss_delta = float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))) - float(most_stable_row.get('Final Household SS Income', most_stable_row.get('final_household_ss_income', 0.0)))
-            nw_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(highest_net_worth_row.get('Ending Traditional IRA Balance', highest_net_worth_row.get('ending_traditional_ira_balance', 0.0)))
-            nw_legacy_delta = float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))) - float(highest_net_worth_row.get('After-Tax Legacy', highest_net_worth_row.get('after_tax_legacy', 0.0)))
-            nw_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(highest_net_worth_row.get('Final Net Worth', highest_net_worth_row.get('final_net_worth', 0.0)))
-
-            stable_strategy = str(most_stable_row.get('Strategy', ''))
-            highest_nw_strategy = str(highest_net_worth_row.get('Strategy', ''))
-            if stable_strategy != str(recommended_row.get('Strategy', '')):
-                st.caption(
-                    f"Versus the most stable option ({stable_strategy}), the recommended strategy changes final net worth by ${abs(stable_nw_delta):,.0f}, household Social Security income by ${abs(stable_ss_delta):,.0f}, and ending Traditional IRA by ${abs(stable_trad_delta):,.0f}."
-                )
-            if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
-                st.caption(
-                    f"Versus the highest net worth option ({highest_nw_strategy}), the recommended strategy changes final net worth by ${abs(nw_nw_delta):,.0f}, after-tax legacy by ${abs(nw_legacy_delta):,.0f}, and ending Traditional IRA by ${abs(nw_trad_delta):,.0f}."
-                )
-        with st.expander("Quick Recommendation Snapshot", expanded=False):
-            default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
-            if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
-                st.session_state["quick_snapshot_name_input"] = default_snapshot_name
-            st.text_input("Snapshot name", key="quick_snapshot_name_input", placeholder="Baseline Plan - Growth")
-            snapshot_json = build_quick_recommendation_snapshot_payload(quick_result, planning_profile)
-            snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
-            safe_snapshot_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in snapshot_name).strip("_") or "quick_recommendation_snapshot"
-            st.download_button(
-                "Save Snapshot",
-                data=snapshot_json,
-                file_name=f"{safe_snapshot_name}.json",
-                mime="application/json",
-                use_container_width=True,
-                key="download_quick_recommendation_snapshot",
-            )
-            current_snapshot_payload = json.loads(snapshot_json)
-            render_snapshot_summary_card(current_snapshot_payload, heading="Current Quick Recommendation Snapshot")
-            if st.button("Open Current Snapshot in Viewer", use_container_width=True, key="open_current_snapshot_in_viewer"):
-                open_snapshot_in_viewer(current_snapshot_payload)
-                st.rerun()
-
-        guidance = quick_result.get("next_step_guidance", [])
-        if guidance:
-            st.subheader("Recommended Next Steps")
-            for item in guidance:
-                st.write(f"- {item}")
-        top_ranked_rows = quick_result.get("ranked_rows", [])
-        if top_ranked_rows:
-            top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
-            current_governor_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
-            recommended_strategy_label = str(top_strategy['Strategy'])
-            if current_governor_strategy == recommended_strategy_label:
-                st.success(f"Governor currently matches the recommended quick strategy: {recommended_strategy_label}")
-            else:
-                st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Governor is currently set to {current_governor_strategy}.")
-            st.caption("Quick Strategy and Optimizer picks can differ because they come from different ranking layers. Use the button below to load this quick recommendation into the Governor.")
-            st.button(
-                "Apply Recommended Strategy to Governor",
-                on_click=launch_conversion_optimizer_from_strategy,
-                args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
-                use_container_width=True,
-            )
-
-
-    st.header("Spending Optimization (Target Legacy)")
-    st.caption("Use this to estimate how much more you could spend each year while still meeting an after-tax legacy goal, using your current Social Security ages and Break-Even Governor settings.")
-    spend1, spend2 = st.columns([1, 1])
-    with spend1:
-        target_legacy_mode = st.selectbox(
-            "Target After-Tax Legacy",
-            ["Maximize", "$5M", "$10M", "$20M", "Custom"],
-            index=["Maximize", "$5M", "$10M", "$20M", "Custom"].index(st.session_state.get("target_after_tax_legacy_mode", DEFAULT_APP_STATE["target_after_tax_legacy_mode"])),
-            help="Set a legacy target and the tool will search for the highest base annual spending that still reaches it.",
-            key="target_after_tax_legacy_mode",
-        )
-    if target_legacy_mode == "Custom":
-        with spend2:
-            target_after_tax_legacy_custom = st.number_input(
-                "Custom Legacy Target",
-                min_value=0.0,
-                value=float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"])),
-                step=500000.0,
-                help="Used only when Target After-Tax Legacy is set to Custom.",
-                key="target_after_tax_legacy_custom",
-            )
-    else:
-        target_after_tax_legacy_custom = float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"]))
-    resolved_target_legacy = resolve_target_after_tax_legacy(target_legacy_mode, target_after_tax_legacy_custom)
-    if resolved_target_legacy is None:
-        st.info("Set Target After-Tax Legacy to a dollar goal to use spending optimization. Leaving it on Maximize keeps the current maximize-legacy behavior.")
-    else:
-        st.caption(
-            f"Current search will use your active SS ages ({int(inputs['owner_claim_age'])}/{int(inputs['spouse_claim_age'])}), "
-            f"current Governor settings, and a target after-tax legacy of {format_dollars(resolved_target_legacy)}."
-        )
-        if st.button("Find Maximum Annual Spending for Legacy Target", use_container_width=True):
-            with st.spinner("Searching for the highest spending level that still reaches your target legacy..."):
-                spending_result = optimize_spending_for_target_legacy(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    target_legacy=resolved_target_legacy,
-                )
-            st.session_state["spending_target_result"] = spending_result
-
-    spending_target_result = st.session_state.get("spending_target_result")
-    if spending_target_result and resolved_target_legacy is not None and float(spending_target_result.get("target_legacy", 0.0)) == float(resolved_target_legacy):
-        baseline = spending_target_result["baseline"]
-        optimized = spending_target_result["optimized"]
-        baseline_metrics = baseline["metrics"]
-        optimized_metrics = optimized["metrics"]
-        status = spending_target_result.get("status", "ok")
-        st.subheader("Maximum Annual Spending for Legacy Target")
-        if status == "not_achievable_from_current_plan":
-            st.warning(
-                f"At your current base spending of {format_dollars(baseline['annual_spending'])}, your projected after-tax legacy is {format_dollars(baseline_metrics['after_tax_legacy'])}, which is below the selected target of {format_dollars(resolved_target_legacy)}. "
-                "Lower spending, reduce the target, or change assumptions before using this tool."
-            )
-        else:
-            st.success(
-                f"You can spend up to about {format_dollars(optimized['annual_spending'])} per year and still keep after-tax legacy at or above {format_dollars(resolved_target_legacy)}."
-            )
-            st.caption(
-                "This tool finds the highest sustainable base annual spending that still satisfies your selected after-tax legacy target, using your current SS ages and Governor settings."
-            )
-            delta_spending = optimized["annual_spending"] - baseline["annual_spending"]
-            delta_net_worth = optimized_metrics["final_net_worth"] - baseline_metrics["final_net_worth"]
-            delta_legacy = optimized_metrics["after_tax_legacy"] - baseline_metrics["after_tax_legacy"]
-            delta_trad = optimized_metrics["ending_traditional_ira_balance"] - baseline_metrics["ending_traditional_ira_balance"]
-            delta_drag = float(optimized["run_result"].get("total_government_drag", 0.0)) - float(baseline["run_result"].get("total_government_drag", 0.0))
-            delta_ss = optimized_metrics["final_household_ss_income"] - baseline_metrics["final_household_ss_income"]
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Current Base Spending", format_dollars(baseline["annual_spending"]))
-            c2.metric("Max Base Spending to Hit Target", format_dollars(optimized["annual_spending"]), delta=format_dollars(delta_spending))
-            c3.metric("Search Runs", str(int(spending_target_result.get("search_runs", 0))))
-
-            comparison_df = pd.DataFrame([
-                {
-                    "Plan": "Current",
-                    "Base Annual Spending": baseline["annual_spending"],
-                    "After-Tax Legacy": baseline_metrics["after_tax_legacy"],
-                    "Final Net Worth": baseline_metrics["final_net_worth"],
-                    "Ending Traditional IRA": baseline_metrics["ending_traditional_ira_balance"],
-                    "Heir Tax Drag": baseline_metrics.get("heir_tax_drag", 0.0),
-                    "Final Household SS Income": baseline_metrics["final_household_ss_income"],
-                    "Total Government Drag": float(baseline["run_result"].get("total_government_drag", 0.0)),
-                },
-                {
-                    "Plan": "Maximum Spending Plan",
-                    "Base Annual Spending": optimized["annual_spending"],
-                    "After-Tax Legacy": optimized_metrics["after_tax_legacy"],
-                    "Final Net Worth": optimized_metrics["final_net_worth"],
-                    "Ending Traditional IRA": optimized_metrics["ending_traditional_ira_balance"],
-                    "Heir Tax Drag": optimized_metrics.get("heir_tax_drag", 0.0),
-                    "Final Household SS Income": optimized_metrics["final_household_ss_income"],
-                    "Total Government Drag": float(optimized["run_result"].get("total_government_drag", 0.0)),
-                },
-            ])
-            st.dataframe(
-                comparison_df.style.format({
-                    "Base Annual Spending": "${:,.0f}",
-                    "After-Tax Legacy": "${:,.0f}",
-                    "Final Net Worth": "${:,.0f}",
-                    "Ending Traditional IRA": "${:,.0f}",
-                    "Heir Tax Drag": "${:,.0f}",
-                    "Final Household SS Income": "${:,.0f}",
-                    "Total Government Drag": "${:,.0f}",
-                }),
-                use_container_width=True,
-            )
-            st.caption(
-                "Compared with your current plan, this target-legacy spending level changes: "
-                f"net worth by {format_dollars(delta_net_worth)}, after-tax legacy by {format_dollars(delta_legacy)}, "
-                f"ending Traditional IRA by {format_dollars(delta_trad)}, government drag by {format_dollars(delta_drag)}, "
-                f"and final household Social Security income by {format_dollars(delta_ss)}."
-            )
-
-    st.header("Integrity / Speed")
-    integrity_mode = st.checkbox(
-        "Enable Integrity Mode",
-        value=bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"])),
-        help="When enabled, the app runs slower but adds repeatability and accounting checks. Leave this off for faster day-to-day use.",
-        key="integrity_mode",
-    )
-    validation_tolerance = st.number_input(
-        "Validation Tolerance ($)",
-        min_value=0.0,
-        value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
-        step=0.01,
-        format="%.2f",
-        help="Used only when Integrity Mode is enabled.",
-        key="validation_tolerance",
-        disabled=not integrity_mode,
-    )
-
-    st.header("Social Security Optimizer Workflow")
-    st.info(
-        "Step 1: Set your ranking preferences above (profile + optional modifiers) if you want the profile shortlists to reflect them.\n\n"
-        "Step 2: Run the SS Optimizer to generate the 81 raw SS combinations. The engine itself is profile-neutral and computes facts only.\n\n"
-        "Step 3: Review results. Top 10 shows the raw optimizer ranking. Top 5 by planning profile shows those same 81 rows rescored by profile and modifiers.\n\n"
-        "If you later change only profile/modifier preferences, use 'Re-rank Existing 81 Results' instead of rerunning the full engine."
-    )
-    ss_opt1, ss_opt2 = st.columns(2)
-    with ss_opt1:
-        run_ss_optimizer_toggle = st.checkbox(
-            "Run SS Optimizer",
-            value=bool(st.session_state.get("run_ss_optimizer_toggle", DEFAULT_APP_STATE["run_ss_optimizer_toggle"])),
-            help="Runs all 81 Social Security claim-age combinations through the existing break-even governor and stores a profile-neutral fact set.",
-            key="run_ss_optimizer_toggle",
-        )
-    with ss_opt2:
-        trad_balance_penalty_lambda = st.number_input(
-            "SS Optimizer Traditional IRA Penalty Lambda",
-            min_value=0.0,
-            value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-            step=0.05,
-            format="%.2f",
-            help="Used only for the raw Top 10 ranking: Score = Final Net Worth - lambda x Ending Traditional IRA Balance. Example: lambda 1.00 applies a $1,000,000 score penalty for each $1,000,000 of ending Traditional IRA.",
-            key="trad_balance_penalty_lambda",
-        )
-
-    inputs.update(
-        {
-            "cash_sweep_threshold": cash_sweep_threshold,
-            "state_tax_rate": state_tax_rate,
-            "target_trad_balance_enabled": target_trad_balance_enabled,
-            "target_trad_balance": target_trad_balance,
-            "target_trad_override_enabled": target_trad_override_enabled,
-            "target_trad_override_max_rate": target_trad_override_max_rate,
-            "post_aca_target_bracket": post_aca_target_bracket,
-            "rmd_era_target_bracket": rmd_era_target_bracket,
-        }
-    )
-
-    if "annual_calc_year" in st.session_state:
+        profile_summary = get_profile_summary(planning_profile)
         st.info(
-            f"Current annual calculator snapshot in session: year {int(st.session_state['annual_calc_year'])}, filing status {st.session_state.get('annual_calc_filing_status', 'MFJ')}, earned income ${float(st.session_state.get('annual_calc_earned_income', 0.0)):,.0f}, other ordinary income ${float(st.session_state.get('annual_calc_other_income', 0.0)):,.0f}, LTCG ${float(st.session_state.get('annual_calc_ltcg', 0.0)):,.0f}, SS ${float(st.session_state.get('annual_calc_total_ss', 0.0)):,.0f}."
+            f"{profile_summary['description']}\n\n"
+            f"This means the model will: \n- {profile_summary['bullets'][0]}\n- {profile_summary['bullets'][1]}\n- {profile_summary['bullets'][2]}\n\n"
+            f"Tradeoff to expect: {profile_summary['tradeoff']}"
         )
 
-    if run_ss_optimizer_toggle:
-        total_combos = get_ss_optimizer_combo_count()
-        if st.session_state.get("ss_optimizer_running"):
-            st.session_state["ss_optimizer_running"] = False
-        partial_results = list(st.session_state.get("ss_optimizer_partial_results", []))
-        progress_index = int(st.session_state.get("ss_optimizer_progress_index", 0))
-        last_completed = st.session_state.get("ss_optimizer_last_completed")
-        partial_available = 0 < progress_index < total_combos and len(partial_results) > 0
-        if partial_available:
-            last_label = f"{last_completed[0]}/{last_completed[1]}" if isinstance(last_completed, tuple) else "none"
-            st.warning(f"Optimizer progress saved: {progress_index}/{total_combos} completed. Last completed SS pair: {last_label}. Resume to finish the full run.")
-        optimizer_error = st.session_state.get("ss_optimizer_error")
-        if optimizer_error:
-            st.error(optimizer_error)
-        b1, b2, b3, b4 = st.columns(4)
-        with b1:
-            if st.button("Run All SS Strategies", disabled=False, use_container_width=True):
+        st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
+        pref1, pref2, pref3 = st.columns(3)
+        with pref1:
+            st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
+        with pref2:
+            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
+        with pref3:
+            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+        current_preferences = extract_scoring_preferences(st.session_state)
+        st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
+        lambda_col_left, lambda_col_right = st.columns([1, 3])
+        with lambda_col_left:
+            trad_balance_penalty_lambda = st.number_input(
+                "Traditional IRA penalty weight",
+                min_value=0.0,
+                max_value=2.0,
+                value=float(st.session_state.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
+                step=0.05,
+                help="Used for the raw full-optimizer ranking only. Higher values penalize strategies that finish with larger Traditional IRA balances.",
+                key="trad_balance_penalty_lambda",
+            )
+        integrity_col1, integrity_col2 = st.columns([1, 1])
+        with integrity_col1:
+            st.checkbox(
+                "Enable integrity check",
+                key="integrity_mode",
+                help="When enabled, the optimizer reruns and validates the selected best result for repeatability.",
+            )
+        with integrity_col2:
+            st.number_input(
+                "Validation tolerance",
+                min_value=0.0,
+                value=float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"])),
+                step=0.01,
+                key="validation_tolerance",
+                help="Absolute tolerance used by the integrity rerun comparison.",
+            )
+        integrity_mode = bool(st.session_state.get("integrity_mode", DEFAULT_APP_STATE["integrity_mode"]))
+        validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
+
+        selection_summary = build_strategy_selection_summary(planning_profile, current_preferences)
+        with st.container(border=True):
+            st.markdown(f"**{selection_summary['title']}**")
+            st.caption("Base profile tendencies")
+            for item in selection_summary["defaults"]:
+                st.write(f"- {item}")
+            st.caption("Active modifier nudges")
+            for item in selection_summary["modifiers"]:
+                st.write(f"- {item}")
+            st.caption("How this combination behaves")
+            for item in selection_summary["notes"]:
+                st.write(f"- {item}")
+
+        rec_col1, rec_col2, rec_col3 = st.columns([1, 1, 2])
+        with rec_col1:
+            if st.button("Run Quick Scan", use_container_width=True):
+                st.session_state["ss_optimizer_expanded"] = True
+                with st.spinner("Running SS Optimizer quick scan..."):
+                    recommendation_result = run_quick_strategy_recommendation(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        profile_name=planning_profile,
+                    )
+                quick_hash_inputs, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
+                quick_hash_inputs.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
+                recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
+                recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
+                st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
+                mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
+        with rec_col2:
+            if st.button("Run Full 81-Combination Scan", use_container_width=True):
+                st.session_state["ss_optimizer_expanded"] = True
                 clear_ss_optimizer_state(clear_last_result=True)
                 optimizer_result = run_ss_optimizer(
                     inputs=inputs,
@@ -7004,26 +7736,6 @@ def render_conversion_page() -> None:
                     validation_tolerance=validation_tolerance,
                     start_index=0,
                     existing_results=[],
-                )
-                optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
-                optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                if optimizer_result.get("completed", False):
-                    mark_result_state("ss_optimizer", optimizer_hash_inputs)
-                st.rerun()
-        with b2:
-            resume_disabled = not partial_available
-            if st.button("Resume SS Optimizer", disabled=resume_disabled, use_container_width=True):
-                optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
-                    max_conversion=max_conversion,
-                    step_size=step_size,
-                    trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-                    integrity_mode=integrity_mode,
-                    validation_tolerance=validation_tolerance,
-                    start_index=progress_index,
-                    existing_results=partial_results,
                     profile_name=planning_profile,
                 )
                 optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
@@ -7033,190 +7745,575 @@ def render_conversion_page() -> None:
                 if optimizer_result.get("completed", False):
                     mark_result_state("ss_optimizer", optimizer_hash_inputs)
                 st.rerun()
-        with b3:
-            last_result_for_rerank = get_current_result_payload("ss_optimizer_last_result")
-            rerank_disabled = last_result_for_rerank is None or not last_result_for_rerank.get("completed", False)
-            if st.button("Re-rank Existing 81 Results", disabled=rerank_disabled, use_container_width=True):
-                reranked = rerank_existing_optimizer_result(
-                    last_result_for_rerank,
-                    preferences=extract_scoring_preferences(st.session_state),
-                )
-                reranked["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
-                st.session_state["ss_optimizer_last_result"] = tag_result_payload(reranked, engine="ss_optimizer", inputs=optimizer_hash_inputs)
-                st.rerun()
-        with b4:
-            reset_disabled = not partial_available and st.session_state.get("ss_optimizer_last_result") is None
-            if st.button("Reset SS Optimizer Progress", disabled=reset_disabled, use_container_width=True):
-                clear_ss_optimizer_state(clear_last_result=True)
-                st.rerun()
+        with rec_col3:
+            st.caption("Run Quick Scan for a fast directional answer using the same core engine as the Full 81 scan, but limited to 7 anchor strategies: 62/62, 67/67, 70/70, 70/67, 67/70, 62/67, and 67/62.")
+            st.caption("Run Full 81-Combination Scan when you want exhaustive confirmation and progress feedback. Changing modifiers does not update an existing quick scan automatically. Run the quick scan again after any modifier change.")
 
-        last_result = get_current_result_payload("ss_optimizer_last_result")
-        if last_result is not None:
-            if last_result.get("completed", False):
+        quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+        if quick_result is not None:
+            quick_inputs_snapshot, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
+            quick_inputs_snapshot.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
+            if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
+                st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
+                st.session_state["suppress_quick_recommendation_stale_once"] = False
+            else:
+                render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick scan results")
+            st.subheader("Quick Scan Summary")
+            st.caption("These strategy rows now use the same canonical result schema, the same core engine, and the same ranking path as the Full 81 scan. The only intended difference is that Quick evaluates fewer candidate strategies.")
+            if quick_result.get("applied_preset_note"):
+                st.caption(quick_result["applied_preset_note"])
+            st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
+            st.dataframe(
+                quick_result["summary_df"].style.format({
+                    "Selected Score": "{:.2f}",
+                    "Score": "{:.2f}",
+                    "Final Net Worth": "${:,.0f}",
+                    "After-Tax Legacy": "${:,.0f}",
+                    "Effective Legacy Value": "${:,.0f}",
+                    "Heir Tax Drag": "${:,.0f}",
+                    "Ending Traditional IRA Balance": "${:,.0f}",
+                    "Ending Roth Balance": "${:,.0f}",
+                    "Ending Brokerage Balance": "${:,.0f}",
+                    "Ending Cash Balance": "${:,.0f}",
+                    "Final Household SS Income": "${:,.0f}",
+                    "Survivor SS Income": "${:,.0f}",
+                    "Social Security Present Value": "${:,.0f}",
+                    "Total Government Drag": "${:,.0f}",
+                    "Total Conversions": "${:,.0f}",
+                    "Total Federal Tax": "${:,.0f}",
+                    "Total State Tax": "${:,.0f}",
+                    "Total ACA Cost": "${:,.0f}",
+                    "Total IRMAA Cost": "${:,.0f}",
+                    "Max MAGI": "${:,.0f}",
+                }),
+                use_container_width=True,
+            )
+            if quick_result.get("close_result"):
+                st.info(
+                    "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
+                )
+            st.download_button(
+                "Download Quick Scan Summary (CSV)",
+                data=quick_result["summary_df"].to_csv(index=False),
+                file_name="quick_strategy_summary.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            st.subheader("Advisor Interpretation")
+            advisor_text = str(quick_result.get("advisor_text", "")).replace("$", r"\$")
+            st.markdown(advisor_text)
+
+            ranked_rows_for_tradeoff = quick_result.get("ranked_rows", [])
+            if ranked_rows_for_tradeoff:
+                recommended_row = ranked_rows_for_tradeoff[0]
+                most_stable_row = max(
+                    ranked_rows_for_tradeoff,
+                    key=lambda r: (
+                        float(r.get("Final Household SS Income", r.get("final_household_ss_income", 0.0))),
+                        float(r.get("Survivor SS Income", r.get("survivor_ss_income", 0.0))),
+                        -float(r.get("Ending Traditional IRA Balance", r.get("ending_traditional_ira_balance", 0.0))),
+                    )
+                )
+                highest_net_worth_row = max(
+                    ranked_rows_for_tradeoff,
+                    key=lambda r: float(r.get("Final Net Worth", r.get("final_net_worth", 0.0)))
+                )
+
+                def _strategy_metrics_for_display(row: dict) -> tuple[str, float, float, float, float]:
+                    return (
+                        str(row.get("Strategy", "")),
+                        float(row.get("After-Tax Legacy", row.get("after_tax_legacy", 0.0))),
+                        float(row.get("Ending Traditional IRA Balance", row.get("ending_traditional_ira_balance", 0.0))),
+                        float(row.get("Final Net Worth", row.get("final_net_worth", 0.0))),
+                        float(row.get("Final Household SS Income", row.get("final_household_ss_income", 0.0))),
+                    )
+
+                def _render_tradeoff_column(col, title: str, row: dict, recommended: dict) -> None:
+                    same_as_recommended = str(row.get("Strategy", "")) == str(recommended.get("Strategy", ""))
+                    with col:
+                        st.markdown(f"**{title}**")
+                        if same_as_recommended and title != "Recommended Strategy":
+                            st.caption("Same as recommended")
+                        st.write(row.get("Strategy", ""))
+                        st.write(f"After-Tax Legacy: ${float(row.get('After-Tax Legacy', row.get('after_tax_legacy', 0.0))):,.0f}")
+                        st.write(f"Ending Trad IRA: ${float(row.get('Ending Traditional IRA Balance', row.get('ending_traditional_ira_balance', 0.0))):,.0f}")
+                        st.write(f"Final Net Worth: ${float(row.get('Final Net Worth', row.get('final_net_worth', 0.0))):,.0f}")
+                        st.write(f"Household SS Income: ${float(row.get('Final Household SS Income', row.get('final_household_ss_income', 0.0))):,.0f}")
+
+                st.subheader("Tradeoff Summary")
+                tc1, tc2, tc3 = st.columns(3)
+                _render_tradeoff_column(tc1, "Recommended Strategy", recommended_row, recommended_row)
+                _render_tradeoff_column(tc2, "Most Stable Strategy", most_stable_row, recommended_row)
+                _render_tradeoff_column(tc3, "Highest Net Worth Strategy", highest_net_worth_row, recommended_row)
+
+                stable_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(most_stable_row.get('Ending Traditional IRA Balance', most_stable_row.get('ending_traditional_ira_balance', 0.0)))
+                stable_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(most_stable_row.get('Final Net Worth', most_stable_row.get('final_net_worth', 0.0)))
+                stable_ss_delta = float(recommended_row.get('Final Household SS Income', recommended_row.get('final_household_ss_income', 0.0))) - float(most_stable_row.get('Final Household SS Income', most_stable_row.get('final_household_ss_income', 0.0)))
+                nw_trad_delta = float(recommended_row.get('Ending Traditional IRA Balance', recommended_row.get('ending_traditional_ira_balance', 0.0))) - float(highest_net_worth_row.get('Ending Traditional IRA Balance', highest_net_worth_row.get('ending_traditional_ira_balance', 0.0)))
+                nw_legacy_delta = float(recommended_row.get('After-Tax Legacy', recommended_row.get('after_tax_legacy', 0.0))) - float(highest_net_worth_row.get('After-Tax Legacy', highest_net_worth_row.get('after_tax_legacy', 0.0)))
+                nw_nw_delta = float(recommended_row.get('Final Net Worth', recommended_row.get('final_net_worth', 0.0))) - float(highest_net_worth_row.get('Final Net Worth', highest_net_worth_row.get('final_net_worth', 0.0)))
+
+                stable_strategy = str(most_stable_row.get('Strategy', ''))
+                highest_nw_strategy = str(highest_net_worth_row.get('Strategy', ''))
+                tradeoff_lines = []
+                if stable_strategy != str(recommended_row.get('Strategy', '')):
+                    tradeoff_lines.append(
+                        f"- **Versus Most Stable ({stable_strategy})**: Final Net Worth {format_signed_dollars(stable_nw_delta)}, Household Social Security Income {format_signed_dollars(stable_ss_delta)}/year, Ending Traditional IRA {format_signed_dollars(stable_trad_delta)}."
+                    )
+                if highest_nw_strategy != str(recommended_row.get('Strategy', '')):
+                    tradeoff_lines.append(
+                        f"- **Versus Highest Net Worth ({highest_nw_strategy})**: Final Net Worth {format_signed_dollars(nw_nw_delta)}, After-Tax Legacy {format_signed_dollars(nw_legacy_delta)}, Ending Traditional IRA {format_signed_dollars(nw_trad_delta)}."
+                    )
+                if tradeoff_lines:
+                    st.subheader("Tradeoff Details")
+                    clean_lines = [str(line).replace("- **", "").replace("**", "") for line in tradeoff_lines]
+                    st.markdown("\n\n".join(clean_lines))
+            with st.expander("Quick Recommendation Snapshot", expanded=False):
+                default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
+                if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
+                    st.session_state["quick_snapshot_name_input"] = default_snapshot_name
+                st.text_input("Snapshot name", key="quick_snapshot_name_input", placeholder="Baseline Plan - Growth")
+                snapshot_json = build_quick_recommendation_snapshot_payload(quick_result, planning_profile)
+                snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
+                snapshot_profile = sanitize_export_filename(planning_profile, 'profile')
+                snapshot_strategy = sanitize_export_filename(str(recommended_row.get('Strategy', '')).replace('/', '-'), 'strategy')
+                snapshot_date = pd.Timestamp.now().strftime('%Y-%m-%d')
+                safe_snapshot_name = f"snapshot__{snapshot_profile}__{snapshot_strategy}__{snapshot_date}"
+                st.download_button(
+                    "Save Snapshot",
+                    data=snapshot_json,
+                    file_name=f"{safe_snapshot_name}.json",
+                    mime="application/json",
+                    use_container_width=True,
+                    key="download_quick_recommendation_snapshot",
+                )
+                current_snapshot_payload = json.loads(snapshot_json)
+                render_snapshot_summary_card(current_snapshot_payload, heading="Current Quick Recommendation Snapshot")
+                if st.button("Open Current Snapshot in Viewer", use_container_width=True, key="open_current_snapshot_in_viewer"):
+                    open_snapshot_in_viewer(current_snapshot_payload)
+                    st.rerun()
+
+            guidance = quick_result.get("next_step_guidance", [])
+            if guidance:
+                st.subheader("Recommended Next Steps")
+                for item in guidance:
+                    st.write(f"- {item}")
+            top_ranked_rows = quick_result.get("ranked_rows", [])
+            if top_ranked_rows:
+                top_strategy = quick_result.get("top_ranked_rows", quick_result.get("ranked_rows", []))[0]
+                current_governor_strategy = f"{int(st.session_state.get('owner_claim_age', DEFAULT_APP_STATE['owner_claim_age']))}/{int(st.session_state.get('spouse_claim_age', DEFAULT_APP_STATE['spouse_claim_age']))}"
+                recommended_strategy_label = str(top_strategy['Strategy'])
+                if current_governor_strategy == recommended_strategy_label:
+                    st.success(f"Current active strategy matches the recommended quick scan strategy: {recommended_strategy_label}")
+                else:
+                    st.warning(f"Recommended quick strategy is {recommended_strategy_label}. Current active strategy is {current_governor_strategy}.")
+                st.caption("Quick Scan is the fast directional answer from the 7 anchor strategies above. Use the button below to load this result into the Governor, or run the full 81-combination scan first if you want exhaustive confirmation.")
+                st.button(
+                    "Apply Quick Scan Winner to Retirement Optimizer",
+                    on_click=launch_conversion_optimizer_from_strategy,
+                    args=(int(top_strategy["Owner SS Age"]), int(top_strategy["Spouse SS Age"]), "quick_recommendation", planning_profile),
+                    use_container_width=True,
+                )
+
+        full_optimizer_result = get_current_result_payload("ss_optimizer_last_result")
+        if full_optimizer_result is not None:
+            st.divider()
+            render_ss_optimizer_results(full_optimizer_result, planning_profile, extract_scoring_preferences(st.session_state))
+
+    with st.expander("Spending Optimization (Target Legacy)", expanded=False):
+        st.caption("Use this to estimate how much more you could spend each year while still meeting an after-tax legacy goal, using your current Social Security ages and Break-Even Governor settings.")
+        spend1, spend2 = st.columns([1, 1])
+        with spend1:
+            target_legacy_mode = st.selectbox(
+                "Target After-Tax Legacy",
+                ["Maximize", "$5M", "$10M", "$20M", "Custom"],
+                index=["Maximize", "$5M", "$10M", "$20M", "Custom"].index(st.session_state.get("target_after_tax_legacy_mode", DEFAULT_APP_STATE["target_after_tax_legacy_mode"])),
+                help="Set a legacy target and the tool will search for the highest base annual spending that still reaches it.",
+                key="target_after_tax_legacy_mode",
+            )
+        if target_legacy_mode == "Custom":
+            with spend2:
+                target_after_tax_legacy_custom = st.number_input(
+                    "Custom Legacy Target",
+                    min_value=0.0,
+                    value=float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"])),
+                    step=500000.0,
+                    help="Used only when Target After-Tax Legacy is set to Custom.",
+                    key="target_after_tax_legacy_custom",
+                )
+        else:
+            target_after_tax_legacy_custom = float(st.session_state.get("target_after_tax_legacy_custom", DEFAULT_APP_STATE["target_after_tax_legacy_custom"]))
+        resolved_target_legacy = resolve_target_after_tax_legacy(target_legacy_mode, target_after_tax_legacy_custom)
+        if resolved_target_legacy is None:
+            st.info("Set Target After-Tax Legacy to a dollar goal to use spending optimization. Leaving it on Maximize keeps the current maximize-legacy behavior.")
+        else:
+            st.caption(
+                f"Current search will use your active SS ages ({int(inputs['owner_claim_age'])}/{int(inputs['spouse_claim_age'])}), "
+                f"current Governor settings, and a target after-tax legacy of {format_dollars(resolved_target_legacy)}."
+            )
+            if st.button("Find Maximum Annual Spending for Legacy Target", use_container_width=True):
+                with st.spinner("Searching for the highest spending level that still reaches your target legacy..."):
+                    spending_result = optimize_spending_for_target_legacy(
+                        inputs=inputs,
+                        max_conversion=max_conversion,
+                        step_size=step_size,
+                        target_legacy=resolved_target_legacy,
+                    )
+                st.session_state["spending_target_result"] = spending_result
+
+        spending_target_result = st.session_state.get("spending_target_result")
+        if spending_target_result and resolved_target_legacy is not None and float(spending_target_result.get("target_legacy", 0.0)) == float(resolved_target_legacy):
+            baseline = spending_target_result["baseline"]
+            optimized = spending_target_result["optimized"]
+            baseline_metrics = baseline["metrics"]
+            optimized_metrics = optimized["metrics"]
+            status = spending_target_result.get("status", "ok")
+            st.subheader("Maximum Annual Spending for Legacy Target")
+            if status == "not_achievable_from_current_plan":
+                st.warning(
+                    f"At your current base spending of {format_dollars(baseline['annual_spending'])}, your projected after-tax legacy is {format_dollars(baseline_metrics['after_tax_legacy'])}, which is below the selected target of {format_dollars(resolved_target_legacy)}. "
+                    "Lower spending, reduce the target, or change assumptions before using this tool."
+                )
+            else:
+                st.success(
+                    f"You can spend up to about {format_dollars(optimized['annual_spending'])} per year and still keep after-tax legacy at or above {format_dollars(resolved_target_legacy)}."
+                )
                 st.caption(
-                    f"Current shortlist profile: {last_result.get('planning_profile_snapshot', planning_profile)} | "
-                    f"Current modifiers at last scoring snapshot: {describe_active_scoring_preferences(last_result.get('scoring_preferences_snapshot', {}))}"
+                    "This tool finds the highest sustainable base annual spending that still satisfies your selected after-tax legacy target, using your current SS ages and Governor settings."
                 )
-            render_ss_optimizer_results(last_result)
-    else:
-        st.caption("SS Optimizer controls are hidden. Turn on 'Run SS Optimizer' above when you want to build the full 81-combination fact set.")
+                delta_spending = optimized["annual_spending"] - baseline["annual_spending"]
+                delta_net_worth = optimized_metrics["final_net_worth"] - baseline_metrics["final_net_worth"]
+                delta_legacy = optimized_metrics["after_tax_legacy"] - baseline_metrics["after_tax_legacy"]
+                delta_trad = optimized_metrics["ending_traditional_ira_balance"] - baseline_metrics["ending_traditional_ira_balance"]
+                delta_drag = float(optimized["run_result"].get("total_government_drag", 0.0)) - float(baseline["run_result"].get("total_government_drag", 0.0))
+                delta_ss = optimized_metrics["final_household_ss_income"] - baseline_metrics["final_household_ss_income"]
 
-    st.header("Strategy Execution")
-    st.caption("These sections stay visible so you can always run or review the Break-Even Governor and Flat Strategy without hiding the optimizer.")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Current Base Spending", format_dollars(baseline["annual_spending"]))
+                c2.metric("Max Base Spending to Hit Target", format_dollars(optimized["annual_spending"]), delta=format_dollars(delta_spending))
+                c3.metric("Search Runs", str(int(spending_target_result.get("search_runs", 0))))
 
-    flat_annual_conversion = st.number_input(
-        "Flat Annual Conversion",
-        min_value=0.0,
-        value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
-        step=5000.0,
-        key="annual_conversion",
-        help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
-    )
-
-    btn1, btn2 = st.columns(2)
-
-    with btn1:
-        st.subheader("Flat Strategy")
-        if st.button("Run Flat Strategy Test"):
-            flat_inputs = dict(inputs)
-            flat_inputs["annual_conversion"] = float(flat_annual_conversion)
-            result = run_model_fixed(flat_inputs)
-            result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
-            st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
-            mark_result_state("flat_strategy", flat_inputs)
-        flat_result = get_current_result_payload("flat_strategy_last_result")
-        if flat_result is not None:
-            flat_inputs = dict(inputs)
-            flat_inputs["annual_conversion"] = float(flat_annual_conversion)
-            render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
-            render_summary("Flat Strategy Summary", flat_result)
-            st.subheader("Flat Strategy Yearly Results")
-            st.dataframe(flat_result["df"], use_container_width=True)
-
-    with btn2:
-        st.subheader("Break-Even Governor")
-        st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
-        if st.button("Run Break-Even Governor"):
-            result = run_governor_with_validation(
-                inputs=inputs,
-                max_conversion=max_conversion,
-                step_size=step_size,
-                integrity_mode=integrity_mode,
-                tol=validation_tolerance,
-            )
-            st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
-            mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
-        result = get_current_result_payload("break_even_last_result")
-        if result is not None:
-            render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
-            render_summary("Break-Even Governor Summary", result)
-            st.subheader("Chosen Year-by-Year Path")
-            path_display_df = build_chosen_path_display_df(result["df"])
-            st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
-            with st.expander("Debug: First Year Raw Data", expanded=False):
-                try:
-                    if result.get("df") is not None and not result["df"].empty:
-                        first_row_raw = result["df"].iloc[0].to_dict()
-                        st.json(first_row_raw)
-                except Exception as debug_exc:
-                    st.write(f"Debug panel unavailable: {debug_exc}")
-            if path_display_df is not None and not path_display_df.empty:
-                fmt = {}
-                non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
-                for col in path_display_df.columns:
-                    if col in non_currency_cols:
-                        continue
-                    series = path_display_df[col]
-                    if not pd.api.types.is_numeric_dtype(series):
-                        continue
-                    if "Rate" in col:
-                        fmt[col] = "{:.2%}"
-                    else:
-                        fmt[col] = "${:,.0f}"
-                st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
-
-            funding_debug_df = build_funding_debug_view_df(result["df"])
-            if funding_debug_df is not None and not funding_debug_df.empty:
-                funding_summary = summarize_funding_debug_view(funding_debug_df)
-                st.subheader("Funding Trace + Income View")
-                st.caption("Use this to see how annual spending was funded and why MAGI can stay low even when spending is high. Brokerage Used For Spending shows total taxable-account dollars spent, while Brokerage Basis Used is the non-taxable portion and Realized LTCG is the portion that hits income.")
-                summary_display_df = pd.DataFrame([
-                    {"Metric": "Primary cash refill source", "Value": str(funding_summary.get("Primary Cash Refill Source", "None"))},
-                    {"Metric": "Brokerage basis share", "Value": f"{float(funding_summary.get('Brokerage Basis Share', 0.0)):.0%}"},
-                    {"Metric": "Low-MAGI support years", "Value": f"{int(funding_summary.get('Low MAGI Support Years', 0))}"},
-                    {"Metric": "Roth spending years", "Value": f"{int(funding_summary.get('Roth Spending Years', 0))}"},
+                comparison_df = pd.DataFrame([
+                    {
+                        "Plan": "Current",
+                        "Base Annual Spending": baseline["annual_spending"],
+                        "After-Tax Legacy": baseline_metrics["after_tax_legacy"],
+                        "Final Net Worth": baseline_metrics["final_net_worth"],
+                        "Ending Traditional IRA": baseline_metrics["ending_traditional_ira_balance"],
+                        "Heir Tax Drag": baseline_metrics.get("heir_tax_drag", 0.0),
+                        "Final Household SS Income": baseline_metrics["final_household_ss_income"],
+                        "Total Government Drag": float(baseline["run_result"].get("total_government_drag", 0.0)),
+                    },
+                    {
+                        "Plan": "Maximum Spending Plan",
+                        "Base Annual Spending": optimized["annual_spending"],
+                        "After-Tax Legacy": optimized_metrics["after_tax_legacy"],
+                        "Final Net Worth": optimized_metrics["final_net_worth"],
+                        "Ending Traditional IRA": optimized_metrics["ending_traditional_ira_balance"],
+                        "Heir Tax Drag": optimized_metrics.get("heir_tax_drag", 0.0),
+                        "Final Household SS Income": optimized_metrics["final_household_ss_income"],
+                        "Total Government Drag": float(optimized["run_result"].get("total_government_drag", 0.0)),
+                    },
                 ])
-                st.dataframe(summary_display_df, hide_index=True, use_container_width=True)
-                for insight in funding_summary.get("Insights", []):
-                    st.write(f"- {insight}")
-                funding_fmt = {}
-                funding_non_currency = {"Year", "Tax Funding Source"}
-                for col in funding_debug_df.columns:
-                    if col in funding_non_currency:
-                        continue
-                    series = funding_debug_df[col]
-                    if pd.api.types.is_numeric_dtype(series):
-                        funding_fmt[col] = "${:,.0f}"
-                st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
+                st.dataframe(
+                    comparison_df.style.format({
+                        "Base Annual Spending": "${:,.0f}",
+                        "After-Tax Legacy": "${:,.0f}",
+                        "Final Net Worth": "${:,.0f}",
+                        "Ending Traditional IRA": "${:,.0f}",
+                        "Heir Tax Drag": "${:,.0f}",
+                        "Final Household SS Income": "${:,.0f}",
+                        "Total Government Drag": "${:,.0f}",
+                    }),
+                    use_container_width=True,
+                )
+                st.caption(
+                    "Compared with your current plan, this target-legacy spending level changes: "
+                    f"net worth by {format_dollars(delta_net_worth)}, after-tax legacy by {format_dollars(delta_legacy)}, "
+                    f"ending Traditional IRA by {format_dollars(delta_trad)}, government drag by {format_dollars(delta_drag)}, "
+                    f"and final household Social Security income by {format_dollars(delta_ss)}."
+                )
 
-            st.download_button(
-                "Download Chosen Path (CSV)",
-                data=result["df"].to_csv(index=False),
-                file_name="break_even_governor_chosen_path.csv",
-                mime="text/csv",
-                use_container_width=True,
+    with st.expander("Break-Even Governor", expanded=False):
+        st.caption("These settings control the Governor only. They do not change the quick recommendation ranking section above.")
+        st.subheader("Governor Execution Controls")
+
+        max_conversion = st.number_input("Max Annual Conversion To Test", min_value=0.0, value=float(current_max_conversion_value), step=5000.0, key="max_conversion")
+        step_size = st.number_input(
+            "Break-Even Step Size",
+            min_value=1000.0,
+            value=float(current_step_size_value),
+            step=1000.0,
+            help="Smaller steps improve accuracy but run slower. The governor will not use a step size below $1,000.",
+            key="step_size",
+        )
+
+        pol1, pol2 = st.columns(2)
+        with pol1:
+            cash_sweep_threshold = st.number_input(
+                "Cash Sweep Threshold",
+                min_value=0.0,
+                value=float(st.session_state.get("cash_sweep_threshold", DEFAULT_APP_STATE["cash_sweep_threshold"])),
+                step=5000.0,
+                help="End-of-year cash above this amount is swept into brokerage.",
+                key="cash_sweep_threshold",
             )
-            st.subheader("Year-by-Year Decision Diagnostics")
-            st.dataframe(result["decision_df"], use_container_width=True)
-            st.download_button(
-                "Download Decision Diagnostics (CSV)",
-                data=result["decision_df"].to_csv(index=False),
-                file_name="break_even_governor_decisions.csv",
-                mime="text/csv",
-                use_container_width=True,
+        with pol2:
+            existing_state_tax_display = st.session_state.get("state_tax_rate_pct_display", f"{current_state_tax_pct:.2f}%")
+            if not isinstance(existing_state_tax_display, str):
+                existing_state_tax_display = f"{float(existing_state_tax_display):.2f}%"
+                st.session_state["state_tax_rate_pct_display"] = existing_state_tax_display
+            state_tax_display_value = st.text_input(
+                "State Tax Rate",
+                value=f"{current_state_tax_pct:.2f}%",
+                help="Enter the state tax rate as a percent, for example 4.75%.",
+                key="state_tax_rate_pct_display",
+            )
+            cleaned_state_tax_display_value = str(state_tax_display_value).strip().replace("%", "")
+            try:
+                state_tax_rate_pct = max(0.0, min(20.0, float(cleaned_state_tax_display_value)))
+            except Exception:
+                state_tax_rate_pct = current_state_tax_pct
+            state_tax_rate = state_tax_rate_pct / 100.0
+            st.session_state["state_tax_rate"] = state_tax_rate
+            normalized_state_tax_display = f"{state_tax_rate_pct:.2f}%"
+            if st.session_state.get("state_tax_rate_pct_display") != normalized_state_tax_display:
+                st.session_state["state_tax_rate_pct_display"] = normalized_state_tax_display
+
+        tg1, tg2 = st.columns(2)
+        with tg1:
+            target_trad_balance_enabled = st.checkbox(
+                "Use Target Traditional IRA Balance Goal",
+                value=bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
+                help="When enabled, pre-RMD non-ACA years can push conversions above pure BETR minimums to work toward a target Traditional IRA balance by household RMD start.",
+                key="target_trad_balance_enabled",
+            )
+        with tg2:
+            target_trad_balance = st.number_input(
+                "Target Traditional IRA Balance By RMD Start",
+                min_value=0.0,
+                value=float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
+                step=25000.0,
+                help="Planner goal for remaining Traditional IRA balance by household RMD start.",
+                key="target_trad_balance",
             )
 
+        ov1, ov2 = st.columns(2)
+        with ov1:
+            target_trad_override_enabled = st.checkbox(
+                "Allow Target Traditional IRA Planner Override",
+                value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
+                help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
+                key="target_trad_override_enabled",
+            )
+        with ov2:
+            existing_override_display = st.session_state.get("target_trad_override_max_rate_pct_display", f"{current_override_pct:.0f}%")
+            if not isinstance(existing_override_display, str):
+                existing_override_display = f"{float(existing_override_display):.0f}%"
+                st.session_state["target_trad_override_max_rate_pct_display"] = existing_override_display
+            display_value = st.text_input(
+                "Target Traditional IRA Override Max All-In Rate",
+                value=f"{current_override_pct:.0f}%",
+                help="Maximum adjusted current cost rate allowed for target-Traditional-IRA override. Enter a whole-number percent like 32%.",
+                key="target_trad_override_max_rate_pct_display",
+            )
+            cleaned_display_value = str(display_value).strip().replace("%", "")
+            try:
+                target_trad_override_max_rate_pct = max(0.0, min(100.0, float(cleaned_display_value)))
+            except Exception:
+                target_trad_override_max_rate_pct = current_override_pct
+            target_trad_override_max_rate = target_trad_override_max_rate_pct / 100.0
+            st.session_state["target_trad_override_max_rate"] = target_trad_override_max_rate
+            normalized_display = f"{target_trad_override_max_rate_pct:.0f}%"
+            if st.session_state.get("target_trad_override_max_rate_pct_display") != normalized_display:
+                st.session_state["target_trad_override_max_rate_pct_display"] = normalized_display
+
+        br1, br2 = st.columns(2)
+        with br1:
+            post_aca_target_bracket = st.selectbox(
+                "Post-ACA Target Bracket",
+                ["12%", "22%", "24%"],
+                index=["12%", "22%", "24%"].index(st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"])),
+                help="Used in non-ACA years before household RMDs begin.",
+                key="post_aca_target_bracket",
+            )
+        with br2:
+            rmd_era_target_bracket = st.selectbox(
+                "RMD-Era Target Bracket",
+                ["12%", "22%", "24%"],
+                index=["12%", "22%", "24%"].index(st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"])),
+                help="Used once the household reaches the first RMD year.",
+                key="rmd_era_target_bracket",
+            )
+
+        st.subheader("Execution & Results")
+        st.caption("Run the Flat Strategy or Break-Even Governor here after setting the Governor controls above.")
+
+        flat_annual_conversion = st.number_input(
+            "Flat Annual Conversion",
+            min_value=0.0,
+            value=float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+            step=5000.0,
+            key="annual_conversion",
+            help="Used only by the flat strategy runner below. The Break-Even Governor ignores this field.",
+        )
+
+        btn1, btn2 = st.columns(2)
+
+        with btn1:
+            st.subheader("Flat Strategy Test")
+            if st.button("Run Flat Strategy Test"):
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                result = run_model_fixed(flat_inputs)
+                result["scenario_fingerprint"] = build_scenario_fingerprint(flat_inputs)
+                st.session_state["flat_strategy_last_result"] = tag_result_payload(result, engine="flat_strategy", inputs=flat_inputs)
+                mark_result_state("flat_strategy", flat_inputs)
+            flat_result = get_current_result_payload("flat_strategy_last_result")
+            if flat_result is not None:
+                flat_inputs = dict(inputs)
+                flat_inputs["annual_conversion"] = float(flat_annual_conversion)
+                render_stale_warning("flat_strategy", flat_inputs, "Flat strategy results")
+                render_summary("Flat Strategy Summary", flat_result)
+                st.subheader("Flat Strategy Yearly Results")
+                st.dataframe(flat_result["df"], use_container_width=True)
+
+        with btn2:
+            st.subheader("Run Break-Even Governor")
+            st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
+            if st.button("Run Break-Even Governor"):
+                result = run_governor_with_validation(
+                    inputs=inputs,
+                    max_conversion=max_conversion,
+                    step_size=step_size,
+                    integrity_mode=integrity_mode,
+                    tol=validation_tolerance,
+                )
+                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
+                mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
+            result = get_current_result_payload("break_even_last_result")
+            if result is not None:
+                render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
+                render_summary("Break-Even Governor Summary", result)
+                beg_export_name = f"beg__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{active_strategy.replace('/', '-')}__v124.json"
+                st.download_button(
+                    "Save Break-Even Governor Results",
+                    data=build_break_even_export_payload(result),
+                    file_name=beg_export_name,
+                    mime="application/json",
+                    use_container_width=True,
+                    key="save_beg_results_button",
+                )
+                st.subheader("Chosen Year-by-Year Path")
+                path_display_df = build_chosen_path_display_df(result["df"])
+                st.caption("Chosen Conversion ($) is intended to be the actual dollar conversion for that year. Binding Constraint shows what limited the decision (for example ACA). Target Bracket (%) shows the bracket target the governor was aiming under when applicable.")
+                with st.expander("Debug: First Year Raw Data", expanded=False):
+                    try:
+                        if result.get("df") is not None and not result["df"].empty:
+                            first_row_raw = result["df"].iloc[0].to_dict()
+                            st.json(first_row_raw)
+                    except Exception as debug_exc:
+                        st.write(f"Debug panel unavailable: {debug_exc}")
+                if path_display_df is not None and not path_display_df.empty:
+                    fmt = {}
+                    non_currency_cols = {"Year", "Binding Constraint", "Target Bracket (%)"}
+                    for col in path_display_df.columns:
+                        if col in non_currency_cols:
+                            continue
+                        series = path_display_df[col]
+                        if not pd.api.types.is_numeric_dtype(series):
+                            continue
+                        if "Rate" in col:
+                            fmt[col] = "{:.2%}"
+                        else:
+                            fmt[col] = "${:,.0f}"
+                    st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+
+                funding_debug_df = build_funding_debug_view_df(result["df"])
+                if funding_debug_df is not None and not funding_debug_df.empty:
+                    funding_summary = summarize_funding_debug_view(funding_debug_df)
+                    st.subheader("Funding Trace + Income View")
+                    st.caption("Use this to see how annual spending was funded and why MAGI can stay low even when spending is high. Brokerage Used For Spending shows total taxable-account dollars spent, while Brokerage Basis Used is the non-taxable portion and Realized LTCG is the portion that hits income.")
+                    summary_display_df = pd.DataFrame([
+                        {"Metric": "Primary cash refill source", "Value": str(funding_summary.get("Primary Cash Refill Source", "None"))},
+                        {"Metric": "Brokerage basis share", "Value": f"{float(funding_summary.get('Brokerage Basis Share', 0.0)):.0%}"},
+                        {"Metric": "Low-MAGI support years", "Value": f"{int(funding_summary.get('Low MAGI Support Years', 0))}"},
+                        {"Metric": "Roth spending years", "Value": f"{int(funding_summary.get('Roth Spending Years', 0))}"},
+                    ])
+                    st.dataframe(summary_display_df, hide_index=True, use_container_width=True)
+                    for insight in funding_summary.get("Insights", []):
+                        st.write(f"- {insight}")
+                    funding_fmt = {}
+                    funding_non_currency = {"Year", "Tax Funding Source"}
+                    for col in funding_debug_df.columns:
+                        if col in funding_non_currency:
+                            continue
+                        series = funding_debug_df[col]
+                        if pd.api.types.is_numeric_dtype(series):
+                            funding_fmt[col] = "${:,.0f}"
+                    st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
+
+                st.download_button(
+                    "Download Chosen Path (CSV)",
+                    data=result["df"].to_csv(index=False),
+                    file_name="break_even_governor_chosen_path.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+                st.subheader("Year-by-Year Decision Diagnostics")
+                st.dataframe(result["decision_df"], use_container_width=True)
+                st.download_button(
+                    "Download Decision Diagnostics (CSV)",
+                    data=result["decision_df"].to_csv(index=False),
+                    file_name="break_even_governor_decisions.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
 
 
-def get_shared_household_inputs_from_state() -> dict:
-    """Read the same household/planning inputs from session state without rendering the full UI."""
-    return {
-        "trad": float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])),
-        "roth": float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])),
-        "brokerage": float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
-        "brokerage_basis": min(
-            float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
-            float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
-        ),
-        "cash": float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])),
-        "growth": float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])) / 100.0,
-        "annual_spending": float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])),
-        "spending_inflation_rate": float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])) / 100.0,
-        "retirement_smile_enabled": bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
-        "go_go_end_age": int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
-        "slow_go_end_age": int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
-        "go_go_multiplier": float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
-        "slow_go_multiplier": float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
-        "no_go_multiplier": float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
-        "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
-        "conversion_tax_funding_policy": st.session_state.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"]),
-        "owner_current_age": int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])),
-        "spouse_current_age": int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])),
-        "owner_claim_age": int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])),
-        "spouse_claim_age": int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])),
-        "owner_ss_base": float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])),
-        "spouse_ss_base": float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])),
-        "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
-        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
-        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
-        "primary_aca_end_year": int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])),
-        "spouse_aca_end_year": int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])),
-        "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
-        "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
-        "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
-    }
+
+    def get_shared_household_inputs_from_state() -> dict:
+        """Read the same household/planning inputs from session state without rendering the full UI."""
+        return {
+            "trad": float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])),
+            "roth": float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])),
+            "brokerage": float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+            "brokerage_basis": min(
+                float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+                float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+            ),
+            "cash": float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])),
+            "growth": float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])) / 100.0,
+            "annual_spending": float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])),
+            "spending_inflation_rate": float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])) / 100.0,
+            "retirement_smile_enabled": bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+            "go_go_end_age": int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+            "slow_go_end_age": int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+            "go_go_multiplier": float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
+            "slow_go_multiplier": float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
+            "no_go_multiplier": float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
+            "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+            "conversion_tax_funding_policy": st.session_state.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"]),
+            "owner_current_age": int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])),
+            "spouse_current_age": int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])),
+            "owner_claim_age": int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])),
+            "spouse_claim_age": int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])),
+            "owner_ss_base": float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])),
+            "spouse_ss_base": float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])),
+            "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+            "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
+            "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
+            "primary_aca_end_year": int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])),
+            "spouse_aca_end_year": int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])),
+            "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
+            "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
+            "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+        }
+
+
+    st.divider()
+
 
 def render_annual_page() -> None:
     ensure_default_state()
@@ -7414,6 +8511,9 @@ def render_snapshot_viewer_page() -> None:
     ensure_default_state()
     st.title("Snapshot Viewer")
     render_top_nav("snapshot")
+    notice = st.session_state.pop("snapshot_open_notice", None)
+    if notice:
+        st.success(str(notice))
     payload = st.session_state.get("snapshot_viewer_payload")
     if not payload:
         st.info("No snapshot is currently open. Use Open Snapshot above to view a saved recommendation snapshot.")
@@ -7424,7 +8524,6 @@ def main() -> None:
     apply_app_state_version_guard()
     ensure_default_state()
     preserve_session_state_across_pages()
-    render_app_state_controls()
     current_page = get_app_page()
     if current_page == "home":
         render_home_page()
@@ -7434,6 +8533,88 @@ def main() -> None:
         render_snapshot_viewer_page()
     else:
         render_conversion_page()
+
+def get_shared_household_inputs_from_state() -> dict:
+    """Read the same household/planning inputs from session state without rendering the full UI."""
+    return {
+        "trad": float(st.session_state.get("trad", DEFAULT_APP_STATE["trad"])),
+        "roth": float(st.session_state.get("roth", DEFAULT_APP_STATE["roth"])),
+        "brokerage": float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+        "brokerage_basis": min(
+            float(st.session_state.get("brokerage_basis", DEFAULT_APP_STATE["brokerage_basis"])),
+            float(st.session_state.get("brokerage", DEFAULT_APP_STATE["brokerage"])),
+        ),
+        "cash": float(st.session_state.get("cash", DEFAULT_APP_STATE["cash"])),
+        "growth": float(st.session_state.get("growth_pct", DEFAULT_APP_STATE["growth_pct"])) / 100.0,
+        "annual_spending": float(st.session_state.get("annual_spending", DEFAULT_APP_STATE["annual_spending"])),
+        "spending_inflation_rate": float(st.session_state.get("spending_inflation_rate_pct", DEFAULT_APP_STATE["spending_inflation_rate_pct"])) / 100.0,
+        "retirement_smile_enabled": bool(st.session_state.get("retirement_smile_enabled", DEFAULT_APP_STATE["retirement_smile_enabled"])),
+        "go_go_end_age": int(st.session_state.get("go_go_end_age", DEFAULT_APP_STATE["go_go_end_age"])),
+        "slow_go_end_age": int(st.session_state.get("slow_go_end_age", DEFAULT_APP_STATE["slow_go_end_age"])),
+        "go_go_multiplier": float(st.session_state.get("go_go_multiplier", DEFAULT_APP_STATE["go_go_multiplier"])),
+        "slow_go_multiplier": float(st.session_state.get("slow_go_multiplier", DEFAULT_APP_STATE["slow_go_multiplier"])),
+        "no_go_multiplier": float(st.session_state.get("no_go_multiplier", DEFAULT_APP_STATE["no_go_multiplier"])),
+        "annual_conversion": float(st.session_state.get("annual_conversion", DEFAULT_APP_STATE["annual_conversion"])),
+        "conversion_tax_funding_policy": st.session_state.get("conversion_tax_funding_policy", DEFAULT_APP_STATE["conversion_tax_funding_policy"]),
+        "owner_current_age": int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])),
+        "spouse_current_age": int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])),
+        "owner_claim_age": int(st.session_state.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"])),
+        "spouse_claim_age": int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])),
+        "owner_ss_base": float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])),
+        "spouse_ss_base": float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])),
+        "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
+        "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
+        "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
+        "primary_aca_end_year": int(st.session_state.get("primary_aca_end_year", DEFAULT_APP_STATE["primary_aca_end_year"])),
+        "spouse_aca_end_year": int(st.session_state.get("spouse_aca_end_year", DEFAULT_APP_STATE["spouse_aca_end_year"])),
+        "preference_maximize_social_security": bool(st.session_state.get("preference_maximize_social_security", DEFAULT_APP_STATE["preference_maximize_social_security"])),
+        "preference_minimize_trad_ira_for_heirs": bool(st.session_state.get("preference_minimize_trad_ira_for_heirs", DEFAULT_APP_STATE["preference_minimize_trad_ira_for_heirs"])),
+        "preference_income_stability_focus": bool(st.session_state.get("preference_income_stability_focus", DEFAULT_APP_STATE["preference_income_stability_focus"])),
+        "state_tax_rate": float(st.session_state.get("state_tax_rate", DEFAULT_APP_STATE["state_tax_rate"])),
+        "planning_profile": st.session_state.get("planning_profile", DEFAULT_APP_STATE["planning_profile"]),
+        "post_aca_target_bracket": st.session_state.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]),
+        "rmd_era_target_bracket": st.session_state.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]),
+        "target_trad_balance_enabled": bool(st.session_state.get("target_trad_balance_enabled", DEFAULT_APP_STATE["target_trad_balance_enabled"])),
+        "target_trad_balance": float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
+        "target_trad_override_enabled": bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
+        "target_trad_override_max_rate": float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])),
+    }
+
+
+def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
+    """
+    Shared Top-N comparison table built from the canonical primary strategy rows.
+    BOTH Quick and Full should use this exact helper for their main side-by-side comparison.
+    """
+    primary_df = build_primary_strategy_table_df(df, top_n=top_n)
+    if primary_df.empty:
+        return pd.DataFrame()
+
+    compare_metrics = [
+        ("SS Ages", lambda r: str(r.get("Strategy", ""))),
+        ("Selected Score", lambda r: f"{float(r.get('Selected Score', r.get('Score', 0.0))):.2f}"),
+        ("Final Net Worth", lambda r: format_dollars(r.get("Final Net Worth", 0.0))),
+        ("After-Tax Legacy", lambda r: format_dollars(r.get("After-Tax Legacy", 0.0))),
+        ("Ending Traditional IRA Balance", lambda r: format_dollars(r.get("Ending Traditional IRA Balance", 0.0))),
+        ("Ending Roth Balance", lambda r: format_dollars(r.get("Ending Roth Balance", 0.0))),
+        ("Ending Brokerage Balance", lambda r: format_dollars(r.get("Ending Brokerage Balance", 0.0))),
+        ("Final Household SS Income", lambda r: format_dollars(r.get("Final Household SS Income", 0.0))),
+        ("Survivor SS Income", lambda r: format_dollars(r.get("Survivor SS Income", 0.0))),
+        ("Total Government Drag", lambda r: format_dollars(r.get("Total Government Drag", 0.0))),
+        ("Total Conversions", lambda r: format_dollars(r.get("Total Conversions", 0.0))),
+        ("Max MAGI", lambda r: format_dollars(r.get("Max MAGI", 0.0))),
+        ("Stability", lambda r: str(r.get("Stability", ""))),
+        ("Risk", lambda r: str(r.get("Risk", ""))),
+    ]
+
+    compare_rows = []
+    for label, getter in compare_metrics:
+        row = {"Metric": label}
+        for idx, (_, source_row) in enumerate(primary_df.iterrows(), start=1):
+            row[f"#{idx}"] = getter(source_row)
+        compare_rows.append(row)
+    return pd.DataFrame(compare_rows)
+
 
 
 if __name__ == "__main__":
