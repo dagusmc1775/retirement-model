@@ -1405,6 +1405,108 @@ def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) 
     return working.loc[:, existing].copy()
 
 
+
+def get_profile_score_column_name(profile_name: str) -> str:
+    mapping = {
+        "Balanced": "Balanced Profile Score",
+        "Growth": "Growth Profile Score",
+        "Tax-Efficient Stability": "Tax-Efficient Profile Score",
+        "Legacy Focused": "Legacy Profile Score",
+        "Spend With Confidence": "Spend With Confidence Profile Score",
+    }
+    return mapping.get(profile_name, f"{profile_name} Profile Score")
+
+
+def build_profile_winner_contribution_df(row: pd.Series | dict) -> pd.DataFrame:
+    row = row if isinstance(row, dict) else row.to_dict()
+    contribution_order = [
+        ("NW Score +", "Positive"),
+        ("Legacy Score +", "Positive"),
+        ("Stability Score +", "Positive"),
+        ("Trad Penalty -", "Negative"),
+        ("Trad Share Penalty -", "Negative"),
+        ("Gov Drag Penalty -", "Negative"),
+        ("Heir Tax Penalty -", "Negative"),
+        ("Risk Penalty -", "Negative"),
+        ("Max SS Modifier Score", "Modifier"),
+        ("Income Stability Modifier Score", "Modifier"),
+        ("Min Trad IRA Modifier Score", "Modifier"),
+    ]
+    rows = []
+    for label, bucket in contribution_order:
+        if label in row:
+            rows.append({"Component": label, "Bucket": bucket, "Value": float(row.get(label, 0.0))})
+    return pd.DataFrame(rows)
+
+
+def build_profile_winner_metric_df(row: pd.Series | dict) -> pd.DataFrame:
+    row = row if isinstance(row, dict) else row.to_dict()
+    metric_order = [
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Traditional IRA Balance",
+        "Ending Roth Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Total Government Drag",
+        "Total Conversions",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+    ]
+    rows = []
+    for label in metric_order:
+        if label in row:
+            rows.append({"Metric": label, "Value": row.get(label)})
+    return pd.DataFrame(rows)
+
+
+def render_profile_winner_diagnostics(row: pd.Series | dict, profile_name: str) -> None:
+    row = row if isinstance(row, dict) else row.to_dict()
+    profile_score_col = get_profile_score_column_name(profile_name)
+    selected_score = float(row.get("Selected Score", row.get("Score", 0.0)))
+    base_profile_score = float(row.get(profile_score_col, 0.0))
+    modifier_total = float(row.get("Max SS Modifier Score", 0.0)) + float(row.get("Income Stability Modifier Score", 0.0)) + float(row.get("Min Trad IRA Modifier Score", 0.0))
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Selected Score", f"{selected_score:.2f}")
+    c2.metric("Base Profile Score", f"{base_profile_score:.2f}")
+    c3.metric("Total Modifier Contribution", f"{modifier_total:.2f}")
+
+    contribution_df = build_profile_winner_contribution_df(row)
+    if not contribution_df.empty:
+        st.markdown("**Score contribution breakdown**")
+        st.dataframe(contribution_df.style.format({"Value": "{:.2f}"}), use_container_width=True, hide_index=True)
+
+    metric_df = build_profile_winner_metric_df(row)
+    if not metric_df.empty:
+        st.markdown("**Winner metric snapshot**")
+        formatter = {}
+        currency_metrics = {
+            "Final Net Worth", "After-Tax Legacy", "Effective Legacy Value", "Heir Tax Drag",
+            "Ending Traditional IRA Balance", "Ending Roth Balance", "Ending Brokerage Balance", "Ending Cash Balance",
+            "Final Household SS Income", "Survivor SS Income", "Total Government Drag", "Total Conversions", "Max MAGI",
+        }
+        metric_df_display = metric_df.copy()
+        def _fmt_metric_value(metric, value):
+            try:
+                if metric in currency_metrics and value is not None:
+                    return f"${float(value):,.0f}"
+                if metric in {"ACA Hit Years", "IRMAA Hit Years", "First IRMAA Year"} and value not in (None, ""):
+                    return f"{int(float(value))}"
+            except Exception:
+                return value
+            return value
+        metric_df_display["Value"] = [
+            _fmt_metric_value(m, v) for m, v in zip(metric_df_display["Metric"], metric_df_display["Value"])
+        ]
+        st.dataframe(metric_df_display, use_container_width=True, hide_index=True)
+
 def clamp01(value: float) -> float:
     try:
         return max(0.0, min(1.0, float(value)))
@@ -5782,39 +5884,8 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                     use_container_width=True,
                 )
                 top_row = shortlist_df.iloc[0]
-                with st.expander(f"Why {top_row['Strategy']} is winning for {tab_profile_name}", expanded=False):
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Selected Score", f"{float(top_row.get('Selected Score', 0.0)):.2f}")
-                    c2.metric("Base profile score", f"{float(top_row.get(f'{tab_profile_name} Profile Score', 0.0)):.2f}")
-                    modifier_total = float(top_row.get("Max SS Modifier Score", 0.0)) + float(top_row.get("Income Stability Modifier Score", 0.0)) + float(top_row.get("Min Trad IRA Modifier Score", 0.0))
-                    c3.metric("Modifier contribution total", f"{modifier_total:.2f}")
-
-                    component_rows = [
-                        {"Component": "NW Score +", "Value": float(top_row.get("NW Score +", 0.0))},
-                        {"Component": "Legacy Score +", "Value": float(top_row.get("Legacy Score +", 0.0))},
-                        {"Component": "Stability Score +", "Value": float(top_row.get("Stability Score +", 0.0))},
-                        {"Component": "Trad Penalty -", "Value": float(top_row.get("Trad Penalty -", 0.0))},
-                        {"Component": "Trad Share Penalty -", "Value": float(top_row.get("Trad Share Penalty -", 0.0))},
-                        {"Component": "Gov Drag Penalty -", "Value": float(top_row.get("Gov Drag Penalty -", 0.0))},
-                        {"Component": "Heir Tax Penalty -", "Value": float(top_row.get("Heir Tax Penalty -", 0.0))},
-                        {"Component": "Risk Penalty -", "Value": float(top_row.get("Risk Penalty -", 0.0))},
-                        {"Component": "Max SS Modifier Score", "Value": float(top_row.get("Max SS Modifier Score", 0.0))},
-                        {"Component": "Income Stability Modifier Score", "Value": float(top_row.get("Income Stability Modifier Score", 0.0))},
-                        {"Component": "Min Trad IRA Modifier Score", "Value": float(top_row.get("Min Trad IRA Modifier Score", 0.0))},
-                    ]
-                    st.dataframe(pd.DataFrame(component_rows).style.format({"Value": "{:.2f}"}), use_container_width=True, hide_index=True)
-
-                    metric_rows = [
-                        {"Metric": "Final Net Worth", "Value": float(top_row.get("Net Worth", 0.0))},
-                        {"Metric": "After-Tax Legacy", "Value": float(top_row.get("After-Tax Legacy", 0.0))},
-                        {"Metric": "Trad IRA @ End", "Value": float(top_row.get("Trad IRA @ End", 0.0))},
-                        {"Metric": "Final Household SS Income", "Value": float(top_row.get("Final Household SS Income", 0.0))},
-                        {"Metric": "Survivor SS Income", "Value": float(top_row.get("Survivor SS Income", 0.0))},
-                        {"Metric": "Total Government Drag", "Value": float(top_row.get("Total Government Drag", 0.0))},
-                        {"Metric": "Total Conversions", "Value": float(top_row.get("Total Conversions", 0.0))},
-                    ]
-                    st.dataframe(pd.DataFrame(metric_rows).style.format({"Value": "${:,.0f}"}), use_container_width=True, hide_index=True)
-
+                with st.expander(f"Why {top_row['Strategy']} is currently winning for {tab_profile_name}", expanded=False):
+                    render_profile_winner_diagnostics(top_row, tab_profile_name)
                 st.caption("This button loads the selected exhaustive shortlist winner into the Governor below. It does not rerun the optimizer.")
                 st.button(
                     f"Apply {tab_profile_name} winner {top_row['Strategy']} to Governor",
