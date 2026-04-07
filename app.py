@@ -2030,16 +2030,6 @@ def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) 
     return "\n".join(sections)
 
 
-def build_quick_anchor_comparison_df(ranked_rows: list[dict]) -> pd.DataFrame:
-    """
-    Deprecated compatibility wrapper.
-    Quick and Full should use the SAME comparison-table builder code, so this wrapper
-    now routes directly into the shared canonical comparison helper instead of using
-    a quick-only anchor-comparison implementation.
-    """
-    if not ranked_rows:
-        return pd.DataFrame()
-    return build_top_strategy_comparison_df(pd.DataFrame(ranked_rows), top_n=3)
 
 
 def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
@@ -5735,51 +5725,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if not result.get("completed", True):
         return
 
-    top_10_df = build_primary_strategy_table_df(result.get("top_10_df", pd.DataFrame()), top_n=10)
-    st.subheader(f"Top 10 SS Strategies for {planning_profile}")
-    st.caption("This table now uses the same canonical primary-result schema as Quick Scan. The only intended difference is candidate universe size.")
-    st.dataframe(
-        top_10_df.style.format({
-            "Selected Score": "{:.2f}",
-            "Score": "{:.2f}",
-            "Final Net Worth": "${:,.0f}",
-            "After-Tax Legacy": "${:,.0f}",
-            "Effective Legacy Value": "${:,.0f}",
-            "Heir Tax Drag": "${:,.0f}",
-            "Ending Traditional IRA Balance": "${:,.0f}",
-            "Ending Roth Balance": "${:,.0f}",
-            "Ending Brokerage Balance": "${:,.0f}",
-            "Ending Cash Balance": "${:,.0f}",
-            "Final Household SS Income": "${:,.0f}",
-            "Survivor SS Income": "${:,.0f}",
-            "Social Security Present Value": "${:,.0f}",
-            "Total Federal Tax": "${:,.0f}",
-            "Total State Tax": "${:,.0f}",
-            "Total ACA Cost": "${:,.0f}",
-            "Total IRMAA Cost": "${:,.0f}",
-            "Total Government Drag": "${:,.0f}",
-            "Total Conversions": "${:,.0f}",
-            "Max MAGI": "${:,.0f}",
-        }),
-        use_container_width=True,
-    )
-    st.download_button(
-        "Download Raw Top 10 SS Strategies (CSV)",
-        data=result["top_10_export_df"].to_csv(index=False),
-        file_name="top_10_ss_strategies.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    st.subheader("Top 3 Side-by-Side Comparison")
-    st.dataframe(result["comparison_display_df"], use_container_width=True)
-    st.download_button(
-        "Download Top 3 Comparison (CSV)",
-        data=result["comparison_display_df"].to_csv(index=False),
-        file_name="top_3_ss_comparison.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    st.caption("Archived exploratory views removed from the live app: Top 10 SS Strategies and Top 3 Side-by-Side Comparison are preserved separately, but no longer shown in the main workflow.")
 
     ss_export_name = f"ssoptimizer__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{sanitize_export_filename(str(st.session_state.get('planning_profile', 'Balanced')), 'profile')}__v139.json"
     st.download_button(
@@ -7672,10 +7618,6 @@ def render_conversion_page() -> None:
                 }),
                 use_container_width=True,
             )
-            anchor_compare_df = pd.DataFrame(quick_result.get("comparison_display_df", pd.DataFrame())).copy()
-            if not anchor_compare_df.empty:
-                st.caption("This comparison uses the same shared Top 3 comparison builder as the Full 81 scan.")
-                st.dataframe(anchor_compare_df, use_container_width=True)
             if quick_result.get("close_result"):
                 st.info(
                     "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
