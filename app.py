@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v219-shared-post-candidate-pipeline"
+APP_VERSION = "v230-exact-governor-path"
 APP_STATE_VERSION = "v106"
 
 
@@ -824,14 +824,41 @@ def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict
 
 def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_name: str) -> tuple[dict, dict]:
     """
-    Build a clean quick-recommendation input package from the live scenario inputs.
-    Quick Scan should use the same core engine inputs as the Full 81 scan; the only
-    intended difference is the reduced SS-claim candidate universe.
+    Build the exact live-input package used by the standalone Governor summary.
+    Quick Scan must not silently apply profile presets, alternate overrides, or any
+    other hidden input mutations. The only intended difference from Full 81 is the
+    reduced candidate universe.
     """
     adjusted = copy.deepcopy(current_inputs)
     adjusted["planning_profile"] = profile_name
     adjusted["selected_recommendation_profile"] = profile_name
-    return adjusted, {"preset_note": ""}
+    adjusted["quick_full_engine_mode"] = "exact_governor_path"
+    return adjusted, {"preset_note": "Using exact live Governor inputs (no hidden overrides)."}
+
+
+def evaluate_strategy_via_governor(
+    base_inputs: dict,
+    owner_age: int,
+    spouse_age: int,
+    max_conversion: float,
+    step_size: float,
+) -> tuple[dict, dict]:
+    """
+    Single source of truth for Quick/Full strategy evaluation.
+    Every SS strategy candidate must flow through the exact same Break-Even
+    Governor execution path used by the standalone Governor summary.
+    """
+    scenario_inputs = copy.deepcopy(base_inputs)
+    scenario_inputs["owner_claim_age"] = int(owner_age)
+    scenario_inputs["spouse_claim_age"] = int(spouse_age)
+    scenario_inputs["integrity_mode"] = False
+    scenario_inputs["strict_repeatability_check"] = False
+    run_result = run_model_break_even_governor(
+        scenario_inputs,
+        sanitize_governor_max_conversion(float(max_conversion)),
+        sanitize_governor_step_size(float(step_size)),
+    )
+    return scenario_inputs, run_result
 
 
 def build_ss_optimizer_result_row(
@@ -904,11 +931,14 @@ def build_ss_optimizer_fact_rows(
     total = len(combos)
     progress_bar = st.progress(0.0, text=progress_text or "Running optimizer...") if total else None
     for idx, (owner_age, spouse_age) in enumerate(combos, start=1):
-        scenario_inputs = dict(base_snapshot)
-        scenario_inputs["owner_claim_age"] = int(owner_age)
-        scenario_inputs["spouse_claim_age"] = int(spouse_age)
         try:
-            run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+            _, run_result = evaluate_strategy_via_governor(
+                base_snapshot,
+                owner_age,
+                spouse_age,
+                max_conversion,
+                step_size,
+            )
             rows.append(build_ss_optimizer_result_row(run_result, owner_age, spouse_age, trad_balance_penalty_lambda=trad_balance_penalty_lambda))
         except Exception as exc:
             errors.append(f"{owner_age}/{spouse_age}: {exc}")
@@ -977,10 +1007,13 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
     quick_progress = st.progress(0.0, text=f"Running Quick Scan... 0/{total_quick_combos}")
     for idx, (owner_age, spouse_age) in enumerate(QUICK_STRATEGY_COMBOS, start=1):
             try:
-                scenario_inputs = copy.deepcopy(base_inputs)
-                scenario_inputs["owner_claim_age"] = int(owner_age)
-                scenario_inputs["spouse_claim_age"] = int(spouse_age)
-                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+                scenario_inputs, run_result = evaluate_strategy_via_governor(
+                    base_inputs,
+                    owner_age,
+                    spouse_age,
+                    max_conversion,
+                    step_size,
+                )
                 metrics = build_strategy_metrics(run_result)
                 metric_rows.append({
                     **metrics,
@@ -2281,6 +2314,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "errors": errors,
         "data_source": data_source,
         "applied_preset_note": preset.get("preset_note", ""),
+        "engine_execution_note": "Quick/Full candidate evaluation now uses the exact standalone Break-Even Governor execution path.",
         "active_preferences_text": describe_active_scoring_preferences(preferences),
         "strategy_universe_size": len(quick_rows),
         "profile_shortlists": shared_payload.get("profile_shortlists", {}),
