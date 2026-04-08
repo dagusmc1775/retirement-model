@@ -5976,7 +5976,38 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
         try:
             if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
-                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only. Check Minimum Liquid Assets and Year of Minimum Liquid Assets to see whether the risk input is truly flat or just being collapsed.")
+                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only. The panel below surfaces the raw liquid-asset inputs directly.")
+                risk_debug_cols = [c for c in [
+                    "Strategy",
+                    "Owner SS Age",
+                    "Spouse SS Age",
+                    "Risk Value",
+                    "Minimum Liquid Assets",
+                    "Year of Minimum Liquid Assets",
+                    "Final Net Worth",
+                    "After-Tax Net Worth (Primary)",
+                    "Ending Traditional IRA Balance",
+                    "Total Government Drag",
+                    "Total Conversions",
+                ] if c in all_results_df.columns]
+                if risk_debug_cols:
+                    risk_debug_df = all_results_df[risk_debug_cols].copy()
+                    if "Strategy" not in risk_debug_df.columns and {"Owner SS Age", "Spouse SS Age"}.issubset(risk_debug_df.columns):
+                        risk_debug_df.insert(0, "Strategy", risk_debug_df["Owner SS Age"].astype(str) + "/" + risk_debug_df["Spouse SS Age"].astype(str))
+                    st.subheader("Risk Diagnostics")
+                    st.dataframe(
+                        risk_debug_df.style.format({
+                            "Risk Value": "{:,.0f}",
+                            "Minimum Liquid Assets": "${:,.0f}",
+                            "Final Net Worth": "${:,.0f}",
+                            "After-Tax Net Worth (Primary)": "${:,.0f}",
+                            "Ending Traditional IRA Balance": "${:,.0f}",
+                            "Total Government Drag": "${:,.0f}",
+                            "Total Conversions": "${:,.0f}",
+                        }),
+                        use_container_width=True,
+                    )
+                    st.caption("If Minimum Liquid Assets and Year of Minimum Liquid Assets are also flat here, then the current risk definition itself is not differentiating strategies.")
         except Exception:
             pass
 
@@ -6014,6 +6045,8 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                         "Gov Drag Penalty -": "{:.2f}",
                         "Heir Tax Penalty -": "{:.2f}",
                         "Risk Penalty -": "{:.2f}",
+                        "Minimum Liquid Assets": "${:,.0f}",
+                        "Year of Minimum Liquid Assets": "{:,.0f}",
                     }),
                     use_container_width=True,
                 )
