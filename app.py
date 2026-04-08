@@ -2435,7 +2435,7 @@ def execute_ss_scan(
     trad_balance_penalty_lambda: float,
     progress_text: str,
     cache_namespace: str,
-    include_profile_shortlists: bool = False,
+    include_profile_shortlists: bool = True,
     shortlist_top_n: int = 5,
     primary_table_top_n: int = 10,
     comparison_top_n: int = 3,
@@ -2474,6 +2474,63 @@ def execute_ss_scan(
     }
 
 
+
+def build_shared_scan_session_payload(
+    shared_scan: dict,
+    *,
+    profile_name: str,
+    trad_balance_penalty_lambda: float,
+    completed: bool = True,
+    total_combos: int | None = None,
+    error_message: str | None = None,
+    interrupted_partial_df: pd.DataFrame | None = None,
+    best_validation: dict | None = None,
+    best_rerun_summary: dict | None = None,
+    advisor_text: str = "",
+    close_result: bool = False,
+    next_step_guidance: list | None = None,
+) -> dict:
+    ranked_df = shared_scan["ranked_df"]
+    primary_table_df = shared_scan["primary_table_df"]
+    comparison_df = shared_scan["comparison_df"]
+    ranked_rows = shared_scan["ranked_rows"]
+    total_combo_count = int(total_combos) if total_combos is not None else int(len(ranked_rows))
+    return {
+        "all_results_df": ranked_df,
+        "all_results_export_df": ranked_df.copy(),
+        "top_10_df": primary_table_df.head(10).copy(),
+        "top_10_export_df": primary_table_df.head(10).copy(),
+        "comparison_df": comparison_df,
+        "comparison_display_df": comparison_df.copy() if isinstance(comparison_df, pd.DataFrame) else pd.DataFrame(comparison_df),
+        "profile_shortlists": copy.deepcopy(shared_scan.get("profile_shortlists", {})),
+        "raw_results_df": pd.DataFrame(copy.deepcopy(shared_scan["fact_rows"])),
+        "best_result": copy.deepcopy(shared_scan.get("best_result")),
+        "best_validation": best_validation,
+        "best_rerun_summary": best_rerun_summary,
+        "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+        "scoring_context": copy.deepcopy(shared_scan.get("scoring_context", {})),
+        "profile_name": profile_name,
+        "applied_preset_note": "Using shared strategy scan pipeline with live inputs.",
+        "interrupted_partial_df": interrupted_partial_df,
+        "completed": bool(completed),
+        "progress_index": int(len(shared_scan["fact_rows"])),
+        "total_combos": total_combo_count,
+        "error_message": error_message,
+        # Quick-compatible aliases
+        "summary_df": primary_table_df,
+        "ranked_rows": ranked_rows,
+        "advisor_text": advisor_text,
+        "close_result": bool(close_result),
+        "next_step_guidance": list(next_step_guidance or []),
+        "errors": copy.deepcopy(shared_scan["errors"]),
+        "data_source": "shared_strategy_scan_pipeline",
+        "active_preferences_text": describe_active_scoring_preferences(shared_scan["preferences"]),
+        "quick_recommendation_input_state": copy.deepcopy(shared_scan["inputs_snapshot"]),
+        "quick_recommendation_source_scenario_state": copy.deepcopy(collect_scenario_state()),
+        "shared_scan_payload": shared_scan["shared_payload"],
+    }
+
+
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
     shared_scan = execute_ss_scan(
@@ -2485,31 +2542,28 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
         progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
         cache_namespace="_quick_recommendation_result_rows_cache",
-        include_profile_shortlists=False,
-        shortlist_top_n=10,
+        include_profile_shortlists=True,
+        shortlist_top_n=5,
         primary_table_top_n=10,
         comparison_top_n=3,
     )
 
     ranked = shared_scan["ranked_rows"]
     explanation = generate_advisor_interpretation(profile_name, ranked)
-    return {
-        "profile_name": profile_name,
-        "summary_df": shared_scan["primary_table_df"],
-        "comparison_display_df": shared_scan["comparison_df"],
-        "all_results_df": shared_scan["ranked_df"],
-        "ranked_rows": ranked,
-        "advisor_text": explanation,
-        "close_result": is_close_quick_result(ranked),
-        "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
-        "errors": shared_scan["errors"],
-        "data_source": "shared_strategy_scan_pipeline",
-        "applied_preset_note": "Using shared strategy scan pipeline with live inputs.",
-        "active_preferences_text": describe_active_scoring_preferences(shared_scan["preferences"]),
-        "quick_recommendation_input_state": copy.deepcopy(shared_scan["inputs_snapshot"]),
-        "quick_recommendation_source_scenario_state": copy.deepcopy(collect_scenario_state()),
-        "shared_scan_payload": shared_scan["shared_payload"],
-    }
+    return build_shared_scan_session_payload(
+        shared_scan,
+        profile_name=profile_name,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        completed=True,
+        total_combos=len(QUICK_STRATEGY_COMBOS),
+        error_message=None,
+        interrupted_partial_df=None,
+        best_validation=None,
+        best_rerun_summary=None,
+        advisor_text=explanation,
+        close_result=is_close_quick_result(ranked),
+        next_step_guidance=generate_next_step_guidance(profile_name, ranked),
+    )
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -5936,54 +5990,58 @@ def run_ss_optimizer(
             "interrupted_partial_df": None,
             "error_message": None,
         }, engine="ss_optimizer")
-        return tag_result_payload({
-            "all_results_df": results_df,
-            "all_results_export_df": results_df.copy(),
-            "top_10_df": top_10_df,
-            "top_10_export_df": top_10_df.copy(),
-            "comparison_df": comparison_df,
-            "comparison_display_df": comparison_df,
-            "profile_shortlists": profile_shortlists,
-            "raw_results_df": pd.DataFrame(results),
-            "best_result": best_result,
-            "best_validation": best_validation,
-            "best_rerun_summary": best_rerun_summary,
-            "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
-            "scoring_context": copy.deepcopy(scoring_context),
-            "profile_name": profile_name,
-            "applied_preset_note": "",
-            "interrupted_partial_df": None,
-            "completed": True,
-            "progress_index": total_combos,
-            "total_combos": total_combos,
-            "error_message": None,
-        }, engine="ss_optimizer")
+        return tag_result_payload(
+            build_shared_scan_session_payload(
+                shared_scan,
+                profile_name=profile_name,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                completed=True,
+                total_combos=total_combos,
+                error_message=None,
+                interrupted_partial_df=None,
+                best_validation=best_validation,
+                best_rerun_summary=best_rerun_summary,
+                advisor_text="",
+                close_result=False,
+                next_step_guidance=[],
+            ),
+            engine="ss_optimizer",
+        )
     except Exception as exc:
         st.session_state["ss_optimizer_interrupted"] = True
         st.session_state["ss_optimizer_error"] = str(exc)
         partial_df = pd.DataFrame(st.session_state.get("ss_optimizer_partial_results", []))
-        return tag_result_payload({
-            "all_results_df": partial_df.copy(),
-            "all_results_export_df": partial_df.copy(),
-            "top_10_df": partial_df.head(10).copy(),
-            "top_10_export_df": partial_df.head(10).copy(),
+        failed_shared_scan = {
+            "ranked_df": partial_df.copy(),
+            "primary_table_df": partial_df.head(10).copy(),
             "comparison_df": pd.DataFrame(),
-            "comparison_display_df": pd.DataFrame(),
             "profile_shortlists": {},
-            "raw_results_df": partial_df.copy(),
+            "fact_rows": copy.deepcopy(st.session_state.get("ss_optimizer_partial_results", [])),
             "best_result": None,
-            "best_validation": None,
-            "best_rerun_summary": None,
-            "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
             "scoring_context": {},
-            "profile_name": profile_name,
-            "applied_preset_note": "",
-            "interrupted_partial_df": partial_df.copy(),
-            "completed": False,
-            "progress_index": int(st.session_state.get("ss_optimizer_progress_index", 0)),
-            "total_combos": total_combos,
-            "error_message": str(exc),
-        }, engine="ss_optimizer")
+            "ranked_rows": partial_df.to_dict("records"),
+            "errors": [str(exc)],
+            "preferences": extract_scoring_preferences(inputs),
+            "inputs_snapshot": copy.deepcopy(inputs),
+            "shared_payload": {},
+        }
+        return tag_result_payload(
+            build_shared_scan_session_payload(
+                failed_shared_scan,
+                profile_name=profile_name,
+                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+                completed=False,
+                total_combos=total_combos,
+                error_message=str(exc),
+                interrupted_partial_df=partial_df.copy(),
+                best_validation=None,
+                best_rerun_summary=None,
+                advisor_text="",
+                close_result=False,
+                next_step_guidance=[],
+            ),
+            engine="ss_optimizer",
+        )
 
 def render_ss_optimizer_results(result: dict, planning_profile: str, current_preferences: dict):
     st.subheader("Full 81-Combination Scan Results")
