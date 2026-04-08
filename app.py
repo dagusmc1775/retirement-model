@@ -2366,13 +2366,15 @@ def build_strategy_scan_payload(
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     preferences = extract_scoring_preferences(inputs)
-    base_inputs, preset = build_stateless_quick_recommendation_inputs(inputs, profile_name)
+    base_snapshot = copy.deepcopy(inputs)
+    base_snapshot["integrity_mode"] = False
+    base_snapshot["strict_repeatability_check"] = False
     quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
     quick_step_size = sanitize_governor_step_size(float(step_size))
     trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
 
     quick_rows, errors = build_ss_optimizer_fact_rows(
-        base_inputs,
+        base_snapshot,
         QUICK_STRATEGY_COMBOS,
         quick_max_conversion,
         quick_step_size,
@@ -2385,7 +2387,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
 
     shared_payload = build_strategy_scan_payload(
         quick_rows,
-        inputs=base_inputs,
+        inputs=base_snapshot,
         selected_profile_name=profile_name,
         preferences=preferences,
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
@@ -2411,8 +2413,8 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
         "errors": errors,
         "data_source": data_source,
-        "applied_preset_note": preset.get("preset_note", ""),
-        "engine_execution_note": "Quick/Full candidate evaluation now uses the exact standalone Break-Even Governor execution path.",
+        "applied_preset_note": "",
+        "engine_execution_note": "Quick and Full now use the same shared candidate evaluation, metrics, scoring, and output builders; only combo selection differs.",
         "active_preferences_text": describe_active_scoring_preferences(preferences),
         "strategy_universe_size": len(quick_rows),
         "profile_shortlists": shared_payload.get("profile_shortlists", {}),
@@ -5808,7 +5810,7 @@ def run_ss_optimizer(
         results_df = canonicalize_optimizer_result_df(shared_payload["ranked_df"], "ss optimizer ranked results")
         profile_shortlists = shared_payload["profile_shortlists"]
         top_10_df = canonicalize_optimizer_result_df(shared_payload["primary_table_df"].head(10).copy(), "ss optimizer top 10")
-        comparison_df = canonicalize_optimizer_result_df(shared_payload["comparison_df"].copy(), "ss optimizer top 3 comparison")
+        comparison_df = shared_payload["comparison_df"].copy() if isinstance(shared_payload.get("comparison_df"), pd.DataFrame) else pd.DataFrame(shared_payload.get("comparison_df", []))
 
         best_result = shared_payload.get("best_result")
         best_validation = None
