@@ -987,8 +987,6 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
             "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
             "stability_value": float(row.get("Stability Value", 0.0)),
             "risk_value": float(row.get("Risk Value", 0.0)),
-            "min_liquid_assets": float(row.get("Minimum Liquid Assets", max(0.0, -float(row.get("Risk Value", 0.0))))),
-            "min_liquid_year": int(row.get("Year of Minimum Liquid Assets", START_YEAR)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
             "social_security_present_value": float(row.get("Social Security Present Value", 0.0)),
@@ -1074,12 +1072,7 @@ def build_strategy_metrics(run_result: dict) -> dict:
     ending_spouse_ss = float(last.get("Spouse SS", 0.0))
     final_household_ss = float(last.get("Total SS", ending_owner_ss + ending_spouse_ss))
     survivor_ss = max(ending_owner_ss, ending_spouse_ss)
-
-    liquid_assets_by_year = (df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).astype(float)
-    min_liquid_assets = float(liquid_assets_by_year.min())
-    min_liquid_index = int(liquid_assets_by_year.idxmin())
-    min_liquid_year = int(df.loc[min_liquid_index, "Year"]) if "Year" in df.columns else int(last.get("Year", END_YEAR))
-
+    min_liquid_assets = float((df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).min())
     after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     effective_legacy_value = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - HEIR_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
@@ -1097,8 +1090,6 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "ending_cash_balance": float(ending_cash),
         "stability_value": float(stability_value),
         "risk_value": float(risk_value),
-        "min_liquid_assets": float(min_liquid_assets),
-        "min_liquid_year": int(min_liquid_year),
         "final_household_ss_income": float(final_household_ss),
         "survivor_ss_income": float(survivor_ss),
         "social_security_present_value": float(social_security_present_value),
@@ -1216,8 +1207,6 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
             "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
             "stability_value": float(row.get("Stability Value", 0.0)),
             "risk_value": float(row.get("Risk Value", 0.0)),
-            "min_liquid_assets": float(row.get("Minimum Liquid Assets", max(0.0, -float(row.get("Risk Value", 0.0))))),
-            "min_liquid_year": int(row.get("Year of Minimum Liquid Assets", START_YEAR)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
             "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
@@ -1257,8 +1246,6 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Brokerage @ End": float(ranked_row["ending_brokerage_balance"]),
                 "Stability": ranked_row["stability_label"],
                 "Risk": ranked_row["risk_label"],
-                "Minimum Liquid Assets": float(ranked_row.get("min_liquid_assets", max(0.0, -float(ranked_row.get("risk_value", 0.0))))),
-                "Year of Minimum Liquid Assets": int(ranked_row.get("min_liquid_year", START_YEAR)),
                 "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
                 "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
                 "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
@@ -1309,8 +1296,6 @@ def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
         "IRMAA Hit Years",
         "Traditional IRA Penalty Applied",
         "Risk Value",
-        "Minimum Liquid Assets",
-        "Year of Minimum Liquid Assets",
         "Score",
     ]
     ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
@@ -1745,7 +1730,7 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
         + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
     )
     liquidity_signal = clamp01(liquidity_coverage_years / 25.0)
-    risk_penalty_base = 1.0 - liquidity_signal
+    risk_penalty_base = 0.0  # TEMPORARILY DISABLED: current liquidity-floor risk signal is non-differentiating in this model
     trad_share_penalty_base = trad_share
 
     if profile_name == "Legacy Focused":
@@ -1821,7 +1806,7 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     score = positive_score - negative_score
 
     stability_label = "High" if income_coverage_ratio >= 0.95 and survivor_coverage_ratio >= 0.60 else ("Medium" if income_coverage_ratio >= 0.60 else "Low")
-    risk_label = "Low" if liquidity_coverage_years >= 12.0 else ("Medium" if liquidity_coverage_years >= 6.0 else "High")
+    risk_label = "Disabled"
 
     return {
         **scoring_input,
@@ -1911,8 +1896,6 @@ def build_strategy_scoring_payload(
             "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
             "stability_value": float(row.get("Stability Value", 0.0)),
             "risk_value": float(row.get("Risk Value", 0.0)),
-            "min_liquid_assets": float(row.get("Minimum Liquid Assets", max(0.0, -float(row.get("Risk Value", 0.0))))),
-            "min_liquid_year": int(row.get("Year of Minimum Liquid Assets", START_YEAR)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
             "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
@@ -5976,38 +5959,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
         try:
             if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
-                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only. The panel below surfaces the raw liquid-asset inputs directly.")
-                risk_debug_cols = [c for c in [
-                    "Strategy",
-                    "Owner SS Age",
-                    "Spouse SS Age",
-                    "Risk Value",
-                    "Minimum Liquid Assets",
-                    "Year of Minimum Liquid Assets",
-                    "Final Net Worth",
-                    "After-Tax Net Worth (Primary)",
-                    "Ending Traditional IRA Balance",
-                    "Total Government Drag",
-                    "Total Conversions",
-                ] if c in all_results_df.columns]
-                if risk_debug_cols:
-                    risk_debug_df = all_results_df[risk_debug_cols].copy()
-                    if "Strategy" not in risk_debug_df.columns and {"Owner SS Age", "Spouse SS Age"}.issubset(risk_debug_df.columns):
-                        risk_debug_df.insert(0, "Strategy", risk_debug_df["Owner SS Age"].astype(str) + "/" + risk_debug_df["Spouse SS Age"].astype(str))
-                    st.subheader("Risk Diagnostics")
-                    st.dataframe(
-                        risk_debug_df.style.format({
-                            "Risk Value": "{:,.0f}",
-                            "Minimum Liquid Assets": "${:,.0f}",
-                            "Final Net Worth": "${:,.0f}",
-                            "After-Tax Net Worth (Primary)": "${:,.0f}",
-                            "Ending Traditional IRA Balance": "${:,.0f}",
-                            "Total Government Drag": "${:,.0f}",
-                            "Total Conversions": "${:,.0f}",
-                        }),
-                        use_container_width=True,
-                    )
-                    st.caption("If Minimum Liquid Assets and Year of Minimum Liquid Assets are also flat here, then the current risk definition itself is not differentiating strategies.")
+                st.caption("Risk penalty is currently disabled because the existing liquidity-floor risk signal is not differentiating strategies in this run.")
         except Exception:
             pass
 
@@ -6045,8 +5997,6 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
                         "Gov Drag Penalty -": "{:.2f}",
                         "Heir Tax Penalty -": "{:.2f}",
                         "Risk Penalty -": "{:.2f}",
-                        "Minimum Liquid Assets": "${:,.0f}",
-                        "Year of Minimum Liquid Assets": "{:,.0f}",
                     }),
                     use_container_width=True,
                 )
