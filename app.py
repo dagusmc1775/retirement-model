@@ -1073,12 +1073,36 @@ def build_strategy_metrics(run_result: dict) -> dict:
     final_household_ss = float(last.get("Total SS", ending_owner_ss + ending_spouse_ss))
     survivor_ss = max(ending_owner_ss, ending_spouse_ss)
     min_liquid_assets = float((df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).min())
+    annual_spending = float(df["Annual Spending Need"].max()) if "Annual Spending Need" in df.columns else 0.0
     after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     effective_legacy_value = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - HEIR_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
     stability_value = final_household_ss + 0.5 * survivor_ss
     social_security_present_value = estimate_social_security_present_value(final_household_ss, survivor_ss)
-    risk_value = -min_liquid_assets
+
+    household_rmd_start = int(run_result.get("household_rmd_start", df["Year"].max() if "Year" in df.columns else START_YEAR))
+    pre_rmd_year = household_rmd_start - 1
+    trad_at_rmd_start = ending_trad
+    if "Year" in df.columns and "EOY Trad" in df.columns:
+        pre_rmd_rows = df.loc[df["Year"] == pre_rmd_year, "EOY Trad"]
+        if not pre_rmd_rows.empty:
+            trad_at_rmd_start = float(pre_rmd_rows.iloc[0])
+        else:
+            first_rmd_rows = df.loc[df["Year"] == household_rmd_start, "SOY Trad"] if "SOY Trad" in df.columns else None
+            if first_rmd_rows is not None and not first_rmd_rows.empty:
+                trad_at_rmd_start = float(first_rmd_rows.iloc[0])
+
+    after_tax_base = max(1.0, after_tax_legacy)
+    rmd_pressure = clamp01(trad_at_rmd_start / after_tax_base)
+    max_magi = max(0.0, float(run_result.get("max_magi", df["MAGI"].max() if "MAGI" in df.columns else 0.0)))
+    magi_pressure = clamp01(max_magi / IRMAA_FIRST_CLIFF_MFJ)
+    liquidity_risk = 0.0
+    if annual_spending > 0.0:
+        liquidity_risk = 1.0 - clamp01(min_liquid_assets / (10.0 * annual_spending))
+
+    risk_score = (0.6 * rmd_pressure) + (0.3 * magi_pressure) + (0.1 * liquidity_risk)
+    risk_value = float(risk_score * 100.0)
+
     return {
         "final_net_worth": float(run_result["final_net_worth"]),
         "after_tax_legacy": float(after_tax_legacy),
@@ -1639,9 +1663,9 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
         survivor_ss_income = float(metrics.get("survivor_ss_income", 0.0))
         ss_present_value = float(metrics.get("social_security_present_value", estimate_social_security_present_value(final_household_ss_income, survivor_ss_income)))
         total_government_drag = float(metrics.get("Total Government Drag", 0.0))
-        min_liquid_assets = max(0.0, -float(metrics.get("risk_value", 0.0)))
+        risk_score_ratio = clamp01(float(metrics.get("risk_value", 0.0)) / 100.0)
 
-        liquidity_coverage_years = safe_ratio(min_liquid_assets, annual_spending, default=0.0)
+        liquidity_coverage_years = 0.0
         income_coverage_ratio = safe_ratio(final_household_ss_income, annual_spending, default=0.0)
         survivor_coverage_ratio = safe_ratio(survivor_ss_income, annual_spending, default=0.0)
         stability_support_ratio = safe_ratio(stability_value, annual_spending, default=0.0)
@@ -1662,6 +1686,7 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
             "drag_ratio": safe_ratio(total_government_drag, starting_assets),
             "ss_present_value_ratio": safe_ratio(ss_present_value, starting_assets),
             "liquidity_coverage_years": float(liquidity_coverage_years),
+            "risk_score_ratio": float(risk_score_ratio),
             "income_coverage_ratio": float(income_coverage_ratio),
             "survivor_coverage_ratio": float(survivor_coverage_ratio),
             "stability_support_ratio": float(stability_support_ratio),
@@ -1713,6 +1738,7 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     trad_share = float(scoring_input.get("ending_traditional_ira_share", 0.0))
     ss_present_value_ratio = float(scoring_input.get("ss_present_value_ratio", 0.0))
     liquidity_coverage_years = float(scoring_input.get("liquidity_coverage_years", 0.0))
+    risk_score_ratio = clamp01(float(scoring_input.get("risk_score_ratio", 0.0)))
     income_coverage_ratio = float(scoring_input.get("income_coverage_ratio", 0.0))
     survivor_coverage_ratio = float(scoring_input.get("survivor_coverage_ratio", 0.0))
     stability_support_ratio = float(scoring_input.get("stability_support_ratio", 0.0))
@@ -1730,7 +1756,7 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
         + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
     )
     liquidity_signal = clamp01(liquidity_coverage_years / 25.0)
-    risk_penalty_base = 0.0  # TEMPORARILY DISABLED: current liquidity-floor risk signal is non-differentiating in this model
+    risk_penalty_base = risk_score_ratio
     trad_share_penalty_base = trad_share
 
     if profile_name == "Legacy Focused":
@@ -1806,7 +1832,7 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     score = positive_score - negative_score
 
     stability_label = "High" if income_coverage_ratio >= 0.95 and survivor_coverage_ratio >= 0.60 else ("Medium" if income_coverage_ratio >= 0.60 else "Low")
-    risk_label = "Disabled"
+    risk_label = "Low" if risk_penalty_base <= 0.33 else ("Medium" if risk_penalty_base <= 0.66 else "High")
 
     return {
         **scoring_input,
@@ -5959,7 +5985,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
         try:
             if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
-                st.caption("Risk penalty is currently disabled because the existing liquidity-floor risk signal is not differentiating strategies in this run.")
+                st.caption("Risk Value is flat across this run. The new composite retirement-risk metric should normally differentiate strategies; if it does not, treat risk as secondary for this scenario.")
         except Exception:
             pass
 
