@@ -2364,62 +2364,106 @@ def build_strategy_scan_payload(
 
 
 
-def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
+
+
+def run_strategy_combo_scan(
+    inputs: dict,
+    combos: list[tuple[int, int]],
+    max_conversion: float,
+    step_size: float,
+    profile_name: str,
+    trad_balance_penalty_lambda: float,
+    progress_text: str,
+    cache_namespace: str,
+    include_profile_shortlists: bool = False,
+    shortlist_top_n: int = 5,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+) -> dict:
+    """Single shared pipeline for Quick and Full SS scans."""
     preferences = extract_scoring_preferences(inputs)
     base_snapshot = copy.deepcopy(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
-    quick_max_conversion = sanitize_governor_max_conversion(float(max_conversion))
-    quick_step_size = sanitize_governor_step_size(float(step_size))
-    trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
+    max_conversion = sanitize_governor_max_conversion(float(max_conversion))
+    step_size = sanitize_governor_step_size(float(step_size))
 
-    quick_rows, errors = build_ss_optimizer_fact_rows(
+    fact_rows, errors = build_ss_optimizer_fact_rows(
         base_snapshot,
-        QUICK_STRATEGY_COMBOS,
-        quick_max_conversion,
-        quick_step_size,
+        combos,
+        max_conversion,
+        step_size,
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-        progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
-        cache_namespace="_quick_recommendation_result_rows_cache",
+        progress_text=progress_text,
+        cache_namespace=cache_namespace,
     )
-    if not quick_rows:
-        raise RuntimeError("Quick strategy recommendation could not produce any valid strategy results.")
+    if not fact_rows:
+        raise RuntimeError("Strategy scan could not produce any valid strategy results.")
 
     shared_payload = build_strategy_scan_payload(
-        quick_rows,
+        fact_rows,
         inputs=base_snapshot,
         selected_profile_name=profile_name,
         preferences=preferences,
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=shortlist_top_n,
+        primary_table_top_n=primary_table_top_n,
+        comparison_top_n=comparison_top_n,
+        include_profile_shortlists=include_profile_shortlists,
+    )
+
+    ranked_df = canonicalize_optimizer_result_df(shared_payload["ranked_df"].copy(), "strategy scan ranked results")
+    primary_table_df = canonicalize_optimizer_result_df(shared_payload["primary_table_df"].copy(), "strategy scan primary table")
+    comparison_df = shared_payload["comparison_df"].copy() if isinstance(shared_payload.get("comparison_df"), pd.DataFrame) else pd.DataFrame(shared_payload.get("comparison_df", []))
+    return {
+        "inputs_snapshot": base_snapshot,
+        "preferences": preferences,
+        "fact_rows": fact_rows,
+        "errors": errors,
+        "shared_payload": shared_payload,
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+    }
+
+def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
+    trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
+    shared_scan = run_strategy_combo_scan(
+        inputs=inputs,
+        combos=QUICK_STRATEGY_COMBOS,
+        max_conversion=max_conversion,
+        step_size=step_size,
+        profile_name=profile_name,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
+        cache_namespace="_quick_recommendation_result_rows_cache",
+        include_profile_shortlists=False,
         shortlist_top_n=10,
         primary_table_top_n=10,
         comparison_top_n=3,
-        include_profile_shortlists=False,
     )
-    ranked_df = shared_payload["ranked_df"]
-    ranked = ranked_df.to_dict("records")
-    data_source = "quick_subset_shared_scoring_pipeline"
 
-    summary_df = shared_payload["primary_table_df"]
+    ranked_df = shared_scan["ranked_df"]
+    ranked = ranked_df.to_dict("records")
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
-        "summary_df": summary_df,
-        "comparison_display_df": shared_payload["comparison_df"],
-        "all_results_df": canonicalize_optimizer_result_df(ranked_df.copy(), "quick scored results"),
+        "summary_df": shared_scan["primary_table_df"],
+        "comparison_display_df": shared_scan["comparison_df"],
+        "all_results_df": ranked_df,
         "ranked_rows": ranked,
         "advisor_text": explanation,
         "close_result": is_close_quick_result(ranked),
         "next_step_guidance": generate_next_step_guidance(profile_name, ranked),
-        "errors": errors,
-        "data_source": data_source,
-        "applied_preset_note": "",
-        "engine_execution_note": "Quick and Full now use the same shared candidate evaluation, metrics, scoring, and output builders; only combo selection differs.",
-        "active_preferences_text": describe_active_scoring_preferences(preferences),
-        "strategy_universe_size": len(quick_rows),
-        "profile_shortlists": shared_payload.get("profile_shortlists", {}),
-        "scoring_context": shared_payload.get("scoring_context", {}),
+        "errors": shared_scan["errors"],
+        "data_source": "shared_strategy_scan_pipeline",
+        "applied_preset_note": "Using shared strategy scan pipeline with live inputs.",
+        "active_preferences_text": describe_active_scoring_preferences(shared_scan["preferences"]),
+        "quick_recommendation_input_state": copy.deepcopy(shared_scan["inputs_snapshot"]),
+        "quick_recommendation_source_scenario_state": copy.deepcopy(collect_scenario_state()),
+        "shared_scan_payload": shared_scan["shared_payload"],
     }
+
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -5740,12 +5784,6 @@ def run_ss_optimizer(
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
 
-    base_snapshot = copy.deepcopy(inputs)
-    base_snapshot["integrity_mode"] = False
-    base_snapshot["strict_repeatability_check"] = False
-    max_conversion = sanitize_governor_max_conversion(float(max_conversion))
-    step_size = sanitize_governor_step_size(float(step_size))
-
     st.session_state["ss_optimizer_running"] = True
     st.session_state["ss_optimizer_interrupted"] = False
     st.session_state["ss_optimizer_error"] = None
@@ -5754,15 +5792,22 @@ def run_ss_optimizer(
     st.session_state["ss_optimizer_last_completed"] = None
 
     try:
-        results, errors = build_ss_optimizer_fact_rows(
-            base_snapshot,
-            combos,
-            max_conversion,
-            step_size,
+        shared_scan = run_strategy_combo_scan(
+            inputs=inputs,
+            combos=combos,
+            max_conversion=max_conversion,
+            step_size=step_size,
+            profile_name=profile_name,
             trad_balance_penalty_lambda=trad_balance_penalty_lambda,
             progress_text=f"Running Social Security optimizer... 0/{total_combos}",
             cache_namespace="_ss_optimizer_fact_rows_cache",
+            include_profile_shortlists=True,
+            shortlist_top_n=5,
+            primary_table_top_n=10,
+            comparison_top_n=3,
         )
+        results = shared_scan["fact_rows"]
+        errors = shared_scan["errors"]
         st.session_state["ss_optimizer_partial_results"] = copy.deepcopy(results)
         st.session_state["ss_optimizer_progress_index"] = len(results)
         st.session_state["ss_optimizer_last_completed"] = combos[len(results) - 1] if results else None
@@ -5794,23 +5839,12 @@ def run_ss_optimizer(
                 "error_message": st.session_state["ss_optimizer_error"],
             }, engine="ss_optimizer")
 
-        scoring_preferences = extract_scoring_preferences(inputs)
-        shared_payload = build_strategy_scan_payload(
-            results,
-            inputs=base_snapshot,
-            selected_profile_name=profile_name,
-            preferences=scoring_preferences,
-            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            shortlist_top_n=5,
-            primary_table_top_n=10,
-            comparison_top_n=3,
-            include_profile_shortlists=True,
-        )
+        shared_payload = shared_scan["shared_payload"]
         scoring_context = shared_payload["scoring_context"]
-        results_df = canonicalize_optimizer_result_df(shared_payload["ranked_df"], "ss optimizer ranked results")
+        results_df = shared_scan["ranked_df"]
         profile_shortlists = shared_payload["profile_shortlists"]
-        top_10_df = canonicalize_optimizer_result_df(shared_payload["primary_table_df"].head(10).copy(), "ss optimizer top 10")
-        comparison_df = shared_payload["comparison_df"].copy() if isinstance(shared_payload.get("comparison_df"), pd.DataFrame) else pd.DataFrame(shared_payload.get("comparison_df", []))
+        top_10_df = shared_scan["primary_table_df"].head(10).copy()
+        comparison_df = shared_scan["comparison_df"]
 
         best_result = shared_payload.get("best_result")
         best_validation = None
@@ -5819,7 +5853,7 @@ def run_ss_optimizer(
             best_inputs = dict(inputs)
             best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
             best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
-            best_rerun = run_model_break_even_governor(best_inputs, max_conversion, step_size)
+            best_rerun = run_model_break_even_governor(best_inputs, sanitize_governor_max_conversion(float(max_conversion)), sanitize_governor_step_size(float(step_size)))
             best_validation = make_consistency_payload(
                 {
                     "final_net_worth": float(best_result["Final Net Worth"]),
