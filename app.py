@@ -987,6 +987,8 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
             "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
             "stability_value": float(row.get("Stability Value", 0.0)),
             "risk_value": float(row.get("Risk Value", 0.0)),
+            "min_liquid_assets": float(row.get("Minimum Liquid Assets", max(0.0, -float(row.get("Risk Value", 0.0))))),
+            "min_liquid_year": int(row.get("Year of Minimum Liquid Assets", START_YEAR)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
             "social_security_present_value": float(row.get("Social Security Present Value", 0.0)),
@@ -1072,7 +1074,12 @@ def build_strategy_metrics(run_result: dict) -> dict:
     ending_spouse_ss = float(last.get("Spouse SS", 0.0))
     final_household_ss = float(last.get("Total SS", ending_owner_ss + ending_spouse_ss))
     survivor_ss = max(ending_owner_ss, ending_spouse_ss)
-    min_liquid_assets = float((df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).min())
+
+    liquid_assets_by_year = (df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).astype(float)
+    min_liquid_assets = float(liquid_assets_by_year.min())
+    min_liquid_index = int(liquid_assets_by_year.idxmin())
+    min_liquid_year = int(df.loc[min_liquid_index, "Year"]) if "Year" in df.columns else int(last.get("Year", END_YEAR))
+
     after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     effective_legacy_value = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - HEIR_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
     heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
@@ -1090,6 +1097,8 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "ending_cash_balance": float(ending_cash),
         "stability_value": float(stability_value),
         "risk_value": float(risk_value),
+        "min_liquid_assets": float(min_liquid_assets),
+        "min_liquid_year": int(min_liquid_year),
         "final_household_ss_income": float(final_household_ss),
         "survivor_ss_income": float(survivor_ss),
         "social_security_present_value": float(social_security_present_value),
@@ -1207,6 +1216,8 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
             "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
             "stability_value": float(row.get("Stability Value", 0.0)),
             "risk_value": float(row.get("Risk Value", 0.0)),
+            "min_liquid_assets": float(row.get("Minimum Liquid Assets", max(0.0, -float(row.get("Risk Value", 0.0))))),
+            "min_liquid_year": int(row.get("Year of Minimum Liquid Assets", START_YEAR)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
             "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
@@ -1246,6 +1257,8 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Brokerage @ End": float(ranked_row["ending_brokerage_balance"]),
                 "Stability": ranked_row["stability_label"],
                 "Risk": ranked_row["risk_label"],
+                "Minimum Liquid Assets": float(ranked_row.get("min_liquid_assets", max(0.0, -float(ranked_row.get("risk_value", 0.0))))),
+                "Year of Minimum Liquid Assets": int(ranked_row.get("min_liquid_year", START_YEAR)),
                 "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
                 "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
                 "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
@@ -1296,6 +1309,8 @@ def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
         "IRMAA Hit Years",
         "Traditional IRA Penalty Applied",
         "Risk Value",
+        "Minimum Liquid Assets",
+        "Year of Minimum Liquid Assets",
         "Score",
     ]
     ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
@@ -1896,6 +1911,8 @@ def build_strategy_scoring_payload(
             "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
             "stability_value": float(row.get("Stability Value", 0.0)),
             "risk_value": float(row.get("Risk Value", 0.0)),
+            "min_liquid_assets": float(row.get("Minimum Liquid Assets", max(0.0, -float(row.get("Risk Value", 0.0))))),
+            "min_liquid_year": int(row.get("Year of Minimum Liquid Assets", START_YEAR)),
             "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
             "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
             "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
@@ -5959,7 +5976,7 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty and all_results_df.get("Risk Value") is not None:
         try:
             if all_results_df["Risk Value"].nunique(dropna=False) <= 1:
-                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only.")
+                st.caption("Risk Value is currently not differentiating strategies in this run, so treat it as diagnostic only. Check Minimum Liquid Assets and Year of Minimum Liquid Assets to see whether the risk input is truly flat or just being collapsed.")
         except Exception:
             pass
 
