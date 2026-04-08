@@ -2426,9 +2426,57 @@ def run_strategy_combo_scan(
         "comparison_df": comparison_df,
     }
 
+def execute_ss_scan(
+    inputs: dict,
+    combos: list[tuple[int, int]],
+    max_conversion: float,
+    step_size: float,
+    profile_name: str,
+    trad_balance_penalty_lambda: float,
+    progress_text: str,
+    cache_namespace: str,
+    include_profile_shortlists: bool = False,
+    shortlist_top_n: int = 5,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+) -> dict:
+    """Single shared Quick/Full scan pipeline. Only the combo list should differ."""
+    shared_scan = run_strategy_combo_scan(
+        inputs=inputs,
+        combos=combos,
+        max_conversion=max_conversion,
+        step_size=step_size,
+        profile_name=profile_name,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        progress_text=progress_text,
+        cache_namespace=cache_namespace,
+        include_profile_shortlists=include_profile_shortlists,
+        shortlist_top_n=shortlist_top_n,
+        primary_table_top_n=primary_table_top_n,
+        comparison_top_n=comparison_top_n,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_scan["ranked_df"].copy(), "strategy scan ranked results")
+    primary_table_df = canonicalize_optimizer_result_df(shared_scan["primary_table_df"].copy(), "strategy scan primary table")
+    comparison_df = shared_scan["comparison_df"].copy() if isinstance(shared_scan.get("comparison_df"), pd.DataFrame) else pd.DataFrame(shared_scan.get("comparison_df", []))
+    return {
+        "inputs_snapshot": copy.deepcopy(shared_scan["inputs_snapshot"]),
+        "preferences": copy.deepcopy(shared_scan["preferences"]),
+        "fact_rows": copy.deepcopy(shared_scan["fact_rows"]),
+        "errors": copy.deepcopy(shared_scan["errors"]),
+        "shared_payload": shared_scan["shared_payload"],
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+        "ranked_rows": ranked_df.to_dict("records"),
+        "best_result": shared_scan["shared_payload"].get("best_result"),
+        "profile_shortlists": copy.deepcopy(shared_scan["shared_payload"].get("profile_shortlists", {})),
+        "scoring_context": copy.deepcopy(shared_scan["shared_payload"].get("scoring_context", {})),
+    }
+
+
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
     trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
-    shared_scan = run_strategy_combo_scan(
+    shared_scan = execute_ss_scan(
         inputs=inputs,
         combos=QUICK_STRATEGY_COMBOS,
         max_conversion=max_conversion,
@@ -2443,14 +2491,13 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         comparison_top_n=3,
     )
 
-    ranked_df = shared_scan["ranked_df"]
-    ranked = ranked_df.to_dict("records")
+    ranked = shared_scan["ranked_rows"]
     explanation = generate_advisor_interpretation(profile_name, ranked)
     return {
         "profile_name": profile_name,
         "summary_df": shared_scan["primary_table_df"],
         "comparison_display_df": shared_scan["comparison_df"],
-        "all_results_df": ranked_df,
+        "all_results_df": shared_scan["ranked_df"],
         "ranked_rows": ranked,
         "advisor_text": explanation,
         "close_result": is_close_quick_result(ranked),
@@ -2463,7 +2510,6 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         "quick_recommendation_source_scenario_state": copy.deepcopy(collect_scenario_state()),
         "shared_scan_payload": shared_scan["shared_payload"],
     }
-
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -5792,7 +5838,7 @@ def run_ss_optimizer(
     st.session_state["ss_optimizer_last_completed"] = None
 
     try:
-        shared_scan = run_strategy_combo_scan(
+        shared_scan = execute_ss_scan(
             inputs=inputs,
             combos=combos,
             max_conversion=max_conversion,
@@ -5839,14 +5885,12 @@ def run_ss_optimizer(
                 "error_message": st.session_state["ss_optimizer_error"],
             }, engine="ss_optimizer")
 
-        shared_payload = shared_scan["shared_payload"]
-        scoring_context = shared_payload["scoring_context"]
         results_df = shared_scan["ranked_df"]
-        profile_shortlists = shared_payload["profile_shortlists"]
+        profile_shortlists = shared_scan["profile_shortlists"]
         top_10_df = shared_scan["primary_table_df"].head(10).copy()
         comparison_df = shared_scan["comparison_df"]
-
-        best_result = shared_payload.get("best_result")
+        scoring_context = shared_scan["scoring_context"]
+        best_result = shared_scan["best_result"]
         best_validation = None
         best_rerun_summary = None
         if integrity_mode and best_result is not None:
@@ -5914,8 +5958,32 @@ def run_ss_optimizer(
             "total_combos": total_combos,
             "error_message": None,
         }, engine="ss_optimizer")
-    finally:
-        st.session_state["ss_optimizer_running"] = False
+    except Exception as exc:
+        st.session_state["ss_optimizer_interrupted"] = True
+        st.session_state["ss_optimizer_error"] = str(exc)
+        partial_df = pd.DataFrame(st.session_state.get("ss_optimizer_partial_results", []))
+        return tag_result_payload({
+            "all_results_df": partial_df.copy(),
+            "all_results_export_df": partial_df.copy(),
+            "top_10_df": partial_df.head(10).copy(),
+            "top_10_export_df": partial_df.head(10).copy(),
+            "comparison_df": pd.DataFrame(),
+            "comparison_display_df": pd.DataFrame(),
+            "profile_shortlists": {},
+            "raw_results_df": partial_df.copy(),
+            "best_result": None,
+            "best_validation": None,
+            "best_rerun_summary": None,
+            "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+            "scoring_context": {},
+            "profile_name": profile_name,
+            "applied_preset_note": "",
+            "interrupted_partial_df": partial_df.copy(),
+            "completed": False,
+            "progress_index": int(st.session_state.get("ss_optimizer_progress_index", 0)),
+            "total_combos": total_combos,
+            "error_message": str(exc),
+        }, engine="ss_optimizer")
 
 def render_ss_optimizer_results(result: dict, planning_profile: str, current_preferences: dict):
     st.subheader("Full 81-Combination Scan Results")
