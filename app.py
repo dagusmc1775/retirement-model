@@ -1419,7 +1419,36 @@ def build_ranked_optimizer_results_df(
     ranked_df = pd.DataFrame(rows)
     if ranked_df.empty:
         return ranked_df
+    ranked_df = add_normalized_profile_score_columns(ranked_df)
     return reorder_ss_optimizer_results_df(ranked_df)
+
+
+
+def add_normalized_profile_score_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    working = df.copy()
+    score_columns = [
+        ("Balanced Profile Score", "Balanced (0–100)"),
+        ("Growth Profile Score", "Growth (0–100)"),
+        ("Tax-Efficient Profile Score", "Tax-Efficient (0–100)"),
+        ("Legacy Profile Score", "Legacy (0–100)"),
+        ("Spend With Confidence Profile Score", "Spend With Confidence (0–100)"),
+        ("Max SS Modifier Score", "Max SS (0–100)"),
+    ]
+    for source_col, normalized_col in score_columns:
+        if source_col not in working.columns:
+            continue
+        series = pd.to_numeric(working[source_col], errors="coerce")
+        min_value = float(series.min())
+        max_value = float(series.max())
+        if pd.isna(min_value) or pd.isna(max_value):
+            working[normalized_col] = 50.0
+        elif abs(max_value - min_value) < 1e-12:
+            working[normalized_col] = 50.0
+        else:
+            working[normalized_col] = ((series - min_value) / (max_value - min_value)) * 100.0
+    return working
 
 
 def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) -> pd.DataFrame:
@@ -1443,11 +1472,17 @@ def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) 
         "Selected Score",
         "Score",
         "Balanced Profile Score",
+        "Balanced (0–100)",
         "Growth Profile Score",
+        "Growth (0–100)",
         "Tax-Efficient Profile Score",
+        "Tax-Efficient (0–100)",
         "Legacy Profile Score",
+        "Legacy (0–100)",
         "Spend With Confidence Profile Score",
+        "Spend With Confidence (0–100)",
         "Max SS Modifier Score",
+        "Max SS (0–100)",
         "Income Stability Modifier Score",
         "Min Trad IRA Modifier Score",
         "Final Net Worth",
