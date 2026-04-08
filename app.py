@@ -5733,117 +5733,84 @@ def run_ss_optimizer(
     existing_results: list | None = None,
     profile_name: str = "Balanced",
 ) -> dict:
+    _ = start_index
+    _ = existing_results
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
 
-    # Freeze a clean snapshot for optimizer runs and force the optimizer path into fast mode.
-    # This 81-combination scan is intentionally profile-neutral at the engine level so the
-    # resulting raw combo table can be rescored independently for every planning profile.
     base_snapshot = copy.deepcopy(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
     max_conversion = sanitize_governor_max_conversion(float(max_conversion))
     step_size = sanitize_governor_step_size(float(step_size))
 
-    results = list(existing_results or [])
     st.session_state["ss_optimizer_running"] = True
     st.session_state["ss_optimizer_interrupted"] = False
     st.session_state["ss_optimizer_error"] = None
-    st.session_state["ss_optimizer_partial_results"] = results
-    progress_bar = st.progress(start_index / total_combos if total_combos else 0.0, text="Running Social Security optimizer...")
+    st.session_state["ss_optimizer_partial_results"] = []
+    st.session_state["ss_optimizer_progress_index"] = 0
+    st.session_state["ss_optimizer_last_completed"] = None
 
     try:
-        for combo_index in range(start_index, total_combos):
-            owner_age, spouse_age = combos[combo_index]
-            scenario_inputs = dict(base_snapshot)
-            scenario_inputs["owner_claim_age"] = int(owner_age)
-            scenario_inputs["spouse_claim_age"] = int(spouse_age)
+        results, errors = build_ss_optimizer_fact_rows(
+            base_snapshot,
+            combos,
+            max_conversion,
+            step_size,
+            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+            progress_text=f"Running Social Security optimizer... 0/{total_combos}",
+            cache_namespace="_ss_optimizer_fact_rows_cache",
+        )
+        st.session_state["ss_optimizer_partial_results"] = copy.deepcopy(results)
+        st.session_state["ss_optimizer_progress_index"] = len(results)
+        st.session_state["ss_optimizer_last_completed"] = combos[len(results) - 1] if results else None
 
-            try:
-                run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
-            except Exception as exc:
-                st.session_state["ss_optimizer_progress_index"] = combo_index
-                st.session_state["ss_optimizer_partial_results"] = results
-                st.session_state["ss_optimizer_last_completed"] = combos[combo_index - 1] if combo_index > 0 else None
-                st.session_state["ss_optimizer_interrupted"] = True
-                st.session_state["ss_optimizer_error"] = f"SS optimizer failed for owner age {owner_age} / spouse age {spouse_age}: {exc}"
-                interrupted_df = pd.DataFrame(results) if results else pd.DataFrame()
-                return tag_result_payload({
-                    "all_results_df": interrupted_df.copy(),
-                    "all_results_export_df": interrupted_df.copy(),
-                    "top_10_df": interrupted_df.head(10).copy(),
-                    "top_10_export_df": interrupted_df.head(10).copy(),
-                    "comparison_df": pd.DataFrame(),
-                    "comparison_display_df": pd.DataFrame(),
-                    "best_result": None,
-                    "best_validation": None,
-                    "best_rerun_summary": None,
-                    "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
-                    "profile_name": None,
-                    "optimizer_is_profile_neutral": True,
-                    "interrupted_partial_df": interrupted_df.copy(),
-                    "completed": False,
-                    "progress_index": combo_index,
-                    "total_combos": total_combos,
-                    "error_message": st.session_state["ss_optimizer_error"],
-                }, engine="ss_optimizer")
-
-            row = build_ss_optimizer_result_row(
-                run_result,
-                owner_age,
-                spouse_age,
-                trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            )
-            results.append(row)
-            st.session_state["ss_optimizer_partial_results"] = results
-            st.session_state["ss_optimizer_progress_index"] = combo_index + 1
-            st.session_state["ss_optimizer_last_completed"] = (owner_age, spouse_age)
-            progress_bar.progress((combo_index + 1) / total_combos, text=f"Running Social Security optimizer... {combo_index + 1}/{total_combos}")
+        if errors:
+            interrupted_df = pd.DataFrame(results) if results else pd.DataFrame()
+            st.session_state["ss_optimizer_interrupted"] = True
+            st.session_state["ss_optimizer_error"] = "SS optimizer encountered errors: " + " | ".join(errors[:3])
+            return tag_result_payload({
+                "all_results_df": interrupted_df.copy(),
+                "all_results_export_df": interrupted_df.copy(),
+                "top_10_df": interrupted_df.head(10).copy(),
+                "top_10_export_df": interrupted_df.head(10).copy(),
+                "comparison_df": pd.DataFrame(),
+                "comparison_display_df": pd.DataFrame(),
+                "profile_shortlists": {},
+                "raw_results_df": interrupted_df.copy(),
+                "best_result": None,
+                "best_validation": None,
+                "best_rerun_summary": None,
+                "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+                "scoring_context": {},
+                "profile_name": None,
+                "optimizer_is_profile_neutral": True,
+                "completed": False,
+                "progress_index": len(results),
+                "total_combos": total_combos,
+                "interrupted_partial_df": interrupted_df.copy(),
+                "error_message": st.session_state["ss_optimizer_error"],
+            }, engine="ss_optimizer")
 
         scoring_preferences = extract_scoring_preferences(inputs)
-        shared_outputs = build_scored_strategy_outputs(
+        shared_payload = build_strategy_scan_payload(
             results,
-            inputs=inputs,
+            inputs=base_snapshot,
             selected_profile_name=profile_name,
             preferences=scoring_preferences,
             trad_balance_penalty_lambda=trad_balance_penalty_lambda,
             shortlist_top_n=5,
+            primary_table_top_n=10,
+            comparison_top_n=3,
+            include_profile_shortlists=True,
         )
-        scoring_context = shared_outputs["scoring_context"]
-        results_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "ss optimizer ranked results")
-        profile_shortlists = shared_outputs["profile_shortlists"]
+        scoring_context = shared_payload["scoring_context"]
+        results_df = canonicalize_optimizer_result_df(shared_payload["ranked_df"], "ss optimizer ranked results")
+        profile_shortlists = shared_payload["profile_shortlists"]
+        top_10_df = canonicalize_optimizer_result_df(shared_payload["primary_table_df"].head(10).copy(), "ss optimizer top 10")
+        comparison_df = canonicalize_optimizer_result_df(shared_payload["comparison_df"].copy(), "ss optimizer top 3 comparison")
 
-        top_10_df = canonicalize_optimizer_result_df(results_df.head(10).copy(), "ss optimizer top 10")
-        top_3 = canonicalize_optimizer_result_df(results_df.head(3).copy(), "ss optimizer top 3")
-
-        compare_metrics = [
-            ("SS Ages", lambda r: f"{int(r['Owner SS Age'])}/{int(r['Spouse SS Age'])}"),
-            ("Final Net Worth", lambda r: format_dollars(r["Final Net Worth"])),
-            ("Ending Traditional IRA Balance", lambda r: format_dollars(r["Ending Traditional IRA Balance"])),
-            ("Total Government Drag", lambda r: format_dollars(r["Total Government Drag"])),
-            ("Total Conversions", lambda r: format_dollars(r["Total Conversions"])),
-            ("Total Federal Tax", lambda r: format_dollars(r["Total Federal Tax"])),
-            ("Total State Tax", lambda r: format_dollars(r["Total State Tax"])),
-            ("Total ACA Cost", lambda r: format_dollars(r["Total ACA Cost"])),
-            ("Total IRMAA Cost", lambda r: format_dollars(r["Total IRMAA Cost"])),
-            ("Max MAGI", lambda r: format_dollars(r["Max MAGI"])),
-            ("ACA Hit Years", lambda r: int(r["ACA Hit Years"])),
-            ("IRMAA Hit Years", lambda r: int(r["IRMAA Hit Years"])),
-            ("First IRMAA Year", lambda r: "None" if pd.isna(r["First IRMAA Year"]) else int(r["First IRMAA Year"])),
-            ("Traditional IRA Penalty Applied", lambda r: format_dollars(r["Traditional IRA Penalty Applied"])),
-            ("Selected Score", lambda r: format_dollars(get_selected_score_value(r))),
-        ]
-
-        compare_rows = []
-        for metric_name, getter in compare_metrics:
-            row = {"Metric": metric_name}
-            for idx in range(3):
-                col_name = f"#{idx + 1}"
-                row[col_name] = getter(top_3.iloc[idx]) if idx < len(top_3) else ""
-            compare_rows.append(row)
-        comparison_df = pd.DataFrame(compare_rows)
-
-        best_result = results_df.iloc[0].to_dict() if not results_df.empty else None
+        best_result = shared_payload.get("best_result")
         best_validation = None
         best_rerun_summary = None
         if integrity_mode and best_result is not None:
@@ -5869,7 +5836,6 @@ def run_ss_optimizer(
             )
             best_rerun_summary = {k: best_rerun.get(k) for k in CONSISTENCY_KEYS}
 
-        progress_bar.empty()
         clear_ss_optimizer_state(clear_last_result=False)
         st.session_state["ss_optimizer_last_result"] = tag_result_payload({
             "all_results_df": results_df,
@@ -5914,12 +5880,6 @@ def run_ss_optimizer(
         }, engine="ss_optimizer")
     finally:
         st.session_state["ss_optimizer_running"] = False
-        try:
-            progress_bar.empty()
-        except Exception:
-            pass
-
-
 
 def render_ss_optimizer_results(result: dict, planning_profile: str, current_preferences: dict):
     st.subheader("Full 81-Combination Scan Results")
