@@ -875,7 +875,9 @@ def build_ss_optimizer_result_row(
         "Strategy": f"{int(owner_age)}/{int(spouse_age)}",
         "Final Net Worth": float(run_result["final_net_worth"]),
         "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+        "After-Tax Net Worth (Primary)": float(metrics["after_tax_legacy"]),
         "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+        "Heir Value (Conservative)": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
         "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
         "Ending Roth Balance": float(metrics["ending_roth_balance"]),
         "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
@@ -1234,7 +1236,9 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
             "Score": float(ranked_row["score_100"]),
                 "Net Worth": float(ranked_row["final_net_worth"]),
                 "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+                "After-Tax Net Worth (Primary)": float(ranked_row["after_tax_legacy"]),
                 "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+                "Heir Value (Conservative)": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
                 "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
                 "Trad IRA @ End": float(ranked_row["ending_traditional_ira_balance"]),
                 "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
@@ -1326,7 +1330,9 @@ def build_ranked_optimizer_results_df(
             "Strategy": ranked_row["Strategy"],
             "Final Net Worth": float(ranked_row["final_net_worth"]),
             "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+            "After-Tax Net Worth (Primary)": float(ranked_row["after_tax_legacy"]),
             "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+            "Heir Value (Conservative)": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
             "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
             "Ending Roth Balance": float(ranked_row["ending_roth_balance"]),
             "Ending Traditional IRA Balance": float(ranked_row["ending_traditional_ira_balance"]),
@@ -1506,6 +1512,7 @@ def render_profile_winner_diagnostics(row: pd.Series | dict, profile_name: str) 
     base_profile_score = float(row.get(profile_score_col, 0.0))
     modifier_total = float(row.get("Max SS Modifier Score", 0.0)) + float(row.get("Income Stability Modifier Score", 0.0)) + float(row.get("Min Trad IRA Modifier Score", 0.0))
 
+    st.caption("Ranking is based on after-tax outcomes, not pre-tax balances.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Selected Score", f"{selected_score:.2f}")
     c2.metric("Base Profile Score", f"{base_profile_score:.2f}")
@@ -1639,12 +1646,17 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
         survivor_coverage_ratio = safe_ratio(survivor_ss_income, annual_spending, default=0.0)
         stability_support_ratio = safe_ratio(stability_value, annual_spending, default=0.0)
 
+        # Canonical scoring rule:
+        # Use one after-tax metric across all profiles. Keep the harsher heir-style
+        # value as a reporting / diagnostic field, not as a separate scoring basis.
+        canonical_after_tax_ratio = safe_ratio(after_tax_legacy, starting_assets)
+
         scoring_inputs.append({
             **metrics,
             "ending_traditional_ira_share": float(trad_share),
             "net_worth_ratio": safe_ratio(final_net_worth, starting_assets),
-            "legacy_ratio": safe_ratio(after_tax_legacy, starting_assets),
-            "effective_legacy_ratio": safe_ratio(effective_legacy_value, starting_assets),
+            "legacy_ratio": canonical_after_tax_ratio,
+            "effective_legacy_ratio": canonical_after_tax_ratio,
             "heir_tax_drag_ratio": safe_ratio(heir_tax_drag, starting_assets),
             "trad_ratio": safe_ratio(ending_trad, starting_assets),
             "drag_ratio": safe_ratio(total_government_drag, starting_assets),
@@ -1692,6 +1704,8 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
 
     net_worth_ratio = float(scoring_input.get("net_worth_ratio", 0.0))
     legacy_ratio = float(scoring_input.get("legacy_ratio", 0.0))
+    # effective_legacy_ratio is intentionally kept aligned to legacy_ratio so every
+    # profile scores against the same canonical after-tax metric.
     effective_legacy_ratio = float(scoring_input.get("effective_legacy_ratio", legacy_ratio))
     heir_tax_drag_ratio = float(scoring_input.get("heir_tax_drag_ratio", 0.0))
     trad_ratio = float(scoring_input.get("trad_ratio", 0.0))
@@ -1720,7 +1734,10 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     trad_share_penalty_base = trad_share
 
     if profile_name == "Legacy Focused":
-        legacy_component = weights["legacy"] * (0.76 * effective_legacy_signal + 0.24 * base_legacy_signal)
+        # Legacy Focused now uses the same canonical after-tax metric as every other
+        # profile. Legacy sensitivity should come from profile weights and heir/Trad
+        # penalties, not from swapping in a different wealth definition.
+        legacy_component = weights["legacy"] * base_legacy_signal
         nw_component = 0.05 * weights["nw"] * nw_signal
         stability_component = weights["stability"] * stability_signal
         trad_component = weights["trad"] * (trad_penalty_base ** 1.55)
