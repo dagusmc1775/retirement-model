@@ -7845,8 +7845,12 @@ def render_conversion_page() -> None:
                         step_size=step_size,
                         profile_name=planning_profile,
                     )
-                quick_hash_inputs, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
-                quick_hash_inputs.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
+                quick_hash_inputs = {
+                    **copy.deepcopy(inputs),
+                    "max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION,
+                    "step_size": QUICK_RECOMMENDATION_STEP_SIZE,
+                    "planning_profile": planning_profile,
+                }
                 recommendation_result["quick_recommendation_input_state"] = copy.deepcopy(quick_hash_inputs)
                 recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
                 st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
@@ -7879,8 +7883,12 @@ def render_conversion_page() -> None:
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
         if quick_result is not None:
-            quick_inputs_snapshot, _ = build_stateless_quick_recommendation_inputs(inputs, planning_profile)
-            quick_inputs_snapshot.update({"max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION, "step_size": QUICK_RECOMMENDATION_STEP_SIZE, "planning_profile": planning_profile})
+            quick_inputs_snapshot = {
+                **copy.deepcopy(inputs),
+                "max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION,
+                "step_size": QUICK_RECOMMENDATION_STEP_SIZE,
+                "planning_profile": planning_profile,
+            }
             if should_suppress_quick_recommendation_stale_warning(quick_inputs_snapshot):
                 st.caption("Showing the previously generated quick recommendation snapshot while you review the selected Break-Even Governor setup.")
                 st.session_state["suppress_quick_recommendation_stale_once"] = False
