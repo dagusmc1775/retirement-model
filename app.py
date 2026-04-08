@@ -594,6 +594,17 @@ def normalize_series(values):
     return [(v - vmin) / (vmax - vmin) for v in vals]
 
 
+def normalize_penalty_series(values):
+    vals = [float(v) for v in values]
+    if not vals:
+        return []
+    vmin = min(vals)
+    vmax = max(vals)
+    if abs(vmax - vmin) < 1e-9:
+        return [0.0 for _ in vals]
+    return [(v - vmin) / (vmax - vmin) for v in vals]
+
+
 def qualitative_bucket(norm_value: float, reverse: bool = False) -> str:
     v = float(norm_value)
     if reverse:
@@ -1092,16 +1103,12 @@ def build_strategy_metrics(run_result: dict) -> dict:
             if first_rmd_rows is not None and not first_rmd_rows.empty:
                 trad_at_rmd_start = float(first_rmd_rows.iloc[0])
 
-    after_tax_base = max(1.0, after_tax_legacy)
-    rmd_pressure = clamp01(trad_at_rmd_start / after_tax_base)
     max_magi = max(0.0, float(run_result.get("max_magi", df["MAGI"].max() if "MAGI" in df.columns else 0.0)))
-    magi_pressure = clamp01(max_magi / IRMAA_FIRST_CLIFF_MFJ)
-    liquidity_risk = 0.0
+    magi_excess_over_cliff = max(0.0, max_magi - IRMAA_FIRST_CLIFF_MFJ)
+    irmaa_hit_years = int(run_result.get("irmaa_hit_years", 0))
+    liquidity_risk_raw = 0.0
     if annual_spending > 0.0:
-        liquidity_risk = 1.0 - clamp01(min_liquid_assets / (10.0 * annual_spending))
-
-    risk_score = (0.6 * rmd_pressure) + (0.3 * magi_pressure) + (0.1 * liquidity_risk)
-    risk_value = float(risk_score * 100.0)
+        liquidity_risk_raw = 1.0 - clamp01(min_liquid_assets / (10.0 * annual_spending))
 
     return {
         "final_net_worth": float(run_result["final_net_worth"]),
@@ -1113,7 +1120,12 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "ending_brokerage_balance": float(ending_brokerage),
         "ending_cash_balance": float(ending_cash),
         "stability_value": float(stability_value),
-        "risk_value": float(risk_value),
+        "risk_value": 0.0,
+        "trad_at_rmd_start": float(trad_at_rmd_start),
+        "irmaa_hit_years": int(irmaa_hit_years),
+        "magi_excess_over_cliff": float(magi_excess_over_cliff),
+        "min_liquid_assets": float(min_liquid_assets),
+        "liquidity_risk_raw": float(liquidity_risk_raw),
         "final_household_ss_income": float(final_household_ss),
         "survivor_ss_income": float(survivor_ss),
         "social_security_present_value": float(social_security_present_value),
@@ -1634,9 +1646,9 @@ def build_strategy_scoring_context(inputs: dict | None = None, metrics_list: lis
 def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None = None) -> list[dict]:
     """
     Build the shared scoring-input rows used by BOTH Quick and Full.
-    These inputs must be strategy-local and scenario-local only.
-    They must NOT depend on the size or composition of the candidate set,
-    otherwise overlapping Quick/Full strategies can never match exactly.
+    Risk is ranked comparatively across the candidate set using retirement-specific
+    fragility drivers: Trad carried into RMD years, IRMAA exposure, MAGI excess
+    over the first IRMAA cliff, and a small liquidity tie-breaker.
     """
     if not metrics_list:
         return []
@@ -1645,8 +1657,13 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
     starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
     annual_spending = max(1.0, float(scoring_context.get("annual_spending", 1.0)))
 
+    trad_at_rmd_norm = normalize_penalty_series([float(m.get("trad_at_rmd_start", m.get("ending_traditional_ira_balance", 0.0))) for m in metrics_list])
+    irmaa_hit_years_norm = normalize_penalty_series([float(m.get("irmaa_hit_years", m.get("IRMAA Hit Years", 0))) for m in metrics_list])
+    magi_excess_norm = normalize_penalty_series([float(m.get("magi_excess_over_cliff", 0.0)) for m in metrics_list])
+    liquidity_risk_norm = normalize_penalty_series([float(m.get("liquidity_risk_raw", 0.0)) for m in metrics_list])
+
     scoring_inputs = []
-    for metrics in metrics_list:
+    for idx, metrics in enumerate(metrics_list):
         ending_trad = float(metrics.get("ending_traditional_ira_balance", 0.0))
         ending_roth = float(metrics.get("ending_roth_balance", 0.0))
         ending_brokerage = float(metrics.get("ending_brokerage_balance", 0.0))
@@ -1663,20 +1680,23 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
         survivor_ss_income = float(metrics.get("survivor_ss_income", 0.0))
         ss_present_value = float(metrics.get("social_security_present_value", estimate_social_security_present_value(final_household_ss_income, survivor_ss_income)))
         total_government_drag = float(metrics.get("Total Government Drag", 0.0))
-        risk_score_ratio = clamp01(float(metrics.get("risk_value", 0.0)) / 100.0)
+        risk_score_ratio = clamp01(
+            0.50 * trad_at_rmd_norm[idx]
+            + 0.25 * irmaa_hit_years_norm[idx]
+            + 0.20 * magi_excess_norm[idx]
+            + 0.05 * liquidity_risk_norm[idx]
+        )
 
         liquidity_coverage_years = 0.0
         income_coverage_ratio = safe_ratio(final_household_ss_income, annual_spending, default=0.0)
         survivor_coverage_ratio = safe_ratio(survivor_ss_income, annual_spending, default=0.0)
         stability_support_ratio = safe_ratio(stability_value, annual_spending, default=0.0)
 
-        # Canonical scoring rule:
-        # Use one after-tax metric across all profiles. Keep the harsher heir-style
-        # value as a reporting / diagnostic field, not as a separate scoring basis.
         canonical_after_tax_ratio = safe_ratio(after_tax_legacy, starting_assets)
 
         scoring_inputs.append({
             **metrics,
+            "risk_value": float(risk_score_ratio),
             "ending_traditional_ira_share": float(trad_share),
             "net_worth_ratio": safe_ratio(final_net_worth, starting_assets),
             "legacy_ratio": canonical_after_tax_ratio,
