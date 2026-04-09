@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v257"
+APP_VERSION = "v258"
 APP_STATE_VERSION = "v106"
 
 
@@ -266,23 +266,48 @@ def canonicalize_optimizer_result_df(df: pd.DataFrame, name: str = "optimizer re
     return ensure_dataframe_columns(df, required, name)
 
 
+
+
+def normalize_display_score_series(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    if numeric.empty:
+        return numeric
+    min_value = float(numeric.min())
+    max_value = float(numeric.max())
+    if pd.isna(min_value) or pd.isna(max_value):
+        return pd.Series([50.0] * len(numeric), index=numeric.index, dtype=float)
+    if abs(max_value - min_value) < 1e-12:
+        return pd.Series([50.0] * len(numeric), index=numeric.index, dtype=float)
+    return ((numeric - min_value) / (max_value - min_value)) * 100.0
+
 def get_selected_score_value(row) -> float:
     if isinstance(row, pd.Series):
+        if "Selected Score Raw" in row.index:
+            return float(row.get("Selected Score Raw", 0.0))
         if "Selected Score" in row.index:
             return float(row.get("Selected Score", 0.0))
+        if "Score Raw" in row.index:
+            return float(row.get("Score Raw", 0.0))
         if "Score" in row.index:
             return float(row.get("Score", 0.0))
         return 0.0
     if isinstance(row, dict):
+        if "Selected Score Raw" in row:
+            return float(row.get("Selected Score Raw", 0.0))
         if "Selected Score" in row:
             return float(row.get("Selected Score", 0.0))
+        if "Score Raw" in row:
+            return float(row.get("Score Raw", 0.0))
         if "Score" in row:
             return float(row.get("Score", 0.0))
         return 0.0
     try:
-        return float(getattr(row, "Selected Score"))
+        return float(getattr(row, "Selected Score Raw"))
     except Exception:
-        return 0.0
+        try:
+            return float(getattr(row, "Selected Score"))
+        except Exception:
+            return 0.0
 
 
 def _coerce_numeric_or_none(value):
@@ -1313,7 +1338,13 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Heir Tax Penalty -": float(ranked_row.get("heir_tax_component", 0.0) * 100.0),
                 "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
             })
-        shortlists[profile_name] = pd.DataFrame(rows)
+        shortlist_df = pd.DataFrame(rows)
+        if not shortlist_df.empty and "Selected Score" in shortlist_df.columns:
+            shortlist_df["Selected Score Raw"] = pd.to_numeric(shortlist_df["Selected Score"], errors="coerce")
+            shortlist_df["Score Raw"] = pd.to_numeric(shortlist_df["Score"], errors="coerce")
+            shortlist_df["Selected Score"] = normalize_display_score_series(shortlist_df["Selected Score Raw"])
+            shortlist_df["Score"] = shortlist_df["Selected Score"]
+        shortlists[profile_name] = shortlist_df
     return shortlists
 
 
@@ -1436,6 +1467,10 @@ def build_ranked_optimizer_results_df(
     ranked_df = pd.DataFrame(rows)
     if ranked_df.empty:
         return ranked_df
+    ranked_df["Selected Score Raw"] = pd.to_numeric(ranked_df["Selected Score"], errors="coerce")
+    ranked_df["Score Raw"] = pd.to_numeric(ranked_df["Score"], errors="coerce")
+    ranked_df["Selected Score"] = normalize_display_score_series(ranked_df["Selected Score Raw"])
+    ranked_df["Score"] = ranked_df["Selected Score"]
     ranked_df = add_normalized_profile_score_columns(ranked_df)
     return reorder_ss_optimizer_results_df(ranked_df)
 
