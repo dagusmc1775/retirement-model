@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v252"
+APP_VERSION = "v253"
 APP_STATE_VERSION = "v106"
 
 
@@ -241,13 +241,16 @@ OPTIMIZER_PROFILE_SCORE_COLUMNS = [
 
 def ensure_dataframe_columns(df: pd.DataFrame, required: list[str], name: str) -> pd.DataFrame:
     if df is None:
-        raise ValueError(f"{name} is None")
+        return pd.DataFrame(columns=required)
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"{name} missing required columns: {missing}")
-    return df
+    df = df.copy()
+    string_like_defaults = {"Strategy", "Stability", "Risk", "First IRMAA Year"}
+    for col in required:
+        if col not in df.columns:
+            df[col] = "" if col in string_like_defaults else 0.0
+    ordered = [c for c in required if c in df.columns] + [c for c in df.columns if c not in required]
+    return df.loc[:, ordered]
 
 
 def canonicalize_optimizer_result_df(df: pd.DataFrame, name: str = "optimizer results") -> pd.DataFrame:
@@ -6522,9 +6525,9 @@ def render_conversion_page() -> None:
         with pref1:
             st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
         with pref2:
-            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.", on_change=keep_ss_optimizer_expanded)
+            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
         with pref3:
-            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.", on_change=keep_ss_optimizer_expanded)
+            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
         current_preferences = extract_scoring_preferences(st.session_state)
         st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
         lambda_col_left, lambda_col_right = st.columns([1, 3])
