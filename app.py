@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v254"
+APP_VERSION = "v255"
 APP_STATE_VERSION = "v106"
 
 
@@ -6361,6 +6361,9 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
         summary_df = pd.DataFrame(summary_df)
     summary_df = canonicalize_optimizer_result_df(summary_df.copy(), f"{heading.lower()} primary table")
     st.subheader(heading)
+    if summary_df.empty:
+        st.info("No strategies are available to display for this scan yet.")
+        return
     st.dataframe(
         summary_df.style.format({
             "Selected Score": "{:.2f}",
@@ -6520,13 +6523,15 @@ def render_conversion_page() -> None:
             st.caption("Full BEG mode is active for SS scans: live target Traditional IRA and override settings can affect Quick and Full rankings.")
 
         st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
-        pref1, pref2, pref3 = st.columns(3)
-        with pref1:
-            st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
-        with pref2:
-            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
-        with pref3:
-            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+        with st.form("ss_optimizer_modifier_form", border=False):
+            pref1, pref2, pref3 = st.columns(3)
+            with pref1:
+                st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
+            with pref2:
+                st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
+            with pref3:
+                st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+            st.form_submit_button("Apply modifier changes")
         current_preferences = extract_scoring_preferences(st.session_state)
         st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
         lambda_col_left, lambda_col_right = st.columns([1, 3])
@@ -6594,6 +6599,7 @@ def render_conversion_page() -> None:
                 recommendation_result["quick_recommendation_source_scenario_state"] = copy.deepcopy(collect_scenario_state())
                 st.session_state["quick_strategy_recommendation_result"] = tag_result_payload(recommendation_result, engine="quick_strategy_recommendation", inputs=quick_hash_inputs)
                 mark_result_state("quick_strategy_recommendation", quick_hash_inputs)
+                st.rerun()
         with rec_col2:
             if st.button("Run Full 81-Combination Scan", use_container_width=True):
                 st.session_state["ss_optimizer_expanded"] = True
@@ -6623,8 +6629,9 @@ def render_conversion_page() -> None:
 
         quick_result = get_current_result_payload("quick_strategy_recommendation_result")
         if quick_result is not None:
+            quick_inputs_snapshot_base, _ = build_ss_scan_inputs(inputs)
             quick_inputs_snapshot = {
-                **copy.deepcopy(inputs),
+                **copy.deepcopy(quick_inputs_snapshot_base),
                 "max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION,
                 "step_size": QUICK_RECOMMENDATION_STEP_SIZE,
                 "planning_profile": planning_profile,
@@ -6638,6 +6645,8 @@ def render_conversion_page() -> None:
             if quick_result.get("applied_preset_note"):
                 st.caption(quick_result["applied_preset_note"])
             st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
+            if quick_result.get("error_message"):
+                st.warning(str(quick_result.get("error_message")))
             render_shared_scan_primary_table(
                 quick_result,
                 "Quick Scan Summary",
@@ -7705,6 +7714,7 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         comparison_top_n=3,
     )
     ranked_rows = shared_scan.get("ranked_rows", [])
+    errors = list(shared_scan.get("errors", []) or [])
     close_result = False
     if len(ranked_rows) >= 2:
         a = float(ranked_rows[0].get("Selected Score", ranked_rows[0].get("Score", 0.0)))
@@ -7715,13 +7725,18 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
     if ranked_rows:
         top = ranked_rows[0]
         advisor_text = f"**Recommended strategy**\n\n{top.get('Strategy', '')} based on the {profile_name} profile under SS scan mode: {selected_mode}."
+    error_message = None
+    if not ranked_rows and errors:
+        error_message = "Quick scan could not produce any valid strategies: " + " | ".join(errors[:3])
+    elif errors:
+        error_message = "Some quick scan strategies failed: " + " | ".join(errors[:3])
     payload = build_shared_scan_session_payload(
         shared_scan,
         profile_name=profile_name,
         trad_balance_penalty_lambda=float(scan_inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"])),
-        completed=True,
+        completed=(len(ranked_rows) > 0),
         total_combos=len(QUICK_STRATEGY_COMBOS),
-        error_message=None,
+        error_message=error_message,
         interrupted_partial_df=None,
         best_validation=None,
         best_rerun_summary=None,
@@ -7729,9 +7744,11 @@ def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_
         close_result=close_result,
         next_step_guidance=[],
     )
-    payload["summary_df"] = shared_scan.get("primary_table_df", pd.DataFrame()).copy()
+    summary_df = shared_scan.get("primary_table_df", pd.DataFrame())
+    if (not isinstance(summary_df, pd.DataFrame)) or summary_df.empty:
+        summary_df = pd.DataFrame(ranked_rows).head(7) if ranked_rows else pd.DataFrame()
+    payload["summary_df"] = canonicalize_optimizer_result_df(summary_df.copy(), "quick scan summary") if not summary_df.empty else pd.DataFrame()
     return payload
-
 
 def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
     """
