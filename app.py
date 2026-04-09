@@ -1451,69 +1451,6 @@ def add_normalized_profile_score_columns(df: pd.DataFrame) -> pd.DataFrame:
     return working
 
 
-def build_primary_strategy_table_df(df: pd.DataFrame, top_n: int | None = None) -> pd.DataFrame:
-    """
-    Shared primary strategy table schema for BOTH Quick and Full.
-    The goal is that overlapping strategies calculate, record, and display the same
-    canonical result fields regardless of whether they came from Quick or Full.
-    """
-    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
-        return pd.DataFrame()
-    if not isinstance(df, pd.DataFrame):
-        df = pd.DataFrame(df)
-    working = canonicalize_optimizer_result_df(df.copy(), "primary strategy table")
-    if top_n is not None:
-        working = working.head(int(top_n)).copy()
-    preferred = [
-        "Rank",
-        "Strategy",
-        "Owner SS Age",
-        "Spouse SS Age",
-        "Selected Score",
-        "Score",
-        "Balanced Profile Score",
-        "Balanced (0–100)",
-        "Growth Profile Score",
-        "Growth (0–100)",
-        "Tax-Efficient Profile Score",
-        "Tax-Efficient (0–100)",
-        "Legacy Profile Score",
-        "Legacy (0–100)",
-        "Spend With Confidence Profile Score",
-        "Spend With Confidence (0–100)",
-        "Max SS Modifier Score",
-        "Max SS (0–100)",
-        "Income Stability Modifier Score",
-        "Min Trad IRA Modifier Score",
-        "Final Net Worth",
-        "After-Tax Legacy",
-        "Effective Legacy Value",
-        "Heir Tax Drag",
-        "Ending Traditional IRA Balance",
-        "Ending Roth Balance",
-        "Ending Brokerage Balance",
-        "Ending Cash Balance",
-        "Stability Value",
-        "Risk Value",
-        "Stability",
-        "Risk",
-        "Final Household SS Income",
-        "Survivor SS Income",
-        "Social Security Present Value",
-        "Total Government Drag",
-        "Total Conversions",
-        "Total Federal Tax",
-        "Total State Tax",
-        "Total ACA Cost",
-        "Total IRMAA Cost",
-        "First IRMAA Year",
-        "Max MAGI",
-        "ACA Hit Years",
-        "IRMAA Hit Years",
-    ]
-    existing = [c for c in preferred if c in working.columns]
-    return working.loc[:, existing].copy()
-
 
 
 def get_profile_score_column_name(profile_name: str) -> str:
@@ -2354,9 +2291,11 @@ def build_strategy_scan_payload(
 ) -> dict:
     """
     Shared post-candidate pipeline for BOTH Quick and Full.
-    After candidate generation, both scan types should call this same function so the
-    code path for evaluation outputs, scoring, ranking, primary rows, and comparison
-    rows is identical.
+
+    The canonical ranked dataframe is the single source of truth for BOTH scan modes.
+    Quick and Full differ only by the combo list they pass into the candidate stage.
+    Every downstream table must therefore be sliced directly from the same canonical
+    ranked dataframe instead of passing through alternate row/schema builders.
     """
     shared_outputs = build_scored_strategy_outputs(
         results_rows,
@@ -2367,7 +2306,7 @@ def build_strategy_scan_payload(
         shortlist_top_n=shortlist_top_n,
     )
     ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "strategy scan ranked results")
-    primary_table_df = build_primary_strategy_table_df(ranked_df, top_n=primary_table_top_n)
+    primary_table_df = ranked_df.head(int(primary_table_top_n)).copy()
     comparison_df = build_top_strategy_comparison_df(ranked_df, top_n=comparison_top_n)
     best_result = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
     return {
@@ -8862,10 +8801,10 @@ def get_shared_household_inputs_from_state() -> dict:
 
 def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.DataFrame:
     """
-    Shared Top-N comparison table built from the canonical primary strategy rows.
+    Shared Top-N comparison table built directly from the canonical ranked dataframe.
     BOTH Quick and Full should use this exact helper for their main side-by-side comparison.
     """
-    primary_df = build_primary_strategy_table_df(df, top_n=top_n)
+    primary_df = canonicalize_optimizer_result_df(df.copy(), "top strategy comparison source").head(int(top_n))
     if primary_df.empty:
         return pd.DataFrame()
 
