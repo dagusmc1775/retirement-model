@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v258"
+APP_VERSION = "v259"
 APP_STATE_VERSION = "v106"
 
 
@@ -1491,15 +1491,20 @@ def add_normalized_profile_score_columns(df: pd.DataFrame) -> pd.DataFrame:
     for source_col, normalized_col in score_columns:
         if source_col not in working.columns:
             continue
-        series = pd.to_numeric(working[source_col], errors="coerce")
-        min_value = float(series.min())
-        max_value = float(series.max())
+        raw_series = pd.to_numeric(working[source_col], errors="coerce")
+        raw_col = f"{source_col} Raw"
+        working[raw_col] = raw_series
+        min_value = float(raw_series.min())
+        max_value = float(raw_series.max())
         if pd.isna(min_value) or pd.isna(max_value):
-            working[normalized_col] = 50.0
+            normalized_series = pd.Series([50.0] * len(raw_series), index=working.index)
         elif abs(max_value - min_value) < 1e-12:
-            working[normalized_col] = 50.0
+            normalized_series = pd.Series([50.0] * len(raw_series), index=working.index)
         else:
-            working[normalized_col] = ((series - min_value) / (max_value - min_value)) * 100.0
+            normalized_series = ((raw_series - min_value) / (max_value - min_value)) * 100.0
+        # Display columns should be non-negative 0-100 values.
+        working[source_col] = normalized_series
+        working[normalized_col] = normalized_series
     return working
 
 
