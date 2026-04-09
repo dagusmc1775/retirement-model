@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v231-ss-scan-betr-mode"
+APP_VERSION = "v251"
 APP_STATE_VERSION = "v106"
 
 
@@ -6417,6 +6417,22 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
         use_container_width=True,
     )
 
+
+
+
+def resolve_target_after_tax_legacy(mode: str, custom_value: float) -> float | None:
+    mapping = {
+        "Maximize": None,
+        "$5M": 5_000_000.0,
+        "$10M": 10_000_000.0,
+        "$20M": 20_000_000.0,
+    }
+    if mode in mapping:
+        return mapping[mode]
+    try:
+        return max(0.0, float(custom_value))
+    except Exception:
+        return None
 
 def render_conversion_page() -> None:
     ensure_default_state()
