@@ -836,17 +836,16 @@ def build_profile_adjusted_inputs(profile_name: str, inputs: dict) -> tuple[dict
 
 def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_name: str) -> tuple[dict, dict]:
     """
-    Legacy helper kept for compatibility.
-    Quick and Full scans should use the same live scenario inputs, but SS ranking
-    mode must respect the selected scan Governor mode rather than forcing an
-    exact-live-governor execution flag.
+    Build the exact live-input package used by the standalone Governor summary.
+    Quick Scan must not silently apply profile presets, alternate overrides, or any
+    other hidden input mutations. The only intended difference from Full 81 is the
+    reduced candidate universe.
     """
     adjusted = copy.deepcopy(current_inputs)
     adjusted["planning_profile"] = profile_name
     adjusted["selected_recommendation_profile"] = profile_name
-    adjusted.pop("quick_full_engine_mode", None)
-    adjusted, selected_mode = build_ss_scan_inputs(adjusted)
-    return adjusted, {"preset_note": f"Using live scenario inputs under SS scan mode: {selected_mode}."}
+    adjusted["quick_full_engine_mode"] = "exact_governor_path"
+    return adjusted, {"preset_note": "Using exact live Governor inputs (no hidden overrides)."}
 
 
 def build_ss_scan_inputs(inputs: dict, mode: str | None = None) -> tuple[dict, str]:
@@ -1032,6 +1031,1553 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
         })
     return metric_rows, errors
 
+    metric_rows: list[dict] = []
+    errors: list[str] = []
+    total_quick_combos = len(QUICK_STRATEGY_COMBOS)
+    quick_progress = st.progress(0.0, text=f"Running Quick Scan... 0/{total_quick_combos}")
+    for idx, (owner_age, spouse_age) in enumerate(QUICK_STRATEGY_COMBOS, start=1):
+            try:
+                scenario_inputs, run_result = evaluate_strategy_via_governor(
+                    base_inputs,
+                    owner_age,
+                    spouse_age,
+                    max_conversion,
+                    step_size,
+                )
+                metrics = build_strategy_metrics(run_result)
+                metric_rows.append({
+                    **metrics,
+                    "Strategy": f"{owner_age}/{spouse_age}",
+                    "Owner SS Age": int(owner_age),
+                    "Spouse SS Age": int(spouse_age),
+                    "Final Net Worth": float(metrics["final_net_worth"]),
+                    "After-Tax Legacy": float(metrics["after_tax_legacy"]),
+                    "Effective Legacy Value": float(metrics.get("effective_legacy_value", metrics["after_tax_legacy"])),
+                    "Heir Tax Drag": float(metrics.get("heir_tax_drag", 0.0)),
+                    "Ending Traditional IRA Balance": float(metrics["ending_traditional_ira_balance"]),
+                    "Roth @ End": float(metrics["ending_roth_balance"]),
+                    "Ending Roth Balance": float(metrics["ending_roth_balance"]),
+                    "Brokerage @ End": float(metrics["ending_brokerage_balance"]),
+                    "Ending Brokerage Balance": float(metrics["ending_brokerage_balance"]),
+                    "Ending Cash Balance": float(metrics["ending_cash_balance"]),
+                    "Stability Value": float(metrics["stability_value"]),
+                    "Risk Value": float(metrics["risk_value"]),
+                    "Final Household SS Income": float(metrics["final_household_ss_income"]),
+                    "Survivor SS Income": float(metrics["survivor_ss_income"]),
+                    "Social Security Present Value": float(metrics.get("social_security_present_value", 0.0)),
+                    "Total Federal Tax": float(run_result.get("total_federal_taxes", 0.0)),
+                    "Total State Tax": float(run_result.get("total_state_taxes", 0.0)),
+                    "Total ACA Cost": float(run_result.get("total_aca_cost", 0.0)),
+                    "Total IRMAA Cost": float(run_result.get("total_irmaa_cost", 0.0)),
+                    "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
+                    "Total Conversions": float(run_result.get("total_conversions", 0.0)),
+                    "Max MAGI": float(run_result.get("max_magi", 0.0)),
+                    "ACA Hit Years": int(run_result.get("aca_hit_years", 0)),
+                    "IRMAA Hit Years": int(run_result.get("irmaa_hit_years", 0)),
+                    "First IRMAA Year": run_result.get("first_irmaa_year"),
+                })
+            except Exception as exc:
+                errors.append(f"{owner_age}/{spouse_age}: {exc}")
+            finally:
+                quick_progress.progress(idx / total_quick_combos, text=f"Running Quick Scan... {idx}/{total_quick_combos}")
+
+    quick_progress.empty()
+    cache[fact_key] = {"metric_rows": copy.deepcopy(metric_rows), "errors": copy.deepcopy(errors)}
+    if len(cache) > 6:
+        while len(cache) > 6:
+            cache.pop(next(iter(cache)))
+    return metric_rows, errors
+
+
+def build_strategy_metrics(run_result: dict) -> dict:
+    df = run_result["df"]
+    last = df.iloc[-1]
+    ending_trad = float(run_result.get("ending_trad_balance", last.get("EOY Trad", 0.0)))
+    ending_roth = float(last.get("EOY Roth", 0.0))
+    ending_brokerage = float(last.get("EOY Brokerage", 0.0))
+    ending_cash = float(last.get("EOY Cash", 0.0))
+    ending_owner_ss = float(last.get("Owner SS", 0.0))
+    ending_spouse_ss = float(last.get("Spouse SS", 0.0))
+    final_household_ss = float(last.get("Total SS", ending_owner_ss + ending_spouse_ss))
+    survivor_ss = max(ending_owner_ss, ending_spouse_ss)
+    min_liquid_assets = float((df["EOY Roth"] + df["EOY Brokerage"] + df["EOY Cash"]).min())
+    annual_spending = float(df["Annual Spending Need"].max()) if "Annual Spending Need" in df.columns else 0.0
+    after_tax_legacy = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - TAX_EFFICIENT_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
+    effective_legacy_value = ending_roth + ending_cash + 0.95 * ending_brokerage + (1.0 - HEIR_EFFECTIVE_TRAD_TAX_RATE) * ending_trad
+    heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
+    stability_value = final_household_ss + 0.5 * survivor_ss
+    social_security_present_value = estimate_social_security_present_value(final_household_ss, survivor_ss)
+
+    household_rmd_start = int(run_result.get("household_rmd_start", df["Year"].max() if "Year" in df.columns else START_YEAR))
+    pre_rmd_year = household_rmd_start - 1
+    trad_at_rmd_start = ending_trad
+    if "Year" in df.columns and "EOY Trad" in df.columns:
+        pre_rmd_rows = df.loc[df["Year"] == pre_rmd_year, "EOY Trad"]
+        if not pre_rmd_rows.empty:
+            trad_at_rmd_start = float(pre_rmd_rows.iloc[0])
+        else:
+            first_rmd_rows = df.loc[df["Year"] == household_rmd_start, "SOY Trad"] if "SOY Trad" in df.columns else None
+            if first_rmd_rows is not None and not first_rmd_rows.empty:
+                trad_at_rmd_start = float(first_rmd_rows.iloc[0])
+
+    max_magi = max(0.0, float(run_result.get("max_magi", df["MAGI"].max() if "MAGI" in df.columns else 0.0)))
+    magi_excess_over_cliff = max(0.0, max_magi - IRMAA_FIRST_CLIFF_MFJ)
+    irmaa_hit_years = int(run_result.get("irmaa_hit_years", 0))
+    liquidity_risk_raw = 0.0
+    if annual_spending > 0.0:
+        liquidity_risk_raw = 1.0 - clamp01(min_liquid_assets / (10.0 * annual_spending))
+
+    return {
+        "final_net_worth": float(run_result["final_net_worth"]),
+        "after_tax_legacy": float(after_tax_legacy),
+        "effective_legacy_value": float(effective_legacy_value),
+        "heir_tax_drag": float(heir_tax_drag),
+        "ending_traditional_ira_balance": float(ending_trad),
+        "ending_roth_balance": float(ending_roth),
+        "ending_brokerage_balance": float(ending_brokerage),
+        "ending_cash_balance": float(ending_cash),
+        "stability_value": float(stability_value),
+        "risk_value": 0.0,
+        "trad_at_rmd_start": float(trad_at_rmd_start),
+        "irmaa_hit_years": int(irmaa_hit_years),
+        "magi_excess_over_cliff": float(magi_excess_over_cliff),
+        "min_liquid_assets": float(min_liquid_assets),
+        "liquidity_risk_raw": float(liquidity_risk_raw),
+        "final_household_ss_income": float(final_household_ss),
+        "survivor_ss_income": float(survivor_ss),
+        "social_security_present_value": float(social_security_present_value),
+    }
+
+
+def resolve_target_after_tax_legacy(mode: str, custom_value: float) -> float | None:
+    mapping = {
+        "Maximize": None,
+        "$5M": 5_000_000.0,
+        "$10M": 10_000_000.0,
+        "$20M": 20_000_000.0,
+    }
+    if mode in mapping:
+        return mapping[mode]
+    try:
+        return max(0.0, float(custom_value))
+    except Exception:
+        return None
+
+
+def optimize_spending_for_target_legacy(inputs: dict, max_conversion: float, step_size: float, target_legacy: float) -> dict:
+    """
+    Find the highest base annual spending that still meets the requested after-tax legacy target,
+    using the current SS ages and Break-Even Governor settings.
+    """
+    max_conversion = sanitize_governor_max_conversion(max_conversion)
+    step_size = sanitize_governor_step_size(step_size)
+    target_legacy = float(target_legacy)
+    base_inputs = copy.deepcopy(inputs)
+    current_spending = float(base_inputs.get("annual_spending", 0.0))
+    cache: dict[float, dict] = {}
+
+    def evaluate(spending: float) -> dict:
+        rounded_spending = float(max(0.0, round(spending / 1000.0) * 1000.0))
+        if rounded_spending in cache:
+            return cache[rounded_spending]
+        scenario_inputs = copy.deepcopy(base_inputs)
+        scenario_inputs["annual_spending"] = rounded_spending
+        run_result = run_model_break_even_governor(scenario_inputs, max_conversion, step_size)
+        metrics = build_strategy_metrics(run_result)
+        payload = {
+            "annual_spending": rounded_spending,
+            "run_result": run_result,
+            "metrics": metrics,
+        }
+        cache[rounded_spending] = payload
+        return payload
+
+    baseline = evaluate(current_spending)
+    if float(baseline["metrics"]["after_tax_legacy"]) < target_legacy:
+        return {
+            "target_legacy": target_legacy,
+            "status": "not_achievable_from_current_plan",
+            "baseline": baseline,
+            "optimized": baseline,
+            "search_runs": len(cache),
+        }
+
+    low = current_spending
+    high = max(current_spending * 3.0, current_spending + 50_000.0, 120_000.0)
+    high_eval = evaluate(high)
+    upper_cap = max(500_000.0, current_spending + 250_000.0)
+    while float(high_eval["metrics"]["after_tax_legacy"]) >= target_legacy and high < upper_cap:
+        low = high
+        high = min(upper_cap, high * 1.5)
+        if high <= low:
+            break
+        high_eval = evaluate(high)
+
+    best = baseline if float(baseline["metrics"]["after_tax_legacy"]) >= target_legacy else None
+    low_bound = current_spending
+    high_bound = high
+
+    for _ in range(16):
+        if high_bound - low_bound <= 1000.0:
+            break
+        mid = (low_bound + high_bound) / 2.0
+        mid_eval = evaluate(mid)
+        if float(mid_eval["metrics"]["after_tax_legacy"]) >= target_legacy:
+            best = mid_eval
+            low_bound = float(mid_eval["annual_spending"])
+        else:
+            high_bound = float(mid_eval["annual_spending"])
+
+    if best is None:
+        best = baseline
+
+    return {
+        "target_legacy": target_legacy,
+        "status": "ok",
+        "baseline": baseline,
+        "optimized": best,
+        "search_runs": len(cache),
+    }
+
+
+def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n: int = 5, preferences: dict | None = None, trad_balance_penalty_lambda: float = 0.0, scoring_context: dict | None = None) -> dict[str, pd.DataFrame]:
+    if not results_rows:
+        return {}
+
+    metric_rows = []
+    for row in results_rows:
+        metric_rows.append({
+            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
+            "Owner SS Age": int(row["Owner SS Age"]),
+            "Spouse SS Age": int(row["Spouse SS Age"]),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+
+    shortlists = {}
+    for profile_name in PROFILE_PRESETS.keys():
+        ranked = score_strategy_metrics(metric_rows, profile_name, preferences=preferences, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
+        rows = []
+        for idx, ranked_row in enumerate(ranked[:top_n], start=1):
+            rows.append({
+                "Rank": idx,
+                "Strategy": ranked_row["Strategy"],
+                "Owner SS Age": int(ranked_row["Owner SS Age"]),
+                "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
+                "Selected Score": float(ranked_row["score_100"]),
+            "Score": float(ranked_row["score_100"]),
+                "Net Worth": float(ranked_row["final_net_worth"]),
+                "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+                "After-Tax Net Worth (Primary)": float(ranked_row["after_tax_legacy"]),
+                "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+                "Heir Value (Conservative)": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+                "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
+                "Trad IRA @ End": float(ranked_row["ending_traditional_ira_balance"]),
+                "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
+                "Roth @ End": float(ranked_row["ending_roth_balance"]),
+                "Brokerage @ End": float(ranked_row["ending_brokerage_balance"]),
+                "Stability": ranked_row["stability_label"],
+                "Risk": ranked_row["risk_label"],
+                "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
+                "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
+                "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
+                "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+                "First IRMAA Year": ranked_row.get("First IRMAA Year"),
+                "NW Score +": float(ranked_row.get("nw_component", 0.0) * 100.0),
+                "Legacy Score +": float(ranked_row.get("legacy_component", 0.0) * 100.0),
+                "Stability Score +": float(ranked_row.get("stability_component", 0.0) * 100.0),
+                "Trad Penalty -": float(ranked_row.get("trad_component", 0.0) * 100.0),
+                "Trad Share Penalty -": float(ranked_row.get("trad_share_component", 0.0) * 100.0),
+                "Gov Drag Penalty -": float(ranked_row.get("drag_component", 0.0) * 100.0),
+                "Heir Tax Penalty -": float(ranked_row.get("heir_tax_component", 0.0) * 100.0),
+                "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
+            })
+        shortlists[profile_name] = pd.DataFrame(rows)
+    return shortlists
+
+
+def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    preferred = [
+        "Rank",
+        "Owner SS Age",
+        "Spouse SS Age",
+        "Strategy",
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Roth Balance",
+        "Ending Traditional IRA Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Stability Value",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Social Security Present Value",
+        "Total Federal Tax",
+        "Total State Tax",
+        "Total ACA Cost",
+        "Total IRMAA Cost",
+        "Total Government Drag",
+        "Total Conversions",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+        "Traditional IRA Penalty Applied",
+        "Risk Value",
+        "Score",
+    ]
+    ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    return df.loc[:, ordered].copy()
+
+def build_ranked_optimizer_results_df(
+    results_rows: list[dict],
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> pd.DataFrame:
+    if not results_rows:
+        return pd.DataFrame()
+
+    scoring_payload = build_strategy_scoring_payload(
+        results_rows,
+        selected_profile_name=profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    ranked = scoring_payload["selected_ranked_rows"]
+    profile_score_maps = scoring_payload["profile_score_maps"]
+
+    rows = []
+    for idx, ranked_row in enumerate(ranked, start=1):
+        rows.append({
+            "Rank": idx,
+            "Owner SS Age": int(ranked_row["Owner SS Age"]),
+            "Spouse SS Age": int(ranked_row["Spouse SS Age"]),
+            "Strategy": ranked_row["Strategy"],
+            "Final Net Worth": float(ranked_row["final_net_worth"]),
+            "After-Tax Legacy": float(ranked_row["after_tax_legacy"]),
+            "After-Tax Net Worth (Primary)": float(ranked_row["after_tax_legacy"]),
+            "Effective Legacy Value": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+            "Heir Value (Conservative)": float(ranked_row.get("effective_legacy_value", ranked_row["after_tax_legacy"])),
+            "Heir Tax Drag": float(ranked_row.get("heir_tax_drag", 0.0)),
+            "Ending Roth Balance": float(ranked_row["ending_roth_balance"]),
+            "Ending Traditional IRA Balance": float(ranked_row["ending_traditional_ira_balance"]),
+            "Ending Brokerage Balance": float(ranked_row["ending_brokerage_balance"]),
+            "Ending Cash Balance": float(ranked_row["ending_cash_balance"]),
+            "Stability Value": float(ranked_row["stability_value"]),
+            "Risk Value": float(ranked_row["risk_value"]),
+            "Final Household SS Income": float(ranked_row["final_household_ss_income"]),
+            "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
+            "Social Security Present Value": float(ranked_row.get("social_security_present_value", 0.0)),
+            "Total Federal Tax": float(ranked_row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(ranked_row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(ranked_row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(ranked_row.get("Total IRMAA Cost", 0.0)),
+            "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+            "First IRMAA Year": ranked_row.get("First IRMAA Year"),
+            "Max MAGI": float(ranked_row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(ranked_row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(ranked_row.get("IRMAA Hit Years", 0)),
+            "Traditional IRA Penalty Applied": float(ranked_row.get("lambda_penalty_dollars", 0.0)),
+            "Selected Score": float(ranked_row["score_100"]),
+            "Score": float(ranked_row["score_100"]),
+            "Stability": ranked_row.get("stability_label", ""),
+            "Risk": ranked_row.get("risk_label", ""),
+            "Traditional IRA Share @ End": float(ranked_row.get("ending_traditional_ira_share", 0.0)),
+            "NW Score +": float(ranked_row.get("nw_component", 0.0) * 100.0),
+            "Legacy Score +": float(ranked_row.get("legacy_component", 0.0) * 100.0),
+            "Stability Score +": float(ranked_row.get("stability_component", 0.0) * 100.0),
+            "Trad Penalty -": float(ranked_row.get("trad_component", 0.0) * 100.0),
+            "Trad Share Penalty -": float(ranked_row.get("trad_share_component", 0.0) * 100.0),
+            "Gov Drag Penalty -": float(ranked_row.get("drag_component", 0.0) * 100.0),
+            "Heir Tax Penalty -": float(ranked_row.get("heir_tax_component", 0.0) * 100.0),
+            "Risk Penalty -": float(ranked_row.get("risk_component", 0.0) * 100.0),
+            "Preference Bonus +": float(ranked_row.get("preference_bonus_component", 0.0) * 100.0),
+            "Preference Penalty -": float(ranked_row.get("preference_penalty_component", 0.0) * 100.0),
+            "Lambda Penalty -": float(ranked_row.get("lambda_penalty_score", 0.0) * 100.0),
+            "Balanced Profile Score": float(profile_score_maps.get("Balanced", {}).get(ranked_row["Strategy"], 0.0)),
+            "Growth Profile Score": float(profile_score_maps.get("Growth", {}).get(ranked_row["Strategy"], 0.0)),
+            "Tax-Efficient Profile Score": float(profile_score_maps.get("Tax-Efficient Stability", {}).get(ranked_row["Strategy"], 0.0)),
+            "Legacy Profile Score": float(profile_score_maps.get("Legacy Focused", {}).get(ranked_row["Strategy"], 0.0)),
+            "Spend With Confidence Profile Score": float(profile_score_maps.get("Spend With Confidence", {}).get(ranked_row["Strategy"], 0.0)),
+            "Max SS Modifier Score": float(ranked_row.get("max_ss_modifier_component", 0.0) * 100.0),
+            "Income Stability Modifier Score": float(ranked_row.get("income_stability_modifier_component", 0.0) * 100.0),
+            "Min Trad IRA Modifier Score": float(ranked_row.get("min_trad_ira_modifier_component", 0.0) * 100.0),
+        })
+
+    ranked_df = pd.DataFrame(rows)
+    if ranked_df.empty:
+        return ranked_df
+    ranked_df = add_normalized_profile_score_columns(ranked_df)
+    return reorder_ss_optimizer_results_df(ranked_df)
+
+
+
+def add_normalized_profile_score_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    working = df.copy()
+    score_columns = [
+        ("Balanced Profile Score", "Balanced (0–100)"),
+        ("Growth Profile Score", "Growth (0–100)"),
+        ("Tax-Efficient Profile Score", "Tax-Efficient (0–100)"),
+        ("Legacy Profile Score", "Legacy (0–100)"),
+        ("Spend With Confidence Profile Score", "Spend With Confidence (0–100)"),
+        ("Max SS Modifier Score", "Max SS (0–100)"),
+    ]
+    for source_col, normalized_col in score_columns:
+        if source_col not in working.columns:
+            continue
+        series = pd.to_numeric(working[source_col], errors="coerce")
+        min_value = float(series.min())
+        max_value = float(series.max())
+        if pd.isna(min_value) or pd.isna(max_value):
+            working[normalized_col] = 50.0
+        elif abs(max_value - min_value) < 1e-12:
+            working[normalized_col] = 50.0
+        else:
+            working[normalized_col] = ((series - min_value) / (max_value - min_value)) * 100.0
+    return working
+
+
+
+
+def get_profile_score_column_name(profile_name: str) -> str:
+    mapping = {
+        "Balanced": "Balanced Profile Score",
+        "Growth": "Growth Profile Score",
+        "Tax-Efficient Stability": "Tax-Efficient Profile Score",
+        "Legacy Focused": "Legacy Profile Score",
+        "Spend With Confidence": "Spend With Confidence Profile Score",
+    }
+    return mapping.get(profile_name, f"{profile_name} Profile Score")
+
+
+def build_profile_winner_contribution_df(row: pd.Series | dict) -> pd.DataFrame:
+    row = row if isinstance(row, dict) else row.to_dict()
+    contribution_order = [
+        ("NW Score +", "Positive"),
+        ("Legacy Score +", "Positive"),
+        ("Stability Score +", "Positive"),
+        ("Trad Penalty -", "Negative"),
+        ("Trad Share Penalty -", "Negative"),
+        ("Gov Drag Penalty -", "Negative"),
+        ("Heir Tax Penalty -", "Negative"),
+        ("Risk Penalty -", "Negative"),
+        ("Max SS Modifier Score", "Modifier"),
+        ("Income Stability Modifier Score", "Modifier"),
+        ("Min Trad IRA Modifier Score", "Modifier"),
+    ]
+    rows = []
+    for label, bucket in contribution_order:
+        if label in row:
+            rows.append({"Component": label, "Bucket": bucket, "Value": float(row.get(label, 0.0))})
+    return pd.DataFrame(rows)
+
+
+def build_profile_winner_metric_df(row: pd.Series | dict) -> pd.DataFrame:
+    row = row if isinstance(row, dict) else row.to_dict()
+    metric_order = [
+        "Final Net Worth",
+        "After-Tax Legacy",
+        "Effective Legacy Value",
+        "Heir Tax Drag",
+        "Ending Traditional IRA Balance",
+        "Ending Roth Balance",
+        "Ending Brokerage Balance",
+        "Ending Cash Balance",
+        "Final Household SS Income",
+        "Survivor SS Income",
+        "Total Government Drag",
+        "Total Conversions",
+        "First IRMAA Year",
+        "Max MAGI",
+        "ACA Hit Years",
+        "IRMAA Hit Years",
+    ]
+    rows = []
+    for label in metric_order:
+        if label in row:
+            rows.append({"Metric": label, "Value": row.get(label)})
+    return pd.DataFrame(rows)
+
+
+def render_profile_winner_diagnostics(row: pd.Series | dict, profile_name: str) -> None:
+    row = row if isinstance(row, dict) else row.to_dict()
+    profile_score_col = get_profile_score_column_name(profile_name)
+    selected_score = float(row.get("Selected Score", row.get("Score", 0.0)))
+    base_profile_score = float(row.get(profile_score_col, 0.0))
+    modifier_total = float(row.get("Max SS Modifier Score", 0.0)) + float(row.get("Income Stability Modifier Score", 0.0)) + float(row.get("Min Trad IRA Modifier Score", 0.0))
+
+    st.caption("Ranking is based on after-tax outcomes, not pre-tax balances.")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Selected Score", f"{selected_score:.2f}")
+    c2.metric("Base Profile Score", f"{base_profile_score:.2f}")
+    c3.metric("Total Modifier Contribution", f"{modifier_total:.2f}")
+
+    contribution_df = build_profile_winner_contribution_df(row)
+    if not contribution_df.empty:
+        st.markdown("**Score contribution breakdown**")
+        st.dataframe(contribution_df.style.format({"Value": "{:.2f}"}), use_container_width=True, hide_index=True)
+
+    metric_df = build_profile_winner_metric_df(row)
+    if not metric_df.empty:
+        st.markdown("**Winner metric snapshot**")
+        formatter = {}
+        currency_metrics = {
+            "Final Net Worth", "After-Tax Legacy", "Effective Legacy Value", "Heir Tax Drag",
+            "Ending Traditional IRA Balance", "Ending Roth Balance", "Ending Brokerage Balance", "Ending Cash Balance",
+            "Final Household SS Income", "Survivor SS Income", "Total Government Drag", "Total Conversions", "Max MAGI",
+        }
+        metric_df_display = metric_df.copy()
+        def _fmt_metric_value(metric, value):
+            try:
+                if metric in currency_metrics and value is not None:
+                    return f"${float(value):,.0f}"
+                if metric in {"ACA Hit Years", "IRMAA Hit Years", "First IRMAA Year"} and value not in (None, ""):
+                    return f"{int(float(value))}"
+            except Exception:
+                return value
+            return value
+        metric_df_display["Value"] = [
+            _fmt_metric_value(m, v) for m, v in zip(metric_df_display["Metric"], metric_df_display["Value"])
+        ]
+        st.dataframe(metric_df_display, use_container_width=True, hide_index=True)
+
+def clamp01(value: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except Exception:
+        return 0.0
+
+
+def safe_ratio(numerator: float, denominator: float, default: float = 0.0) -> float:
+    try:
+        denom = float(denominator)
+        if abs(denom) <= 1e-12:
+            return float(default)
+        return float(numerator) / denom
+    except Exception:
+        return float(default)
+
+
+def build_strategy_scoring_context(inputs: dict | None = None, metrics_list: list[dict] | None = None) -> dict:
+    """
+    Shared scoring context for both Quick and Full.
+    This is intentionally profile-neutral: it only derives common scale facts
+    needed by the ranking layer. Profile weights and modifier behavior are
+    injected later through build_scoring_context().
+    """
+    inputs = inputs or {}
+    metrics_list = metrics_list or []
+    starting_assets = float(
+        inputs.get("trad", 0.0)
+        + inputs.get("roth", 0.0)
+        + inputs.get("brokerage", 0.0)
+        + inputs.get("cash", 0.0)
+    )
+    if starting_assets <= 0.0 and metrics_list:
+        derived_values = []
+        for m in metrics_list:
+            ending_total = (
+                float(m.get("ending_traditional_ira_balance", 0.0))
+                + float(m.get("ending_roth_balance", 0.0))
+                + float(m.get("ending_brokerage_balance", 0.0))
+                + float(m.get("ending_cash_balance", 0.0))
+            )
+            if ending_total > 0.0:
+                derived_values.append(ending_total / 9.0)
+        if derived_values:
+            starting_assets = sum(derived_values) / len(derived_values)
+    starting_assets = max(1.0, starting_assets)
+
+    annual_spending = float(inputs.get("annual_spending", 0.0) or 0.0)
+    if annual_spending <= 0.0 and metrics_list:
+        ss_values = [float(m.get("final_household_ss_income", 0.0)) for m in metrics_list if float(m.get("final_household_ss_income", 0.0)) > 0.0]
+        if ss_values:
+            annual_spending = max(ss_values)
+    annual_spending = max(1.0, annual_spending)
+
+    return {
+        "starting_assets": float(starting_assets),
+        "annual_spending": float(annual_spending),
+    }
+
+
+def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None = None) -> list[dict]:
+    """
+    Build the shared scoring-input rows used by BOTH Quick and Full.
+    Risk is ranked comparatively across the candidate set using retirement-specific
+    fragility drivers: Trad carried into RMD years, IRMAA exposure, MAGI excess
+    over the first IRMAA cliff, and a small liquidity tie-breaker.
+    """
+    if not metrics_list:
+        return []
+
+    scoring_context = scoring_context or {}
+    starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
+    annual_spending = max(1.0, float(scoring_context.get("annual_spending", 1.0)))
+
+    # IMPORTANT: Risk must be candidate-set invariant so the same strategy receives
+    # the same Risk Value in Quick and Full. Therefore, do NOT normalize risk drivers
+    # across the current candidate list here.
+
+    scoring_inputs = []
+    for idx, metrics in enumerate(metrics_list):
+        ending_trad = float(metrics.get("ending_traditional_ira_balance", 0.0))
+        ending_roth = float(metrics.get("ending_roth_balance", 0.0))
+        ending_brokerage = float(metrics.get("ending_brokerage_balance", 0.0))
+        ending_cash = float(metrics.get("ending_cash_balance", 0.0))
+        ending_total = max(1.0, ending_trad + ending_roth + ending_brokerage + ending_cash)
+        trad_share = ending_trad / ending_total
+
+        final_net_worth = float(metrics.get("final_net_worth", 0.0))
+        after_tax_legacy = float(metrics.get("after_tax_legacy", 0.0))
+        effective_legacy_value = float(metrics.get("effective_legacy_value", after_tax_legacy))
+        heir_tax_drag = float(metrics.get("heir_tax_drag", 0.0))
+        stability_value = float(metrics.get("stability_value", 0.0))
+        final_household_ss_income = float(metrics.get("final_household_ss_income", 0.0))
+        survivor_ss_income = float(metrics.get("survivor_ss_income", 0.0))
+        ss_present_value = float(metrics.get("social_security_present_value", estimate_social_security_present_value(final_household_ss_income, survivor_ss_income)))
+        total_government_drag = float(metrics.get("Total Government Drag", 0.0))
+        # Candidate-set invariant retirement risk:
+        # - Trad carried into RMD years (scaled to starting assets)
+        # - IRMAA hit years (scaled to a 12-year practical range)
+        # - MAGI excess above the first IRMAA cliff (scaled to the cliff itself)
+        # - liquidity risk raw (already 0..1)
+        trad_at_rmd_ratio = clamp01(safe_ratio(
+            float(metrics.get("trad_at_rmd_start", ending_trad)),
+            starting_assets,
+            default=0.0,
+        ))
+        irmaa_hit_years_ratio = clamp01(float(metrics.get("irmaa_hit_years", metrics.get("IRMAA Hit Years", 0))) / 12.0)
+        magi_excess_ratio = clamp01(safe_ratio(
+            float(metrics.get("magi_excess_over_cliff", 0.0)),
+            IRMAA_FIRST_CLIFF_MFJ,
+            default=0.0,
+        ))
+        liquidity_risk_ratio = clamp01(float(metrics.get("liquidity_risk_raw", 0.0)))
+
+        risk_score_ratio = clamp01(
+            0.50 * trad_at_rmd_ratio
+            + 0.25 * irmaa_hit_years_ratio
+            + 0.20 * magi_excess_ratio
+            + 0.05 * liquidity_risk_ratio
+        )
+
+        liquidity_coverage_years = 0.0
+        income_coverage_ratio = safe_ratio(final_household_ss_income, annual_spending, default=0.0)
+        survivor_coverage_ratio = safe_ratio(survivor_ss_income, annual_spending, default=0.0)
+        stability_support_ratio = safe_ratio(stability_value, annual_spending, default=0.0)
+
+        canonical_after_tax_ratio = safe_ratio(after_tax_legacy, starting_assets)
+
+        scoring_inputs.append({
+            **metrics,
+            "risk_value": float(risk_score_ratio),
+            "ending_traditional_ira_share": float(trad_share),
+            "net_worth_ratio": safe_ratio(final_net_worth, starting_assets),
+            "legacy_ratio": canonical_after_tax_ratio,
+            "effective_legacy_ratio": canonical_after_tax_ratio,
+            "heir_tax_drag_ratio": safe_ratio(heir_tax_drag, starting_assets),
+            "trad_ratio": safe_ratio(ending_trad, starting_assets),
+            "drag_ratio": safe_ratio(total_government_drag, starting_assets),
+            "ss_present_value_ratio": safe_ratio(ss_present_value, starting_assets),
+            "liquidity_coverage_years": float(liquidity_coverage_years),
+            "risk_score_ratio": float(risk_score_ratio),
+            "income_coverage_ratio": float(income_coverage_ratio),
+            "survivor_coverage_ratio": float(survivor_coverage_ratio),
+            "stability_support_ratio": float(stability_support_ratio),
+        })
+    return scoring_inputs
+
+
+def build_scoring_context(
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> dict:
+    """
+    Shared scoring context for BOTH Quick and Full after scoring inputs exist.
+    This is where profile weights, modifier flags, and the optional lambda live.
+    """
+    base_context = dict(scoring_context or {})
+    base_context.update({
+        "profile_name": str(profile_name),
+        "weights": copy.deepcopy(get_profile_summary(profile_name)["weights"]),
+        "preferences": copy.deepcopy(preferences or {}),
+        "trad_balance_penalty_lambda": max(0.0, float(trad_balance_penalty_lambda or 0.0)),
+    })
+    return base_context
+
+
+def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
+    """
+    Compute the selected ranking score for a single strategy row.
+    This function must be candidate-set invariant: the same strategy with the
+    same metrics and the same scoring context must receive the same score,
+    whether it came from Quick or Full.
+    """
+    profile_name = str(scoring_context.get("profile_name", "Balanced"))
+    weights = scoring_context.get("weights", get_profile_summary(profile_name)["weights"])
+    preferences = scoring_context.get("preferences", {}) or {}
+    starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
+    trad_balance_penalty_lambda = max(0.0, float(scoring_context.get("trad_balance_penalty_lambda", 0.0)))
+
+    net_worth_ratio = float(scoring_input.get("net_worth_ratio", 0.0))
+    legacy_ratio = float(scoring_input.get("legacy_ratio", 0.0))
+    # effective_legacy_ratio is intentionally kept aligned to legacy_ratio so every
+    # profile scores against the same canonical after-tax metric.
+    effective_legacy_ratio = float(scoring_input.get("effective_legacy_ratio", legacy_ratio))
+    heir_tax_drag_ratio = float(scoring_input.get("heir_tax_drag_ratio", 0.0))
+    trad_ratio = float(scoring_input.get("trad_ratio", 0.0))
+    drag_ratio = float(scoring_input.get("drag_ratio", 0.0))
+    trad_share = float(scoring_input.get("ending_traditional_ira_share", 0.0))
+    ss_present_value_ratio = float(scoring_input.get("ss_present_value_ratio", 0.0))
+    liquidity_coverage_years = float(scoring_input.get("liquidity_coverage_years", 0.0))
+    risk_score_ratio = clamp01(float(scoring_input.get("risk_score_ratio", 0.0)))
+    income_coverage_ratio = float(scoring_input.get("income_coverage_ratio", 0.0))
+    survivor_coverage_ratio = float(scoring_input.get("survivor_coverage_ratio", 0.0))
+    stability_support_ratio = float(scoring_input.get("stability_support_ratio", 0.0))
+    owner_ss_age = float(scoring_input.get("Owner SS Age", 70.0))
+    spouse_ss_age = float(scoring_input.get("Spouse SS Age", 70.0))
+    avg_claim_age = 0.5 * (owner_ss_age + spouse_ss_age)
+    delay_ratio = clamp01((avg_claim_age - 62.0) / 8.0)
+    early_income_ratio = clamp01((70.0 - avg_claim_age) / 8.0)
+    max_magi = float(scoring_input.get("Max MAGI", 0.0))
+    irmaa_hit_years = float(scoring_input.get("IRMAA Hit Years", 0.0))
+    magi_excess_ratio = clamp01(max(0.0, max_magi - IRMAA_FIRST_CLIFF_MFJ) / max(1.0, IRMAA_FIRST_CLIFF_MFJ))
+    magi_spike_penalty = (magi_excess_ratio ** 2.2) + 0.12 * ((irmaa_hit_years / 10.0) ** 1.8)
+    future_tax_burden = (trad_ratio ** 1.35) + 0.65 * (heir_tax_drag_ratio ** 1.15)
+
+    nw_signal = math.log1p(max(0.0, net_worth_ratio))
+    base_legacy_signal = math.log1p(max(0.0, legacy_ratio))
+    effective_legacy_signal = math.log1p(max(0.0, effective_legacy_ratio))
+    heir_tax_penalty_base = math.log1p(max(0.0, heir_tax_drag_ratio))
+    trad_penalty_base = math.log1p(max(0.0, trad_ratio))
+    drag_penalty_base = math.log1p(max(0.0, drag_ratio))
+    ss_value_signal = math.log1p(max(0.0, ss_present_value_ratio))
+    stability_signal = (
+        0.45 * math.log1p(max(0.0, stability_support_ratio))
+        + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+        + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
+    )
+    liquidity_signal = clamp01(liquidity_coverage_years / 25.0)
+    risk_penalty_base = risk_score_ratio
+    trad_share_penalty_base = trad_share
+
+    if profile_name == "Legacy Focused":
+        legacy_component = 1.02 * weights["legacy"] * base_legacy_signal
+        nw_component = 0.04 * weights["nw"] * nw_signal
+        stability_component = 0.90 * weights["stability"] * stability_signal
+        trad_component = 1.20 * weights["trad"] * (trad_penalty_base ** 1.75)
+        trad_share_component = 1.15 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 2.45)
+        drag_component = 0.85 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.12)
+        heir_tax_component = 1.45 * weights["trad"] * (heir_tax_penalty_base ** 1.70) + 1.10 * future_tax_burden
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.00)
+    elif profile_name == "Spend With Confidence":
+        legacy_component = weights["legacy"] * base_legacy_signal
+        nw_component = 0.35 * weights["nw"] * (nw_signal ** 0.82)
+        stability_component = 1.35 * weights["stability"] * (
+            0.22 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.22 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.08 * (ss_value_signal ** 1.00)
+            + 1.60 * early_income_ratio
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.18)
+        trad_share_component = 1.10 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.20)
+        drag_component = 0.95 * weights.get("drag", 0.0) * drag_penalty_base
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.15)
+    elif profile_name == "Tax-Efficient Stability":
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.03)
+        nw_component = 0.32 * weights["nw"] * (nw_signal ** 0.78)
+        stability_component = weights["stability"] * (
+            0.40 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.22 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.12 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.08 * (ss_value_signal ** 0.92)
+        )
+        trad_component = 1.18 * weights["trad"] * (trad_penalty_base ** 1.70)
+        trad_share_component = 1.18 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.85)
+        drag_component = 1.55 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.55) + 0.55 * magi_spike_penalty)
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.12)
+    elif profile_name == "Balanced":
+        balanced_delay_penalty = 0.90 * (delay_ratio ** 1.75)
+        balanced_early_bonus = 0.65 * early_income_ratio
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = 0.52 * weights["nw"] * (nw_signal ** 0.86)
+        stability_component = 1.20 * weights["stability"] * (
+            0.42 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.18 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + balanced_early_bonus
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.42)
+        trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.55)
+        drag_component = 1.08 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.18) + 0.25 * magi_spike_penalty) + balanced_delay_penalty
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
+    else:
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = weights["nw"] * (nw_signal ** 0.90)
+        stability_component = weights["stability"] * (
+            0.50 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.35)
+        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.45)
+        drag_component = weights.get("drag", 0.0) * (drag_penalty_base ** 1.10)
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
+
+    preference_bonus = 0.0
+    preference_penalty = 0.0
+
+    raw_max_ss_bonus = 0.24 * (ss_value_signal ** 1.20)
+    if profile_name == "Legacy Focused":
+        raw_max_ss_bonus *= 1.40
+    elif profile_name in ("Spend With Confidence", "Tax-Efficient Stability"):
+        raw_max_ss_bonus *= 1.15
+    if preferences.get("maximize_social_security"):
+        preference_bonus += raw_max_ss_bonus
+
+    income_stability_score = clamp01((0.65 * income_coverage_ratio) + (0.35 * survivor_coverage_ratio))
+    raw_income_stability_bonus = 0.10 * income_stability_score
+    if preferences.get("income_stability_focus"):
+        preference_bonus += raw_income_stability_bonus
+
+    raw_min_trad_penalty = (
+        0.24 * (trad_share_penalty_base ** 2.10)
+        + 0.24 * (heir_tax_penalty_base ** 1.35)
+        + 0.10 * (trad_penalty_base ** 1.20)
+    )
+    if profile_name == "Legacy Focused":
+        raw_min_trad_penalty *= 1.40
+    if preferences.get("minimize_trad_ira_for_heirs"):
+        preference_penalty += raw_min_trad_penalty
+
+    lambda_penalty_dollars = trad_balance_penalty_lambda * float(scoring_input.get("ending_traditional_ira_balance", 0.0))
+    lambda_penalty_score = safe_ratio(lambda_penalty_dollars, starting_assets * 10.0)
+
+    positive_score = nw_component + legacy_component + stability_component + preference_bonus
+    negative_score = trad_component + trad_share_component + drag_component + heir_tax_component + risk_component + preference_penalty + lambda_penalty_score
+    score = positive_score - negative_score
+
+    stability_label = "High" if income_coverage_ratio >= 0.95 and survivor_coverage_ratio >= 0.60 else ("Medium" if income_coverage_ratio >= 0.60 else "Low")
+    risk_label = "Low" if risk_penalty_base <= 0.33 else ("Medium" if risk_penalty_base <= 0.66 else "High")
+
+    return {
+        **scoring_input,
+        "score": float(score),
+        "score_100": float(score * 100.0),
+        "lambda_penalty_dollars": float(lambda_penalty_dollars),
+        "lambda_penalty_score": float(lambda_penalty_score),
+        "stability_label": stability_label,
+        "risk_label": risk_label,
+        "nw_component": float(nw_component),
+        "legacy_component": float(legacy_component),
+        "stability_component": float(stability_component),
+        "trad_component": float(trad_component),
+        "drag_component": float(drag_component),
+        "trad_share_component": float(trad_share_component),
+        "risk_component": float(risk_component),
+        "heir_tax_component": float(heir_tax_component),
+        "ss_value_component": float(0.14 * (ss_value_signal ** 1.10) if preferences.get("maximize_social_security") else 0.0),
+        "max_ss_modifier_component": float(raw_max_ss_bonus),
+        "income_stability_modifier_component": float(raw_income_stability_bonus),
+        "min_trad_ira_modifier_component": float(raw_min_trad_penalty),
+        "preference_bonus_component": float(preference_bonus),
+        "preference_penalty_component": float(preference_penalty),
+        "social_security_present_value": float(scoring_input.get("social_security_present_value", estimate_social_security_present_value(
+            float(scoring_input.get("final_household_ss_income", 0.0)),
+            float(scoring_input.get("survivor_ss_income", 0.0)),
+        ))),
+        "positive_score": float(positive_score),
+        "negative_score": float(negative_score),
+        "ending_traditional_ira_share": float(scoring_input.get("ending_traditional_ira_share", 0.0)),
+        "income_stability_score": float(income_stability_score),
+    }
+
+
+def score_strategy_metrics(
+    metrics_list: list[dict],
+    profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> list[dict]:
+    shared_context = dict(scoring_context or build_strategy_scoring_context(metrics_list=metrics_list))
+    scoring_inputs = build_scoring_inputs(metrics_list, scoring_context=shared_context)
+    ranking_context = build_scoring_context(
+        profile_name=profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=shared_context,
+    )
+    scored = [compute_selected_score(row, ranking_context) for row in scoring_inputs]
+    return sorted(scored, key=lambda x: x["score"], reverse=True)
+
+
+def build_profile_score_maps(metrics_list: list[dict], scoring_context: dict | None = None, trad_balance_penalty_lambda: float = 0.0) -> dict[str, dict[str, float]]:
+    scoring_context = scoring_context or build_strategy_scoring_context(metrics_list=metrics_list)
+    out: dict[str, dict[str, float]] = {}
+    for profile_name in PROFILE_PRESETS.keys():
+        ranked = score_strategy_metrics(metrics_list, profile_name, preferences={}, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
+        out[profile_name] = {str(row.get("Strategy", "")): float(row.get("score_100", 0.0)) for row in ranked}
+    return out
+
+
+def build_strategy_scoring_payload(
+    results_rows: list[dict],
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    scoring_context: dict | None = None,
+) -> dict:
+    """
+    Central scoring payload used by both Quick and Full SS scans.
+    This keeps profile scoring, selected ranking, and profile score maps on one shared path.
+    """
+    metric_rows = []
+    for row in results_rows:
+        metric_rows.append({
+            "Strategy": f"{int(row['Owner SS Age'])}/{int(row['Spouse SS Age'])}",
+            "Owner SS Age": int(row["Owner SS Age"]),
+            "Spouse SS Age": int(row["Spouse SS Age"]),
+            "final_net_worth": float(row.get("Final Net Worth", 0.0)),
+            "after_tax_legacy": float(row.get("After-Tax Legacy", 0.0)),
+            "effective_legacy_value": float(row.get("Effective Legacy Value", row.get("After-Tax Legacy", 0.0))),
+            "heir_tax_drag": float(row.get("Heir Tax Drag", 0.0)),
+            "ending_traditional_ira_balance": float(row.get("Ending Traditional IRA Balance", 0.0)),
+            "ending_roth_balance": float(row.get("Ending Roth Balance", 0.0)),
+            "ending_brokerage_balance": float(row.get("Ending Brokerage Balance", 0.0)),
+            "ending_cash_balance": float(row.get("Ending Cash Balance", 0.0)),
+            "stability_value": float(row.get("Stability Value", 0.0)),
+            "risk_value": float(row.get("Risk Value", 0.0)),
+            "final_household_ss_income": float(row.get("Final Household SS Income", 0.0)),
+            "survivor_ss_income": float(row.get("Survivor SS Income", 0.0)),
+            "social_security_present_value": float(row.get("Social Security Present Value", estimate_social_security_present_value(float(row.get("Final Household SS Income", 0.0)), float(row.get("Survivor SS Income", 0.0))))),
+            "Total Government Drag": float(row.get("Total Government Drag", 0.0)),
+            "Total Conversions": float(row.get("Total Conversions", 0.0)),
+            "Total Federal Tax": float(row.get("Total Federal Tax", 0.0)),
+            "Total State Tax": float(row.get("Total State Tax", 0.0)),
+            "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
+            "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "First IRMAA Year": row.get("First IRMAA Year"),
+            "Max MAGI": float(row.get("Max MAGI", 0.0)),
+            "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
+            "IRMAA Hit Years": int(row.get("IRMAA Hit Years", 0)),
+        })
+
+    scoring_context = scoring_context or build_strategy_scoring_context(metrics_list=metric_rows)
+    selected_ranked_rows = score_strategy_metrics(
+        metric_rows,
+        selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    profile_score_maps = build_profile_score_maps(
+        metric_rows,
+        scoring_context=scoring_context,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+    )
+    return {
+        "metric_rows": metric_rows,
+        "selected_ranked_rows": selected_ranked_rows,
+        "profile_score_maps": profile_score_maps,
+        "scoring_context": scoring_context,
+    }
+
+
+def build_scored_strategy_outputs(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+) -> dict:
+    """
+    Shared end-to-end scoring / ranking path for both Quick and Full SS scans.
+    The only intended difference between Quick and Full is candidate generation.
+    """
+    safe_inputs = copy.deepcopy(inputs or {})
+    scoring_context = build_strategy_scoring_context(inputs=safe_inputs, metrics_list=results_rows)
+    ranked_df = build_ranked_optimizer_results_df(
+        results_rows,
+        selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    profile_shortlists = build_profile_shortlists_from_optimizer_rows(
+        results_rows,
+        top_n=max(1, int(shortlist_top_n)),
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        scoring_context=scoring_context,
+    )
+    return {
+        "scoring_context": scoring_context,
+        "ranked_df": ranked_df,
+        "profile_shortlists": profile_shortlists,
+    }
+
+
+def extract_selected_score_map(df: pd.DataFrame) -> dict[str, float]:
+    if df is None or df.empty:
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        strategy = str(row.get("Strategy", ""))
+        if strategy:
+            out[strategy] = float(get_selected_score_value(row))
+    return out
+
+
+def validate_overlap_score_identity(quick_df: pd.DataFrame, full_df: pd.DataFrame, tolerance: float = 1e-9) -> pd.DataFrame:
+    quick_scores = extract_selected_score_map(quick_df)
+    full_scores = extract_selected_score_map(full_df)
+    overlaps = sorted(set(quick_scores).intersection(full_scores))
+    mismatches = []
+    for strategy in overlaps:
+        q = float(quick_scores[strategy])
+        f = float(full_scores[strategy])
+        if abs(q - f) > tolerance:
+            mismatches.append({"Strategy": strategy, "Quick Score": q, "Full Score": f, "Delta": f - q})
+    return pd.DataFrame(mismatches)
+
+
+def build_quick_profile_anchor_rows(ranked_rows: list[dict]) -> dict:
+    if not ranked_rows:
+        return {}
+
+    def _as_float(row: dict, key: str) -> float:
+        try:
+            return float(row.get(key, 0.0))
+        except Exception:
+            return 0.0
+
+    recommended = ranked_rows[0]
+    best_growth = max(
+        ranked_rows,
+        key=lambda r: (
+            _as_float(r, "Final Net Worth"),
+            _as_float(r, "After-Tax Legacy"),
+        ),
+    )
+    best_legacy = max(
+        ranked_rows,
+        key=lambda r: (
+            _as_float(r, "After-Tax Legacy"),
+            -_as_float(r, "Ending Traditional IRA Balance"),
+            _as_float(r, "Effective Legacy Value"),
+        ),
+    )
+    most_stable = max(
+        ranked_rows,
+        key=lambda r: (
+            _as_float(r, "Final Household SS Income"),
+            _as_float(r, "Survivor SS Income"),
+            _as_float(r, "Stability Value"),
+        ),
+    )
+    return {
+        "recommended": recommended,
+        "best_growth": best_growth,
+        "best_legacy": best_legacy,
+        "most_stable": most_stable,
+    }
+
+
+def generate_advisor_interpretation(profile_name: str, ranked_rows: list[dict]) -> str:
+    if not ranked_rows:
+        return "No recommendation is available yet."
+
+    anchors = build_quick_profile_anchor_rows(ranked_rows)
+    winner = anchors.get("recommended", ranked_rows[0])
+
+    def _as_float(row: dict, key: str) -> float:
+        try:
+            return float(row.get(key, 0.0))
+        except Exception:
+            return 0.0
+
+    def _pick_reference_row() -> tuple[dict, str]:
+        if profile_name == "Growth":
+            ref = anchors.get("most_stable", winner)
+            if str(ref.get("Strategy", "")) == str(winner.get("Strategy", "")):
+                alternatives = [r for r in ranked_rows if str(r.get("Strategy", "")) != str(winner.get("Strategy", ""))]
+                if alternatives:
+                    ref = max(
+                        alternatives,
+                        key=lambda r: (
+                            _as_float(r, "Final Household SS Income"),
+                            _as_float(r, "Survivor SS Income"),
+                            _as_float(r, "Stability Value"),
+                        ),
+                    )
+            return ref, "most stable option"
+
+        ref = anchors.get("best_growth", winner)
+        if str(ref.get("Strategy", "")) == str(winner.get("Strategy", "")):
+            alternatives = [r for r in ranked_rows if str(r.get("Strategy", "")) != str(winner.get("Strategy", ""))]
+            if alternatives:
+                ref = max(
+                    alternatives,
+                    key=lambda r: (
+                        _as_float(r, "Final Net Worth"),
+                        _as_float(r, "After-Tax Legacy"),
+                    ),
+                )
+        return ref, "best growth option"
+
+    reference, reference_label = _pick_reference_row()
+
+    winner_nw = _as_float(winner, "Final Net Worth")
+    winner_trad = _as_float(winner, "Ending Traditional IRA Balance")
+    winner_ss = _as_float(winner, "Final Household SS Income")
+    winner_gov_drag = _as_float(winner, "Total Government Drag")
+
+    reference_nw = _as_float(reference, "Final Net Worth")
+    reference_trad = _as_float(reference, "Ending Traditional IRA Balance")
+    reference_ss = _as_float(reference, "Final Household SS Income")
+    reference_gov_drag = _as_float(reference, "Total Government Drag")
+
+    nw_delta = winner_nw - reference_nw
+    tax_delta = winner_gov_drag - reference_gov_drag
+    income_delta = winner_ss - reference_ss
+    trad_delta = winner_trad - reference_trad
+
+    def _strategy_phrase() -> str:
+        strategy = str(winner.get("Strategy", ""))
+        if profile_name == "Growth":
+            return f"{strategy} — an earlier-claiming tilt that leans toward growth"
+        if profile_name == "Balanced":
+            return f"{strategy} — a middle-ground claiming approach"
+        return f"{strategy} — a delayed-claiming tilt toward stability and tax control"
+
+    def _tradeoff_block() -> str:
+        return "\n".join([
+            f"- **Net worth:** {format_signed_dollars(nw_delta)}",
+            f"- **Lifetime taxes / government drag:** {format_signed_dollars(tax_delta)}",
+            f"- **Guaranteed income (Social Security):** {format_signed_dollars(income_delta)}/year",
+            f"- **Ending Traditional IRA:** {format_signed_dollars(trad_delta)}",
+        ])
+
+    if profile_name == "Growth":
+        meaning = "You are choosing maximum growth and upside over maximum guaranteed income later in life."
+        why_lines = [
+            "- Favors the highest projected ending wealth in this quick comparison",
+            "- Keeps more capital invested earlier",
+            "- Accepts lower guaranteed income later in exchange for more upside now",
+        ]
+        give_up_lines = [
+            "- Less guaranteed income later in retirement",
+            "- More reliance on portfolio withdrawals and market performance",
+            "- A larger chance that more assets remain in Traditional IRA",
+        ]
+        estate_lines = [
+            "- Usually leaves a larger gross estate",
+            "- Can leave more assets in Traditional IRA",
+            "- May create a higher future tax burden for heirs",
+        ]
+    elif profile_name == "Balanced":
+        meaning = "You are choosing balance and flexibility instead of pushing hard for either maximum growth or maximum guaranteed income."
+        why_lines = [
+            "- Balances wealth creation and income stability",
+            "- Keeps tax exposure more manageable over time",
+            "- Avoids the most extreme claim-timing choices",
+        ]
+        give_up_lines = [
+            "- Not the absolute highest-net-worth path",
+            "- Not the absolute highest guaranteed-income path",
+            "- Gives up some upside to reduce regret across competing priorities",
+        ]
+        estate_lines = [
+            "- Leaves a more balanced mix of account types",
+            "- Usually avoids the worst Traditional IRA overhang",
+            "- Produces a steadier inheritance structure for heirs",
+        ]
+    else:
+        meaning = "You are choosing income security and tax control over maximum projected ending wealth."
+        why_lines = [
+            "- Favors higher guaranteed lifetime income",
+            "- Reduces long-term pressure from Traditional IRA balances and future withdrawals",
+            "- Improves late-retirement stability in this quick comparison",
+        ]
+        give_up_lines = [
+            "- Lower projected net worth than the most aggressive growth option",
+            "- More reliance on portfolio withdrawals before Social Security starts",
+            "- Less short-term flexibility in exchange for stronger later-life support",
+        ]
+        estate_lines = [
+            "- Usually leaves less in Traditional IRA",
+            "- Can improve after-tax inheritance quality",
+            "- Better fits future estate or charitable planning",
+        ]
+
+    sections = [
+        "**Recommended strategy**  ",
+        _strategy_phrase(),
+        "",
+        "**Why this wins**  ",
+        "\n".join(why_lines),
+        "",
+        "**What you give up**  ",
+        "\n".join(give_up_lines),
+        "",
+        f"**Tradeoffs (vs {reference_label}: {reference.get('Strategy', '')})**  ",
+        _tradeoff_block(),
+        "",
+        "**What this means**  ",
+        meaning,
+        "",
+        "**Estate impact**  ",
+        "\n".join(estate_lines),
+    ]
+    return "\n".join(sections)
+
+
+
+
+def is_close_quick_result(ranked_rows: list[dict], tolerance_pct: float = 0.02) -> bool:
+    if len(ranked_rows) < 2:
+        return False
+    top_score = float(ranked_rows[0].get("score", ranked_rows[0].get("Score", 0.0)))
+    second_score = float(ranked_rows[1].get("score", ranked_rows[1].get("Score", 0.0)))
+    denom = max(abs(top_score), 1e-9)
+    return abs(top_score - second_score) / denom <= tolerance_pct
+
+
+def generate_next_step_guidance(profile_name: str, ranked_rows: list[dict]) -> list[str]:
+    if not ranked_rows:
+        return []
+    winner = ranked_rows[0]
+    trad = float(winner.get("Ending Traditional IRA Balance", winner.get("ending_traditional_ira_balance", 0.0)))
+    roth = float(winner.get("Roth @ End", winner.get("ending_roth_balance", 0.0)))
+    brokerage = float(winner.get("Brokerage @ End", winner.get("ending_brokerage_balance", 0.0)))
+    cash = float(winner.get("ending_cash_balance", 0.0))
+    total = trad + roth + brokerage + cash
+    guidance = []
+    if total > 0:
+        trad_pct = trad / total
+        roth_pct = roth / total
+        if trad_pct >= 0.40:
+            guidance.append(
+                f"About {trad_pct:.0%} of ending balances still sit in Traditional IRA. That means Social Security timing alone is not materially reducing the tax-deferred balance."
+            )
+            guidance.append(
+                "Recommended next lever: open the Break-Even Governor with this Social Security strategy and test stronger Roth conversion settings, especially before RMD years."
+            )
+        if roth_pct < 0.30:
+            guidance.append(
+                f"Roth assets are still only about {roth_pct:.0%} of ending balances. More Roth conversion activity could improve tax flexibility and after-tax legacy quality."
+            )
+    if profile_name == "Legacy Focused":
+        guidance.append(
+            "For Legacy Focused results, use this recommendation as a Social Security starting point, then test whether more aggressive conversions can shrink Traditional IRA enough to make the remaining balance small or intentionally charitable."
+        )
+        guidance.append(
+            "If you want to refine this further, check a small nearby set such as 70/70, 70/69, 70/68, 69/70, and 69/69 before deciding whether a full 81-strategy run adds enough value."
+        )
+    elif profile_name == "Tax-Efficient Stability":
+        guidance.append(
+            "For Tax-Efficient Stability, compare the winner against a few nearby delayed-claim options such as 70/69, 70/68, or 69/70 to confirm you are getting enough conversion runway and guaranteed income later in life."
+        )
+    elif profile_name == "Spend With Confidence":
+        guidance.append(
+            "For Spend With Confidence, use the winner as a base case for future spending analysis rather than chasing the absolute highest net worth result."
+        )
+    elif profile_name == "Balanced":
+        guidance.append(
+            "Because this profile often produces close calls, compare a small nearby cluster around the winner instead of jumping straight to all 81 combinations."
+        )
+    else:
+        guidance.append(
+            "If the recommendation looks reasonable, the best confirmation step is to test a few nearby claim-age combinations around the winner and compare balance composition, not just net worth."
+        )
+    return guidance
+
+
+def build_strategy_scan_payload(
+    results_rows: list[dict],
+    inputs: dict,
+    selected_profile_name: str,
+    preferences: dict | None = None,
+    trad_balance_penalty_lambda: float = 0.0,
+    shortlist_top_n: int = 10,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+    include_profile_shortlists: bool = True,
+) -> dict:
+    """
+    Shared post-candidate pipeline for BOTH Quick and Full.
+
+    The canonical ranked dataframe is the single source of truth for BOTH scan modes.
+    Quick and Full differ only by the combo list they pass into the candidate stage.
+    Every downstream table must therefore be sliced directly from the same canonical
+    ranked dataframe instead of passing through alternate row/schema builders.
+    """
+    shared_outputs = build_scored_strategy_outputs(
+        results_rows,
+        inputs=inputs,
+        selected_profile_name=selected_profile_name,
+        preferences=preferences or {},
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=shortlist_top_n,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_outputs["ranked_df"], "strategy scan ranked results")
+    primary_table_df = ranked_df.head(int(primary_table_top_n)).copy()
+    comparison_df = build_top_strategy_comparison_df(ranked_df, top_n=comparison_top_n)
+    best_result = ranked_df.iloc[0].to_dict() if not ranked_df.empty else None
+    return {
+        "scoring_context": shared_outputs["scoring_context"],
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+        "best_result": best_result,
+        "profile_shortlists": shared_outputs["profile_shortlists"] if include_profile_shortlists else {},
+    }
+
+
+
+
+
+def run_strategy_combo_scan(
+    inputs: dict,
+    combos: list[tuple[int, int]],
+    max_conversion: float,
+    step_size: float,
+    profile_name: str,
+    trad_balance_penalty_lambda: float,
+    progress_text: str,
+    cache_namespace: str,
+    include_profile_shortlists: bool = False,
+    shortlist_top_n: int = 5,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+) -> dict:
+    """Single shared pipeline for Quick and Full SS scans."""
+    preferences = extract_scoring_preferences(inputs)
+    base_snapshot = copy.deepcopy(inputs)
+    base_snapshot["integrity_mode"] = False
+    base_snapshot["strict_repeatability_check"] = False
+    max_conversion = sanitize_governor_max_conversion(float(max_conversion))
+    step_size = sanitize_governor_step_size(float(step_size))
+
+    fact_rows, errors = build_ss_optimizer_fact_rows(
+        base_snapshot,
+        combos,
+        max_conversion,
+        step_size,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        progress_text=progress_text,
+        cache_namespace=cache_namespace,
+    )
+    if not fact_rows:
+        raise RuntimeError("Strategy scan could not produce any valid strategy results.")
+
+    shared_payload = build_strategy_scan_payload(
+        fact_rows,
+        inputs=base_snapshot,
+        selected_profile_name=profile_name,
+        preferences=preferences,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        shortlist_top_n=shortlist_top_n,
+        primary_table_top_n=primary_table_top_n,
+        comparison_top_n=comparison_top_n,
+        include_profile_shortlists=include_profile_shortlists,
+    )
+
+    ranked_df = canonicalize_optimizer_result_df(shared_payload["ranked_df"].copy(), "strategy scan ranked results")
+    primary_table_df = canonicalize_optimizer_result_df(shared_payload["primary_table_df"].copy(), "strategy scan primary table")
+    comparison_df = shared_payload["comparison_df"].copy() if isinstance(shared_payload.get("comparison_df"), pd.DataFrame) else pd.DataFrame(shared_payload.get("comparison_df", []))
+    return {
+        "inputs_snapshot": base_snapshot,
+        "preferences": preferences,
+        "fact_rows": fact_rows,
+        "errors": errors,
+        "shared_payload": shared_payload,
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+    }
+
+def execute_ss_scan(
+    inputs: dict,
+    combos: list[tuple[int, int]],
+    max_conversion: float,
+    step_size: float,
+    profile_name: str,
+    trad_balance_penalty_lambda: float,
+    progress_text: str,
+    cache_namespace: str,
+    include_profile_shortlists: bool = True,
+    shortlist_top_n: int = 5,
+    primary_table_top_n: int = 10,
+    comparison_top_n: int = 3,
+) -> dict:
+    """Single shared Quick/Full scan pipeline. Only the combo list should differ."""
+    shared_scan = run_strategy_combo_scan(
+        inputs=inputs,
+        combos=combos,
+        max_conversion=max_conversion,
+        step_size=step_size,
+        profile_name=profile_name,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        progress_text=progress_text,
+        cache_namespace=cache_namespace,
+        include_profile_shortlists=include_profile_shortlists,
+        shortlist_top_n=shortlist_top_n,
+        primary_table_top_n=primary_table_top_n,
+        comparison_top_n=comparison_top_n,
+    )
+    ranked_df = canonicalize_optimizer_result_df(shared_scan["ranked_df"].copy(), "strategy scan ranked results")
+    primary_table_df = canonicalize_optimizer_result_df(shared_scan["primary_table_df"].copy(), "strategy scan primary table")
+    comparison_df = shared_scan["comparison_df"].copy() if isinstance(shared_scan.get("comparison_df"), pd.DataFrame) else pd.DataFrame(shared_scan.get("comparison_df", []))
+    return {
+        "inputs_snapshot": copy.deepcopy(shared_scan["inputs_snapshot"]),
+        "preferences": copy.deepcopy(shared_scan["preferences"]),
+        "fact_rows": copy.deepcopy(shared_scan["fact_rows"]),
+        "errors": copy.deepcopy(shared_scan["errors"]),
+        "shared_payload": shared_scan["shared_payload"],
+        "ranked_df": ranked_df,
+        "primary_table_df": primary_table_df,
+        "comparison_df": comparison_df,
+        "ranked_rows": ranked_df.to_dict("records"),
+        "best_result": shared_scan["shared_payload"].get("best_result"),
+        "profile_shortlists": copy.deepcopy(shared_scan["shared_payload"].get("profile_shortlists", {})),
+        "scoring_context": copy.deepcopy(shared_scan["shared_payload"].get("scoring_context", {})),
+    }
+
+
+
+def build_shared_scan_session_payload(
+    shared_scan: dict,
+    *,
+    profile_name: str,
+    trad_balance_penalty_lambda: float,
+    completed: bool = True,
+    total_combos: int | None = None,
+    error_message: str | None = None,
+    interrupted_partial_df: pd.DataFrame | None = None,
+    best_validation: dict | None = None,
+    best_rerun_summary: dict | None = None,
+    advisor_text: str = "",
+    close_result: bool = False,
+    next_step_guidance: list | None = None,
+) -> dict:
+    ranked_df = shared_scan["ranked_df"]
+    primary_table_df = shared_scan["primary_table_df"]
+    comparison_df = shared_scan["comparison_df"]
+    ranked_rows = shared_scan["ranked_rows"]
+    total_combo_count = int(total_combos) if total_combos is not None else int(len(ranked_rows))
+    return {
+        "all_results_df": ranked_df,
+        "all_results_export_df": ranked_df.copy(),
+        "top_10_df": primary_table_df.head(10).copy(),
+        "top_10_export_df": primary_table_df.head(10).copy(),
+        "comparison_df": comparison_df,
+        "comparison_display_df": comparison_df.copy() if isinstance(comparison_df, pd.DataFrame) else pd.DataFrame(comparison_df),
+        "profile_shortlists": copy.deepcopy(shared_scan.get("profile_shortlists", {})),
+        "raw_results_df": pd.DataFrame(copy.deepcopy(shared_scan["fact_rows"])),
+        "best_result": copy.deepcopy(shared_scan.get("best_result")),
+        "best_validation": best_validation,
+        "best_rerun_summary": best_rerun_summary,
+        "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda),
+        "scoring_context": copy.deepcopy(shared_scan.get("scoring_context", {})),
+        "profile_name": profile_name,
+        "applied_preset_note": "Using shared strategy scan pipeline with live inputs.",
+        "interrupted_partial_df": interrupted_partial_df,
+        "completed": bool(completed),
+        "progress_index": int(len(shared_scan["fact_rows"])),
+        "total_combos": total_combo_count,
+        "error_message": error_message,
+        # Quick-compatible aliases
+        "summary_df": primary_table_df,
+        "ranked_rows": ranked_rows,
+        "advisor_text": advisor_text,
+        "close_result": bool(close_result),
+        "next_step_guidance": list(next_step_guidance or []),
+        "errors": copy.deepcopy(shared_scan["errors"]),
+        "data_source": "shared_strategy_scan_pipeline",
+        "ss_scan_beg_mode": str(shared_scan.get("inputs_snapshot", {}).get("ss_scan_beg_mode", "BETR-only")),
+        "active_preferences_text": describe_active_scoring_preferences(shared_scan["preferences"]),
+        "quick_recommendation_input_state": copy.deepcopy(shared_scan["inputs_snapshot"]),
+        "quick_recommendation_source_scenario_state": copy.deepcopy(collect_scenario_state()),
+        "shared_scan_payload": shared_scan["shared_payload"],
+    }
+
+
+def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
+    scan_inputs, ss_scan_beg_mode = build_ss_scan_inputs(inputs)
+    trad_balance_penalty_lambda = float(scan_inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
+    shared_scan = execute_ss_scan(
+        inputs=scan_inputs,
+        combos=QUICK_STRATEGY_COMBOS,
+        max_conversion=max_conversion,
+        step_size=step_size,
+        profile_name=profile_name,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        progress_text=f"Running Quick Scan... 0/{len(QUICK_STRATEGY_COMBOS)}",
+        cache_namespace="_quick_recommendation_result_rows_cache",
+        include_profile_shortlists=True,
+        shortlist_top_n=5,
+        primary_table_top_n=10,
+        comparison_top_n=3,
+    )
+
+    ranked = shared_scan["ranked_rows"]
+    explanation = generate_advisor_interpretation(profile_name, ranked)
+    return build_shared_scan_session_payload(
+        shared_scan,
+        profile_name=profile_name,
+        trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        completed=True,
+        total_combos=len(QUICK_STRATEGY_COMBOS),
+        error_message=None,
+        interrupted_partial_df=None,
+        best_validation=None,
+        best_rerun_summary=None,
+        advisor_text=explanation,
+        close_result=is_close_quick_result(ranked),
+        next_step_guidance=generate_next_step_guidance(profile_name, ranked),
+    )
 
 def get_ss_optimizer_combo_count() -> int:
     return 9 * 9
@@ -3479,14 +5025,8 @@ def blended_future_effective_rate(delta_based_rate: float, estimated_future_rate
     return max(0.0, float(estimated_future_rate))
 
 
-def adjusted_current_effective_rate(delta_based_rate: float, tax_source_penalty: float, growth_rate: float = 0.0) -> float:
-    """
-    Current conversion cost should be the modeled current-year all-in tax cost plus
-    any explicit tax-funding penalty. Do not add heuristic surcharges here.
-    """
-    _ = growth_rate
+def adjusted_current_effective_rate(delta_based_rate: float, tax_source_penalty: float) -> float:
     return max(0.0, float(delta_based_rate) + float(tax_source_penalty))
-
 
 def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate: float, current_marginal_rate: float) -> float:
     """
@@ -3498,25 +5038,8 @@ def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate:
     if abs(base) <= 1e-12:
         base = float(estimated_future_rate)
     floor = 0.0
-    cap = max(float(current_marginal_rate), float(estimated_future_rate)) + 0.10
+    cap = max(float(current_marginal_rate), float(estimated_future_rate)) + 0.15
     return max(floor, min(base, cap))
-
-
-def blend_discounted_future_avoided_rate(raw_delta_rate: float, estimated_future_rate: float, current_marginal_rate: float, growth_rate: float, years_until_future: float) -> float:
-    """
-    BETR should not anchor to the most aggressive future-rate estimate.
-    Blend the finite-difference avoided-rate with the future marginal estimate and
-    discount it for the time value of waiting to receive those tax benefits.
-    """
-    stabilized = stabilized_future_avoided_rate(raw_delta_rate, estimated_future_rate, current_marginal_rate)
-    estimated = max(0.0, float(estimated_future_rate))
-    blended = (0.65 * stabilized) + (0.35 * estimated)
-    years_until_future = max(0.0, float(years_until_future))
-    growth_rate = max(0.0, float(growth_rate))
-    discount_factor = (1.0 + growth_rate) ** min(12.0, years_until_future)
-    if discount_factor > 1.0:
-        blended /= discount_factor
-    return max(0.0, blended)
 
 
 def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
@@ -3902,8 +5425,6 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     target_headroom = max(0.0, float(target_top) - baseline_ordinary_taxable)
     future_rate_info = estimate_future_marginal_rate(year, state, params, projection_cache=projection_cache)
     future_rate = float(future_rate_info["estimated_future_marginal_rate"])
-    growth_rate = max(0.0, float(params.get("growth", 0.0)))
-    years_until_future = max(0.0, float(future_rate_info.get("future_year", year)) - float(year))
 
     max_test = min(cap, floor_to_step(target_headroom, step_size))
     projected_trad_at_rmd_start = project_trad_balance_at_rmd_start(year, state, params, projection_cache=projection_cache)
@@ -3987,16 +5508,13 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_effective_blended = float(future_rate)
             net_benefit_rate = 0.0
         else:
-            effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty, growth_rate=growth_rate)
+            effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
 
-            # Use a discounted blend instead of the most aggressive future-rate anchor.
-            # This preserves BETR logic while restoring diminishing returns to large conversions.
-            future_effective_blended = blend_discounted_future_avoided_rate(
-                future_effective,
-                future_rate,
-                current_rate,
-                growth_rate=growth_rate,
-                years_until_future=years_until_future,
+            # Blend the true delta-based avoided-cost signal with the future RMD-era marginal-rate
+            # estimate. The stronger of the two is the relevant avoided-rate anchor.
+            future_effective_blended = max(
+                float(future_rate),
+                float(stabilized_future_avoided_rate(future_effective, future_rate, current_rate)),
             )
             net_benefit_rate = future_effective_blended - effective_current_adjusted
         # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
