@@ -1751,6 +1751,16 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     income_coverage_ratio = float(scoring_input.get("income_coverage_ratio", 0.0))
     survivor_coverage_ratio = float(scoring_input.get("survivor_coverage_ratio", 0.0))
     stability_support_ratio = float(scoring_input.get("stability_support_ratio", 0.0))
+    owner_ss_age = float(scoring_input.get("Owner SS Age", 70.0))
+    spouse_ss_age = float(scoring_input.get("Spouse SS Age", 70.0))
+    avg_claim_age = 0.5 * (owner_ss_age + spouse_ss_age)
+    delay_ratio = clamp01((avg_claim_age - 62.0) / 8.0)
+    early_income_ratio = clamp01((70.0 - avg_claim_age) / 8.0)
+    max_magi = float(scoring_input.get("Max MAGI", 0.0))
+    irmaa_hit_years = float(scoring_input.get("IRMAA Hit Years", 0.0))
+    magi_excess_ratio = clamp01(max(0.0, max_magi - IRMAA_FIRST_CLIFF_MFJ) / max(1.0, IRMAA_FIRST_CLIFF_MFJ))
+    magi_spike_penalty = (magi_excess_ratio ** 2.2) + 0.12 * ((irmaa_hit_years / 10.0) ** 1.8)
+    future_tax_burden = (trad_ratio ** 1.35) + 0.65 * (heir_tax_drag_ratio ** 1.15)
 
     nw_signal = math.log1p(max(0.0, net_worth_ratio))
     base_legacy_signal = math.log1p(max(0.0, legacy_ratio))
@@ -1769,56 +1779,57 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     trad_share_penalty_base = trad_share
 
     if profile_name == "Legacy Focused":
-        # Legacy Focused now uses the same canonical after-tax metric as every other
-        # profile. Legacy sensitivity should come from profile weights and heir/Trad
-        # penalties, not from swapping in a different wealth definition.
-        legacy_component = weights["legacy"] * base_legacy_signal
-        nw_component = 0.05 * weights["nw"] * nw_signal
-        stability_component = weights["stability"] * stability_signal
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.55)
-        trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 2.30)
-        drag_component = 0.75 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.05)
-        heir_tax_component = 1.25 * weights["trad"] * (heir_tax_penalty_base ** 1.55)
+        legacy_component = 1.02 * weights["legacy"] * base_legacy_signal
+        nw_component = 0.04 * weights["nw"] * nw_signal
+        stability_component = 0.90 * weights["stability"] * stability_signal
+        trad_component = 1.20 * weights["trad"] * (trad_penalty_base ** 1.75)
+        trad_share_component = 1.15 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 2.45)
+        drag_component = 0.85 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.12)
+        heir_tax_component = 1.45 * weights["trad"] * (heir_tax_penalty_base ** 1.70) + 1.10 * future_tax_burden
         risk_component = weights["risk"] * (risk_penalty_base ** 1.00)
     elif profile_name == "Spend With Confidence":
         legacy_component = weights["legacy"] * base_legacy_signal
-        nw_component = 0.60 * weights["nw"] * (nw_signal ** 0.85)
-        stability_component = weights["stability"] * (
-            0.25 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.30 * math.log1p(max(0.0, survivor_coverage_ratio))
-            + 0.10 * (ss_value_signal ** 1.05)
+        nw_component = 0.35 * weights["nw"] * (nw_signal ** 0.82)
+        stability_component = 1.35 * weights["stability"] * (
+            0.22 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.22 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.08 * (ss_value_signal ** 1.00)
+            + 1.60 * early_income_ratio
         )
         trad_component = weights["trad"] * (trad_penalty_base ** 1.18)
         trad_share_component = 1.10 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.20)
-        drag_component = 0.90 * weights.get("drag", 0.0) * drag_penalty_base
+        drag_component = 0.95 * weights.get("drag", 0.0) * drag_penalty_base
         heir_tax_component = 0.0
         risk_component = weights["risk"] * (risk_penalty_base ** 1.15)
     elif profile_name == "Tax-Efficient Stability":
         legacy_component = weights["legacy"] * (base_legacy_signal ** 1.03)
-        nw_component = 0.55 * weights["nw"] * (nw_signal ** 0.82)
+        nw_component = 0.32 * weights["nw"] * (nw_signal ** 0.78)
         stability_component = weights["stability"] * (
+            0.40 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.22 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.12 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.08 * (ss_value_signal ** 0.92)
+        )
+        trad_component = 1.18 * weights["trad"] * (trad_penalty_base ** 1.70)
+        trad_share_component = 1.18 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.85)
+        drag_component = 1.55 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.55) + 0.55 * magi_spike_penalty)
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.12)
+    elif profile_name == "Balanced":
+        balanced_delay_penalty = 0.90 * (delay_ratio ** 1.75)
+        balanced_early_bonus = 0.65 * early_income_ratio
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = 0.52 * weights["nw"] * (nw_signal ** 0.86)
+        stability_component = 1.20 * weights["stability"] * (
             0.42 * math.log1p(max(0.0, stability_support_ratio))
             + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
-            + 0.15 * (ss_value_signal ** 0.95)
+            + 0.18 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + balanced_early_bonus
         )
-        trad_component = 1.10 * weights["trad"] * (trad_penalty_base ** 1.55)
-        trad_share_component = 1.10 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.70)
-        drag_component = 1.20 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.35)
-        heir_tax_component = 0.0
-        risk_component = weights["risk"] * (risk_penalty_base ** 1.10)
-    elif profile_name == "Balanced":
-        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
-        nw_component = 0.85 * weights["nw"] * (nw_signal ** 0.90)
-        stability_component = 1.15 * weights["stability"] * (
-            0.48 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.32 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
-        )
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.38)
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.42)
         trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.55)
-        drag_component = 1.05 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.15)
+        drag_component = 1.08 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.18) + 0.25 * magi_spike_penalty) + balanced_delay_penalty
         heir_tax_component = 0.0
         risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
     else:
