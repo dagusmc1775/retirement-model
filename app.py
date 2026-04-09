@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v259"
+APP_VERSION = "v260"
 APP_STATE_VERSION = "v106"
 
 
@@ -7920,9 +7920,10 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
     if not isinstance(summary_df, pd.DataFrame):
         summary_df = pd.DataFrame(summary_df)
     summary_df = canonicalize_optimizer_result_df(summary_df.copy(), f"{heading.lower()} primary table")
+    visible_df = summary_df.drop(columns=[c for c in summary_df.columns if str(c).endswith(" Raw")], errors="ignore")
     st.subheader(heading)
     st.dataframe(
-        summary_df.style.format({
+        visible_df.style.format({
             "Selected Score": "{:.2f}",
             "Score": "{:.2f}",
             "Final Net Worth": "${:,.0f}",
@@ -7978,7 +7979,7 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
     )
     st.download_button(
         download_label,
-        data=summary_df.to_csv(index=False),
+        data=visible_df.to_csv(index=False),
         file_name=download_filename,
         mime="text/csv",
         use_container_width=True,
