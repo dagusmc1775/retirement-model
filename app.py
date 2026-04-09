@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v251-scoring-rebalance"
+APP_VERSION = "v231-ss-scan-betr-mode"
 APP_STATE_VERSION = "v106"
 
 
@@ -165,6 +165,7 @@ DEFAULT_APP_STATE = {
     "trad": 0.0,
     "trad_balance_penalty_lambda": 1.00,
     "validation_tolerance": 0.01,
+    "ss_scan_beg_mode": "BETR-only",
 }
 
 SCENARIO_STATE_KEYS = [k for k in DEFAULT_APP_STATE.keys() if k != "app_page"]
@@ -524,7 +525,7 @@ def summarize_funding_debug_view(df: pd.DataFrame) -> dict:
 
 PROFILE_PRESETS = {
     "Balanced": {
-        "weights": {"nw": 0.24, "legacy": 0.14, "trad": 0.18, "stability": 0.18, "risk": 0.10, "drag": 0.08, "trad_share": 0.08},
+        "weights": {"nw": 0.18, "legacy": 0.14, "trad": 0.20, "stability": 0.24, "risk": 0.08, "drag": 0.10, "trad_share": 0.12},
         "description": "You are balancing growth, tax efficiency, and long-term stability.",
         "bullets": [
             "avoid extreme strategies in either direction",
@@ -534,7 +535,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may not produce the single highest projected net worth, but it is designed to be more well-rounded.",
     },
     "Growth": {
-        "weights": {"nw": 0.60, "legacy": 0.08, "trad": 0.03, "stability": 0.08, "risk": 0.05, "drag": 0.02, "trad_share": 0.02},
+        "weights": {"nw": 0.52, "legacy": 0.10, "trad": 0.06, "stability": 0.12, "risk": 0.12, "drag": 0.04, "trad_share": 0.04},
         "description": "You are prioritizing maximum projected long-term wealth.",
         "bullets": [
             "favor strategies that keep more assets invested",
@@ -544,7 +545,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may increase upside, but it can also increase future tax exposure and market dependence.",
     },
     "Tax-Efficient Stability": {
-        "weights": {"nw": 0.10, "legacy": 0.20, "trad": 0.34, "stability": 0.14, "risk": 0.04, "drag": 0.22, "trad_share": 0.20},
+        "weights": {"nw": 0.05, "legacy": 0.18, "trad": 0.34, "stability": 0.14, "risk": 0.04, "drag": 0.30, "trad_share": 0.24},
         "description": "You are prioritizing tax efficiency, lower Traditional IRA burden, and more stable later-life income.",
         "bullets": [
             "favor strategies that improve Roth conversion opportunities",
@@ -554,7 +555,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may sacrifice some upside in exchange for lower future tax burden and greater confidence later in retirement.",
     },
     "Legacy Focused": {
-        "weights": {"nw": 0.02, "legacy": 0.68, "trad": 0.16, "stability": 0.04, "risk": 0.02, "drag": 0.05, "trad_share": 0.14},
+        "weights": {"nw": 0.01, "legacy": 0.76, "trad": 0.24, "stability": 0.05, "risk": 0.02, "drag": 0.08, "trad_share": 0.28},
         "description": "You are prioritizing what heirs are likely to keep after taxes, not just raw estate size.",
         "bullets": [
             "favor more tax-efficient assets at death",
@@ -564,7 +565,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may reduce maximum projected wealth somewhat, but it can improve after-tax inheritance value.",
     },
     "Spend With Confidence": {
-        "weights": {"nw": 0.08, "legacy": 0.06, "trad": 0.12, "stability": 0.40, "risk": 0.20, "drag": 0.04, "trad_share": 0.04},
+        "weights": {"nw": 0.04, "legacy": 0.04, "trad": 0.10, "stability": 0.54, "risk": 0.18, "drag": 0.04, "trad_share": 0.06},
         "description": "You are prioritizing confidence, flexibility, and the ability to enjoy retirement spending safely.",
         "bullets": [
             "place more value on reliable income and stability",
@@ -845,6 +846,22 @@ def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_na
     adjusted["selected_recommendation_profile"] = profile_name
     adjusted["quick_full_engine_mode"] = "exact_governor_path"
     return adjusted, {"preset_note": "Using exact live Governor inputs (no hidden overrides)."}
+
+
+def build_ss_scan_inputs(inputs: dict, mode: str | None = None) -> tuple[dict, str]:
+    """
+    Build the input package used by SS ranking scans.
+    In BETR-only mode, SS scans must not allow target-Trad or override lanes
+    to become authoritative. Those controls remain available for standalone BEG
+    exploration after a strategy is selected.
+    """
+    selected_mode = str(mode or inputs.get("ss_scan_beg_mode", st.session_state.get("ss_scan_beg_mode", "BETR-only")) or "BETR-only")
+    adjusted = copy.deepcopy(inputs)
+    adjusted["ss_scan_beg_mode"] = selected_mode
+    if selected_mode == "BETR-only":
+        adjusted["target_trad_balance_enabled"] = False
+        adjusted["target_trad_override_enabled"] = False
+    return adjusted, selected_mode
 
 
 def evaluate_strategy_via_governor(
@@ -1779,73 +1796,59 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
     trad_share_penalty_base = trad_share
 
     if profile_name == "Legacy Focused":
-        legacy_component = 1.08 * weights["legacy"] * ((0.76 * effective_legacy_signal) + (0.24 * base_legacy_signal)) ** 1.26
-        nw_component = 0.05 * weights["nw"] * (nw_signal ** 0.72)
-        stability_component = 0.60 * weights["stability"] * (
-            0.45 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.30 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.25 * math.log1p(max(0.0, survivor_coverage_ratio))
-        )
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.48)
-        trad_share_component = 0.92 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.88)
-        drag_component = 0.70 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.04) + 0.08 * magi_spike_penalty)
-        heir_tax_component = 0.92 * weights["trad"] * (heir_tax_penalty_base ** 1.40) + 0.26 * future_tax_burden
+        legacy_component = 1.02 * weights["legacy"] * base_legacy_signal
+        nw_component = 0.04 * weights["nw"] * nw_signal
+        stability_component = 0.90 * weights["stability"] * stability_signal
+        trad_component = 1.20 * weights["trad"] * (trad_penalty_base ** 1.75)
+        trad_share_component = 1.15 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 2.45)
+        drag_component = 0.85 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.12)
+        heir_tax_component = 1.45 * weights["trad"] * (heir_tax_penalty_base ** 1.70) + 1.10 * future_tax_burden
         risk_component = weights["risk"] * (risk_penalty_base ** 1.00)
     elif profile_name == "Spend With Confidence":
-        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.00)
-        nw_component = 0.55 * weights["nw"] * (nw_signal ** 0.82)
-        stability_component = 1.10 * weights["stability"] * (
-            0.35 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.40 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.25 * math.log1p(max(0.0, survivor_coverage_ratio))
-            + 0.55 * early_income_ratio
+        legacy_component = weights["legacy"] * base_legacy_signal
+        nw_component = 0.35 * weights["nw"] * (nw_signal ** 0.82)
+        stability_component = 1.35 * weights["stability"] * (
+            0.22 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.22 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.08 * (ss_value_signal ** 1.00)
+            + 1.60 * early_income_ratio
         )
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.35)
-        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.20)
-        drag_component = weights.get("drag", 0.0) * (drag_penalty_base ** 1.00)
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.18)
+        trad_share_component = 1.10 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.20)
+        drag_component = 0.95 * weights.get("drag", 0.0) * drag_penalty_base
         heir_tax_component = 0.0
         risk_component = weights["risk"] * (risk_penalty_base ** 1.15)
     elif profile_name == "Tax-Efficient Stability":
-        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.05)
-        nw_component = 0.42 * weights["nw"] * (nw_signal ** 0.78)
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.03)
+        nw_component = 0.32 * weights["nw"] * (nw_signal ** 0.78)
         stability_component = weights["stability"] * (
-            0.50 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
+            0.40 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.22 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.12 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.08 * (ss_value_signal ** 0.92)
         )
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.85)
-        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.65)
-        drag_component = weights.get("drag", 0.0) * ((drag_penalty_base ** 1.20) + 0.18 * magi_spike_penalty)
+        trad_component = 1.18 * weights["trad"] * (trad_penalty_base ** 1.70)
+        trad_share_component = 1.18 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.85)
+        drag_component = 1.55 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.55) + 0.55 * magi_spike_penalty)
         heir_tax_component = 0.0
-        risk_component = weights["risk"] * (risk_penalty_base ** 1.10)
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.12)
     elif profile_name == "Balanced":
-        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.05)
-        nw_component = weights["nw"] * (nw_signal ** 0.82)
-        stability_component = weights["stability"] * (
-            0.50 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
-            + 0.18 * early_income_ratio
+        balanced_delay_penalty = 0.90 * (delay_ratio ** 1.75)
+        balanced_early_bonus = 0.65 * early_income_ratio
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = 0.52 * weights["nw"] * (nw_signal ** 0.86)
+        stability_component = 1.20 * weights["stability"] * (
+            0.42 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.18 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + balanced_early_bonus
         )
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.50)
-        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.30)
-        drag_component = weights.get("drag", 0.0) * ((drag_penalty_base ** 1.08) + 0.08 * magi_spike_penalty)
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.42)
+        trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.55)
+        drag_component = 1.08 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.18) + 0.25 * magi_spike_penalty) + balanced_delay_penalty
         heir_tax_component = 0.0
-        risk_component = weights["risk"] * (risk_penalty_base ** 1.08)
-    elif profile_name == "Growth":
-        legacy_component = 0.40 * weights["legacy"] * (base_legacy_signal ** 0.96)
-        nw_component = 1.28 * weights["nw"] * (nw_signal ** 0.98)
-        stability_component = 0.55 * weights["stability"] * (
-            0.22 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.12 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.06 * math.log1p(max(0.0, survivor_coverage_ratio))
-            + 0.90 * early_income_ratio
-        )
-        trad_component = 0.40 * weights["trad"] * (trad_penalty_base ** 0.95)
-        trad_share_component = 0.40 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.00)
-        drag_component = 0.35 * weights.get("drag", 0.0) * ((drag_penalty_base ** 1.00) + 0.04 * magi_spike_penalty) + 0.55 * (delay_ratio ** 1.45)
-        heir_tax_component = 0.0
-        risk_component = 0.35 * weights["risk"] * (risk_penalty_base ** 0.90)
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
     else:
         legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
         nw_component = weights["nw"] * (nw_signal ** 0.90)
@@ -2533,6 +2536,7 @@ def build_shared_scan_session_payload(
         "next_step_guidance": list(next_step_guidance or []),
         "errors": copy.deepcopy(shared_scan["errors"]),
         "data_source": "shared_strategy_scan_pipeline",
+        "ss_scan_beg_mode": str(shared_scan.get("inputs_snapshot", {}).get("ss_scan_beg_mode", "BETR-only")),
         "active_preferences_text": describe_active_scoring_preferences(shared_scan["preferences"]),
         "quick_recommendation_input_state": copy.deepcopy(shared_scan["inputs_snapshot"]),
         "quick_recommendation_source_scenario_state": copy.deepcopy(collect_scenario_state()),
@@ -2541,9 +2545,10 @@ def build_shared_scan_session_payload(
 
 
 def run_quick_strategy_recommendation(inputs: dict, max_conversion: float, step_size: float, profile_name: str) -> dict:
-    trad_balance_penalty_lambda = float(inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
+    scan_inputs, ss_scan_beg_mode = build_ss_scan_inputs(inputs)
+    trad_balance_penalty_lambda = float(scan_inputs.get("trad_balance_penalty_lambda", DEFAULT_APP_STATE["trad_balance_penalty_lambda"]))
     shared_scan = execute_ss_scan(
-        inputs=inputs,
+        inputs=scan_inputs,
         combos=QUICK_STRATEGY_COMBOS,
         max_conversion=max_conversion,
         step_size=step_size,
@@ -5890,6 +5895,7 @@ def run_ss_optimizer(
 ) -> dict:
     _ = start_index
     _ = existing_results
+    scan_inputs, ss_scan_beg_mode = build_ss_scan_inputs(inputs)
     combos = [(owner_age, spouse_age) for owner_age in range(62, 71) for spouse_age in range(62, 71)]
     total_combos = len(combos)
 
@@ -5902,7 +5908,7 @@ def run_ss_optimizer(
 
     try:
         shared_scan = execute_ss_scan(
-            inputs=inputs,
+            inputs=scan_inputs,
             combos=combos,
             max_conversion=max_conversion,
             step_size=step_size,
@@ -5957,7 +5963,7 @@ def run_ss_optimizer(
         best_validation = None
         best_rerun_summary = None
         if integrity_mode and best_result is not None:
-            best_inputs = dict(inputs)
+            best_inputs = dict(scan_inputs)
             best_inputs["owner_claim_age"] = int(best_result["Owner SS Age"])
             best_inputs["spouse_claim_age"] = int(best_result["Spouse SS Age"])
             best_rerun = run_model_break_even_governor(best_inputs, sanitize_governor_max_conversion(float(max_conversion)), sanitize_governor_step_size(float(step_size)))
@@ -6030,8 +6036,8 @@ def run_ss_optimizer(
             "scoring_context": {},
             "ranked_rows": partial_df.to_dict("records"),
             "errors": [str(exc)],
-            "preferences": extract_scoring_preferences(inputs),
-            "inputs_snapshot": copy.deepcopy(inputs),
+            "preferences": extract_scoring_preferences(scan_inputs),
+            "inputs_snapshot": copy.deepcopy(scan_inputs),
             "shared_payload": {},
         }
         return tag_result_payload(
@@ -7994,6 +8000,21 @@ def render_conversion_page() -> None:
             f"Tradeoff to expect: {profile_summary['tradeoff']}"
         )
 
+        ss_scan_beg_mode = st.radio(
+            "SS scan Governor mode",
+            ["BETR-only", "Full BEG"],
+            horizontal=True,
+            key="ss_scan_beg_mode",
+            help=(
+                "BETR-only disables target Traditional IRA and override lanes during Quick and Full SS scans so rankings are driven by marginal BETR logic first. "
+                "Full BEG uses the live Governor settings exactly as configured below."
+            ),
+        )
+        if ss_scan_beg_mode == "BETR-only":
+            st.caption("BETR-only mode is active for SS scans: target Traditional IRA and override settings below will not drive Quick or Full rankings.")
+        else:
+            st.caption("Full BEG mode is active for SS scans: live target Traditional IRA and override settings can affect Quick and Full rankings.")
+
         st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
         pref1, pref2, pref3 = st.columns(3)
         with pref1:
@@ -8058,8 +8079,9 @@ def render_conversion_page() -> None:
                         step_size=step_size,
                         profile_name=planning_profile,
                     )
+                quick_scan_inputs, _ = build_ss_scan_inputs(inputs)
                 quick_hash_inputs = {
-                    **copy.deepcopy(inputs),
+                    **copy.deepcopy(quick_scan_inputs),
                     "max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION,
                     "step_size": QUICK_RECOMMENDATION_STEP_SIZE,
                     "planning_profile": planning_profile,
@@ -8085,7 +8107,8 @@ def render_conversion_page() -> None:
                 )
                 optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
                 optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_hash_inputs = {**copy.deepcopy(inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
+                optimizer_scan_inputs, _ = build_ss_scan_inputs(inputs)
+                optimizer_hash_inputs = {**copy.deepcopy(optimizer_scan_inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
                     mark_result_state("ss_optimizer", optimizer_hash_inputs)
@@ -8900,6 +8923,7 @@ def get_shared_household_inputs_from_state() -> dict:
         "target_trad_balance": float(st.session_state.get("target_trad_balance", DEFAULT_APP_STATE["target_trad_balance"])),
         "target_trad_override_enabled": bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
         "target_trad_override_max_rate": float(st.session_state.get("target_trad_override_max_rate", DEFAULT_APP_STATE["target_trad_override_max_rate"])),
+        "ss_scan_beg_mode": str(st.session_state.get("ss_scan_beg_mode", DEFAULT_APP_STATE["ss_scan_beg_mode"])),
     }
 
 
