@@ -524,7 +524,7 @@ def summarize_funding_debug_view(df: pd.DataFrame) -> dict:
 
 PROFILE_PRESETS = {
     "Balanced": {
-        "weights": {"nw": 0.24, "legacy": 0.14, "trad": 0.18, "stability": 0.18, "risk": 0.10, "drag": 0.08, "trad_share": 0.08},
+        "weights": {"nw": 0.18, "legacy": 0.14, "trad": 0.20, "stability": 0.24, "risk": 0.08, "drag": 0.10, "trad_share": 0.12},
         "description": "You are balancing growth, tax efficiency, and long-term stability.",
         "bullets": [
             "avoid extreme strategies in either direction",
@@ -544,7 +544,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may increase upside, but it can also increase future tax exposure and market dependence.",
     },
     "Tax-Efficient Stability": {
-        "weights": {"nw": 0.10, "legacy": 0.20, "trad": 0.34, "stability": 0.14, "risk": 0.04, "drag": 0.22, "trad_share": 0.20},
+        "weights": {"nw": 0.05, "legacy": 0.18, "trad": 0.34, "stability": 0.14, "risk": 0.04, "drag": 0.30, "trad_share": 0.24},
         "description": "You are prioritizing tax efficiency, lower Traditional IRA burden, and more stable later-life income.",
         "bullets": [
             "favor strategies that improve Roth conversion opportunities",
@@ -564,7 +564,7 @@ PROFILE_PRESETS = {
         "tradeoff": "This approach may reduce maximum projected wealth somewhat, but it can improve after-tax inheritance value.",
     },
     "Spend With Confidence": {
-        "weights": {"nw": 0.08, "legacy": 0.06, "trad": 0.12, "stability": 0.40, "risk": 0.20, "drag": 0.04, "trad_share": 0.04},
+        "weights": {"nw": 0.04, "legacy": 0.04, "trad": 0.10, "stability": 0.54, "risk": 0.18, "drag": 0.04, "trad_share": 0.06},
         "description": "You are prioritizing confidence, flexibility, and the ability to enjoy retirement spending safely.",
         "bullets": [
             "place more value on reliable income and stability",
@@ -1782,17 +1782,45 @@ def compute_selected_score(scoring_input: dict, scoring_context: dict) -> dict:
         risk_component = weights["risk"] * (risk_penalty_base ** 1.00)
     elif profile_name == "Spend With Confidence":
         legacy_component = weights["legacy"] * base_legacy_signal
-        nw_component = weights["nw"] * nw_signal
+        nw_component = 0.60 * weights["nw"] * (nw_signal ** 0.85)
         stability_component = weights["stability"] * (
-            0.35 * math.log1p(max(0.0, stability_support_ratio))
-            + 0.40 * math.log1p(max(0.0, income_coverage_ratio))
-            + 0.25 * math.log1p(max(0.0, survivor_coverage_ratio))
+            0.25 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.35 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.30 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.10 * (ss_value_signal ** 1.05)
         )
-        trad_component = weights["trad"] * (trad_penalty_base ** 1.20)
-        trad_share_component = weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.10)
-        drag_component = weights.get("drag", 0.0) * drag_penalty_base
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.18)
+        trad_share_component = 1.10 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.20)
+        drag_component = 0.90 * weights.get("drag", 0.0) * drag_penalty_base
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.15)
+    elif profile_name == "Tax-Efficient Stability":
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.03)
+        nw_component = 0.55 * weights["nw"] * (nw_signal ** 0.82)
+        stability_component = weights["stability"] * (
+            0.42 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.28 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.15 * math.log1p(max(0.0, survivor_coverage_ratio))
+            + 0.15 * (ss_value_signal ** 0.95)
+        )
+        trad_component = 1.10 * weights["trad"] * (trad_penalty_base ** 1.55)
+        trad_share_component = 1.10 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.70)
+        drag_component = 1.20 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.35)
         heir_tax_component = 0.0
         risk_component = weights["risk"] * (risk_penalty_base ** 1.10)
+    elif profile_name == "Balanced":
+        legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
+        nw_component = 0.85 * weights["nw"] * (nw_signal ** 0.90)
+        stability_component = 1.15 * weights["stability"] * (
+            0.48 * math.log1p(max(0.0, stability_support_ratio))
+            + 0.32 * math.log1p(max(0.0, income_coverage_ratio))
+            + 0.20 * math.log1p(max(0.0, survivor_coverage_ratio))
+        )
+        trad_component = weights["trad"] * (trad_penalty_base ** 1.38)
+        trad_share_component = 1.05 * weights.get("trad_share", 0.0) * (trad_share_penalty_base ** 1.55)
+        drag_component = 1.05 * weights.get("drag", 0.0) * (drag_penalty_base ** 1.15)
+        heir_tax_component = 0.0
+        risk_component = weights["risk"] * (risk_penalty_base ** 1.05)
     else:
         legacy_component = weights["legacy"] * (base_legacy_signal ** 1.02)
         nw_component = weights["nw"] * (nw_signal ** 0.90)
