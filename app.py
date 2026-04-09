@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v231-ss-scan-betr-mode"
+APP_VERSION = "v256"
 APP_STATE_VERSION = "v106"
 
 
@@ -8016,13 +8016,15 @@ def render_conversion_page() -> None:
             st.caption("Full BEG mode is active for SS scans: live target Traditional IRA and override settings can affect Quick and Full rankings.")
 
         st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
-        pref1, pref2, pref3 = st.columns(3)
-        with pref1:
-            st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
-        with pref2:
-            st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
-        with pref3:
-            st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+        with st.form("ss_optimizer_modifier_form", clear_on_submit=False, border=False):
+            pref1, pref2, pref3 = st.columns(3)
+            with pref1:
+                st.checkbox("Maximize Social Security", key="preference_maximize_social_security", help="Adds extra scoring credit for higher present-value Social Security income while keeping your base profile intact.")
+            with pref2:
+                st.checkbox("Minimize Traditional IRA for heirs", key="preference_minimize_trad_ira_for_heirs", help="Adds extra scoring penalty for larger Traditional IRA balances, Trad share, and heir tax drag.")
+            with pref3:
+                st.checkbox("Income stability focus", key="preference_income_stability_focus", help="Adds extra credit for higher guaranteed income and steadier late-life funding support.")
+            st.form_submit_button("Apply modifier changes", use_container_width=True)
         current_preferences = extract_scoring_preferences(st.session_state)
         st.caption(f"Active preference modifiers: {describe_active_scoring_preferences(current_preferences)}")
         lambda_col_left, lambda_col_right = st.columns([1, 3])
