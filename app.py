@@ -1692,10 +1692,9 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
     starting_assets = max(1.0, float(scoring_context.get("starting_assets", 1.0)))
     annual_spending = max(1.0, float(scoring_context.get("annual_spending", 1.0)))
 
-    trad_at_rmd_norm = normalize_penalty_series([float(m.get("trad_at_rmd_start", m.get("ending_traditional_ira_balance", 0.0))) for m in metrics_list])
-    irmaa_hit_years_norm = normalize_penalty_series([float(m.get("irmaa_hit_years", m.get("IRMAA Hit Years", 0))) for m in metrics_list])
-    magi_excess_norm = normalize_penalty_series([float(m.get("magi_excess_over_cliff", 0.0)) for m in metrics_list])
-    liquidity_risk_norm = normalize_penalty_series([float(m.get("liquidity_risk_raw", 0.0)) for m in metrics_list])
+    # IMPORTANT: Risk must be candidate-set invariant so the same strategy receives
+    # the same Risk Value in Quick and Full. Therefore, do NOT normalize risk drivers
+    # across the current candidate list here.
 
     scoring_inputs = []
     for idx, metrics in enumerate(metrics_list):
@@ -1715,11 +1714,29 @@ def build_scoring_inputs(metrics_list: list[dict], scoring_context: dict | None 
         survivor_ss_income = float(metrics.get("survivor_ss_income", 0.0))
         ss_present_value = float(metrics.get("social_security_present_value", estimate_social_security_present_value(final_household_ss_income, survivor_ss_income)))
         total_government_drag = float(metrics.get("Total Government Drag", 0.0))
+        # Candidate-set invariant retirement risk:
+        # - Trad carried into RMD years (scaled to starting assets)
+        # - IRMAA hit years (scaled to a 12-year practical range)
+        # - MAGI excess above the first IRMAA cliff (scaled to the cliff itself)
+        # - liquidity risk raw (already 0..1)
+        trad_at_rmd_ratio = clamp01(safe_ratio(
+            float(metrics.get("trad_at_rmd_start", ending_trad)),
+            starting_assets,
+            default=0.0,
+        ))
+        irmaa_hit_years_ratio = clamp01(float(metrics.get("irmaa_hit_years", metrics.get("IRMAA Hit Years", 0))) / 12.0)
+        magi_excess_ratio = clamp01(safe_ratio(
+            float(metrics.get("magi_excess_over_cliff", 0.0)),
+            IRMAA_FIRST_CLIFF_MFJ,
+            default=0.0,
+        ))
+        liquidity_risk_ratio = clamp01(float(metrics.get("liquidity_risk_raw", 0.0)))
+
         risk_score_ratio = clamp01(
-            0.50 * trad_at_rmd_norm[idx]
-            + 0.25 * irmaa_hit_years_norm[idx]
-            + 0.20 * magi_excess_norm[idx]
-            + 0.05 * liquidity_risk_norm[idx]
+            0.50 * trad_at_rmd_ratio
+            + 0.25 * irmaa_hit_years_ratio
+            + 0.20 * magi_excess_ratio
+            + 0.05 * liquidity_risk_ratio
         )
 
         liquidity_coverage_years = 0.0
