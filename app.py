@@ -6004,6 +6004,14 @@ def render_ss_optimizer_results(result: dict, planning_profile: str, current_pre
     st.caption("Use this section for exhaustive validation or to explore alternatives after you review the quick scan and Break-Even Governor results.")
 
     quick_result = get_current_result_payload("quick_strategy_recommendation_result")
+    st.caption("The primary Full summary table below uses the exact same canonical schema and shared rendering helper as Quick. The only intended difference is the combo set.")
+    render_shared_scan_primary_table(
+        result,
+        "Full Scan Summary",
+        "Download Full Scan Summary (CSV)",
+        "full_scan_summary.csv",
+    )
+
     all_results_df = result.get("all_results_df", pd.DataFrame())
     if isinstance(all_results_df, pd.DataFrame) and not all_results_df.empty:
         base_context_inputs = collect_scenario_state()
@@ -7799,6 +7807,76 @@ def render_shared_household_inputs() -> dict:
     return inputs
 
 
+def render_shared_scan_primary_table(result: dict, heading: str, download_label: str, download_filename: str) -> None:
+    summary_df = result.get("summary_df", pd.DataFrame())
+    if not isinstance(summary_df, pd.DataFrame):
+        summary_df = pd.DataFrame(summary_df)
+    summary_df = canonicalize_optimizer_result_df(summary_df.copy(), f"{heading.lower()} primary table")
+    st.subheader(heading)
+    st.dataframe(
+        summary_df.style.format({
+            "Selected Score": "{:.2f}",
+            "Score": "{:.2f}",
+            "Final Net Worth": "${:,.0f}",
+            "After-Tax Legacy": "${:,.0f}",
+            "After-Tax Net Worth (Primary)": "${:,.0f}",
+            "Effective Legacy Value": "${:,.0f}",
+            "Heir Value (Conservative)": "${:,.0f}",
+            "Heir Tax Drag": "${:,.0f}",
+            "Ending Traditional IRA Balance": "${:,.0f}",
+            "Ending Roth Balance": "${:,.0f}",
+            "Ending Brokerage Balance": "${:,.0f}",
+            "Ending Cash Balance": "${:,.0f}",
+            "Final Household SS Income": "${:,.0f}",
+            "Survivor SS Income": "${:,.0f}",
+            "Social Security Present Value": "${:,.0f}",
+            "Total Government Drag": "${:,.0f}",
+            "Total Conversions": "${:,.0f}",
+            "Total Federal Tax": "${:,.0f}",
+            "Total State Tax": "${:,.0f}",
+            "Total ACA Cost": "${:,.0f}",
+            "Total IRMAA Cost": "${:,.0f}",
+            "Traditional IRA Penalty Applied": "${:,.0f}",
+            "Max MAGI": "${:,.0f}",
+            "Risk Value": "{:.6f}",
+            "Traditional IRA Share @ End": "{:.3%}",
+            "NW Score +": "{:.2f}",
+            "Legacy Score +": "{:.2f}",
+            "Stability Score +": "{:.2f}",
+            "Trad Penalty -": "{:.2f}",
+            "Trad Share Penalty -": "{:.2f}",
+            "Gov Drag Penalty -": "{:.2f}",
+            "Heir Tax Penalty -": "{:.2f}",
+            "Risk Penalty -": "{:.6f}",
+            "Preference Bonus +": "{:.2f}",
+            "Preference Penalty -": "{:.2f}",
+            "Lambda Penalty -": "{:.2f}",
+            "Balanced Profile Score": "{:.6f}",
+            "Growth Profile Score": "{:.6f}",
+            "Tax-Efficient Profile Score": "{:.6f}",
+            "Legacy Profile Score": "{:.6f}",
+            "Spend With Confidence Profile Score": "{:.6f}",
+            "Max SS Modifier Score": "{:.6f}",
+            "Income Stability Modifier Score": "{:.6f}",
+            "Min Trad IRA Modifier Score": "{:.6f}",
+            "Balanced (0-100)": "{:.2f}",
+            "Growth (0-100)": "{:.2f}",
+            "Tax-Efficient (0-100)": "{:.2f}",
+            "Legacy (0-100)": "{:.2f}",
+            "Spend With Confidence (0-100)": "{:.2f}",
+            "Max SS (0-100)": "{:.2f}",
+        }),
+        use_container_width=True,
+    )
+    st.download_button(
+        download_label,
+        data=summary_df.to_csv(index=False),
+        file_name=download_filename,
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def render_conversion_page() -> None:
     ensure_default_state()
     st.subheader("Retirement Optimizer")
@@ -7976,47 +8054,20 @@ def render_conversion_page() -> None:
                 st.session_state["suppress_quick_recommendation_stale_once"] = False
             else:
                 render_stale_warning("quick_strategy_recommendation", quick_inputs_snapshot, "Quick scan results")
-            st.subheader("Quick Scan Summary")
             st.caption("These strategy rows now use the same canonical result schema, the same core engine, and the same ranking path as the Full 81 scan. The only intended difference is that Quick evaluates fewer candidate strategies.")
             if quick_result.get("applied_preset_note"):
                 st.caption(quick_result["applied_preset_note"])
             st.caption(f"Preference modifiers used: {quick_result.get('active_preferences_text', 'None')}")
-            st.dataframe(
-                quick_result["summary_df"].style.format({
-                    "Selected Score": "{:.2f}",
-                    "Score": "{:.2f}",
-                    "Final Net Worth": "${:,.0f}",
-                    "After-Tax Legacy": "${:,.0f}",
-                    "Effective Legacy Value": "${:,.0f}",
-                    "Heir Tax Drag": "${:,.0f}",
-                    "Ending Traditional IRA Balance": "${:,.0f}",
-                    "Ending Roth Balance": "${:,.0f}",
-                    "Ending Brokerage Balance": "${:,.0f}",
-                    "Ending Cash Balance": "${:,.0f}",
-                    "Final Household SS Income": "${:,.0f}",
-                    "Survivor SS Income": "${:,.0f}",
-                    "Social Security Present Value": "${:,.0f}",
-                    "Total Government Drag": "${:,.0f}",
-                    "Total Conversions": "${:,.0f}",
-                    "Total Federal Tax": "${:,.0f}",
-                    "Total State Tax": "${:,.0f}",
-                    "Total ACA Cost": "${:,.0f}",
-                    "Total IRMAA Cost": "${:,.0f}",
-                    "Max MAGI": "${:,.0f}",
-                }),
-                use_container_width=True,
+            render_shared_scan_primary_table(
+                quick_result,
+                "Quick Scan Summary",
+                "Download Quick Scan Summary (CSV)",
+                "quick_strategy_summary.csv",
             )
             if quick_result.get("close_result"):
                 st.info(
                     "Top strategies produce very similar outcomes here. This is less about a single mathematically obvious winner and more about preference: earlier income now versus stronger long-term guarantees and balance-sheet structure later."
                 )
-            st.download_button(
-                "Download Quick Scan Summary (CSV)",
-                data=quick_result["summary_df"].to_csv(index=False),
-                file_name="quick_strategy_summary.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
             st.subheader("Advisor Interpretation")
             advisor_text = str(quick_result.get("advisor_text", "")).replace("$", r"\$")
             st.markdown(advisor_text)
