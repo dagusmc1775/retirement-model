@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v256"
+APP_VERSION = "v257"
 APP_STATE_VERSION = "v106"
 
 
@@ -844,7 +844,7 @@ def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_na
     adjusted = copy.deepcopy(current_inputs)
     adjusted["planning_profile"] = profile_name
     adjusted["selected_recommendation_profile"] = profile_name
-    adjusted["quick_full_engine_mode"] = "exact_governor_path"
+    adjusted["quick_full_engine_mode"] = "shared_scan_path"
     return adjusted, {"preset_note": "Using exact live Governor inputs (no hidden overrides)."}
 
 
@@ -1951,11 +1951,12 @@ def score_strategy_metrics(
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
 
-def build_profile_score_maps(metrics_list: list[dict], scoring_context: dict | None = None, trad_balance_penalty_lambda: float = 0.0) -> dict[str, dict[str, float]]:
+def build_profile_score_maps(metrics_list: list[dict], scoring_context: dict | None = None, trad_balance_penalty_lambda: float = 0.0, preferences: dict | None = None) -> dict[str, dict[str, float]]:
     scoring_context = scoring_context or build_strategy_scoring_context(metrics_list=metrics_list)
+    active_preferences = copy.deepcopy(preferences or {})
     out: dict[str, dict[str, float]] = {}
     for profile_name in PROFILE_PRESETS.keys():
-        ranked = score_strategy_metrics(metrics_list, profile_name, preferences={}, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
+        ranked = score_strategy_metrics(metrics_list, profile_name, preferences=active_preferences, trad_balance_penalty_lambda=trad_balance_penalty_lambda, scoring_context=scoring_context)
         out[profile_name] = {str(row.get("Strategy", "")): float(row.get("score_100", 0.0)) for row in ranked}
     return out
 
@@ -2014,6 +2015,7 @@ def build_strategy_scoring_payload(
         metric_rows,
         scoring_context=scoring_context,
         trad_balance_penalty_lambda=trad_balance_penalty_lambda,
+        preferences=preferences or {},
     )
     return {
         "metric_rows": metric_rows,
@@ -4325,6 +4327,7 @@ def build_common_params(inputs: dict) -> dict:
         "spouse_rmd_start": int(spouse_rmd_start),
         "cash_sweep_threshold": float(inputs.get("cash_sweep_threshold", 50000.0)),
         "state_tax_rate": float(inputs.get("state_tax_rate", 0.0399)),
+        "ss_scan_beg_mode": str(inputs.get("ss_scan_beg_mode", "BETR-only")),
         "target_trad_balance_enabled": bool(inputs.get("target_trad_balance_enabled", False)),
         "target_trad_balance": float(inputs.get("target_trad_balance", 300000.0)),
         "target_trad_override_enabled": bool(inputs.get("target_trad_override_enabled", False)),
@@ -5503,6 +5506,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             future_effective = (future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa) / delta_conv
             net_benefit_rate = future_effective - current_effective
 
+        ss_scan_mode = str(params.get("ss_scan_beg_mode", "BETR-only") or "BETR-only")
         if current_conversion <= 1e-9:
             effective_current_adjusted = 0.0
             future_effective_blended = float(future_rate)
@@ -5510,12 +5514,17 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         else:
             effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
 
-            # Blend the true delta-based avoided-cost signal with the future RMD-era marginal-rate
-            # estimate. The stronger of the two is the relevant avoided-rate anchor.
-            future_effective_blended = max(
-                float(future_rate),
-                float(stabilized_future_avoided_rate(future_effective, future_rate, current_rate)),
-            )
+            if ss_scan_mode == "BETR-only":
+                # In SS ranking mode, use the projected future marginal rate directly.
+                # This avoids overstating conversion benefit by taking the more aggressive
+                # of multiple future-rate proxies.
+                future_effective_blended = float(future_rate)
+            else:
+                # Outside BETR-only scan mode, keep the broader BEG-style future avoided-rate anchor.
+                future_effective_blended = max(
+                    float(future_rate),
+                    float(stabilized_future_avoided_rate(future_effective, future_rate, current_rate)),
+                )
             net_benefit_rate = future_effective_blended - effective_current_adjusted
         # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
         post_rmd_hurdle = 0.05 if year >= int(params["household_rmd_start"]) else 0.0
