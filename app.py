@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v253"
+APP_VERSION = "v254"
 APP_STATE_VERSION = "v106"
 
 
@@ -6485,10 +6485,9 @@ def render_conversion_page() -> None:
     validation_tolerance = float(st.session_state.get("validation_tolerance", DEFAULT_APP_STATE["validation_tolerance"]))
 
     st.divider()
-    ss_optimizer_expanded = bool(st.session_state.get("ss_optimizer_expanded", False))
-    if get_current_result_payload("quick_strategy_recommendation_result") is not None or get_current_result_payload("ss_optimizer_last_result") is not None:
-        ss_optimizer_expanded = True
-    with st.expander("SS Optimizer", expanded=ss_optimizer_expanded):
+    ss_optimizer_expanded = True
+    st.session_state["ss_optimizer_expanded"] = True
+    with st.expander("SS Optimizer", expanded=True):
         st.caption("Use this section to find the best Social Security claiming approach for the selected planning profile. These controls are recommendation settings, not Governor execution settings.")
         st.caption("Workflow: set assumptions first, then run Quick Scan for a fast answer or Full 81-Combination Scan for exhaustive validation.")
         planning_profile = st.selectbox(
@@ -6718,15 +6717,18 @@ def render_conversion_page() -> None:
                     st.subheader("Tradeoff Details")
                     clean_lines = [str(line).replace("- **", "").replace("**", "") for line in tradeoff_lines]
                     st.markdown("\n\n".join(clean_lines))
+            snapshot_strategy_value = ""
+            if ranked_rows_for_tradeoff:
+                snapshot_strategy_value = str(ranked_rows_for_tradeoff[0].get('Strategy', ''))
             with st.expander("Quick Recommendation Snapshot", expanded=False):
-                default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {recommended_row.get('Strategy', '')}".strip(" -")
+                default_snapshot_name = f"{get_loaded_scenario_name()} - {planning_profile} - {snapshot_strategy_value}".strip(" -")
                 if not str(st.session_state.get("quick_snapshot_name_input", "") or "").strip():
                     st.session_state["quick_snapshot_name_input"] = default_snapshot_name
                 st.text_input("Snapshot name", key="quick_snapshot_name_input", placeholder="Baseline Plan - Growth")
                 snapshot_json = build_quick_recommendation_snapshot_payload(quick_result, planning_profile)
                 snapshot_name = str(st.session_state.get("quick_snapshot_name_input", "") or default_snapshot_name).strip() or default_snapshot_name
                 snapshot_profile = sanitize_export_filename(planning_profile, 'profile')
-                snapshot_strategy = sanitize_export_filename(str(recommended_row.get('Strategy', '')).replace('/', '-'), 'strategy')
+                snapshot_strategy = sanitize_export_filename(snapshot_strategy_value.replace('/', '-'), 'strategy')
                 snapshot_date = pd.Timestamp.now().strftime('%Y-%m-%d')
                 safe_snapshot_name = f"snapshot__{snapshot_profile}__{snapshot_strategy}__{snapshot_date}"
                 st.download_button(
