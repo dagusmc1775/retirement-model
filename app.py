@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v264"
+APP_VERSION = "v265"
 APP_STATE_VERSION = "v106"
 
 
@@ -5440,7 +5440,12 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     future_rate_info = estimate_future_marginal_rate(year, state, params, projection_cache=projection_cache)
     future_rate = float(future_rate_info["estimated_future_marginal_rate"])
 
-    max_test = min(cap, floor_to_step(target_headroom, step_size))
+    bracket_runway = min(cap, floor_to_step(target_headroom, step_size))
+    override_enabled = bool(params.get("target_trad_override_enabled", False))
+    # Critical: planner override years must be allowed to search above the target
+    # bracket runway. Otherwise the override lane can never actually rescue the
+    # target-Trad objective, no matter how high the override cap is set.
+    max_test = float(cap if override_enabled else bracket_runway)
     projected_trad_at_rmd_start = project_trad_balance_at_rmd_start(year, state, params, projection_cache=projection_cache)
     target_pressure_conversion = estimate_target_trad_pressure_conversion(
         year,
@@ -5635,7 +5640,6 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 selected_net_benefit = float(net_benefit_rate)
 
         override_cap = float(params.get("target_trad_override_max_rate", 0.22))
-        override_enabled = bool(params.get("target_trad_override_enabled", False))
         if (
             override_enabled
             and base_override_eligible
@@ -5655,23 +5659,32 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     # by household RMD start, target mode becomes authoritative in pre-RMD non-ACA years.
     # In that case, the governor should not be allowed to sit at tiny conversions or zero.
     selection_mode = "BETR"
+    desired_required_conversion = float(target_pressure_conversion)
     actual_required_conversion = float(target_pressure_conversion)
     hard_target_floor = 0.0
     if target_lane_active and float(target_gap_at_rmd_start) > 1e-9:
-        hard_target_floor = float(target_pressure_conversion)
+        bracket_candidate = float(highest_bracket_fill_conversion)
+        override_candidate = float(highest_override_conversion) if override_enabled else 0.0
 
-        # When behind target, use the full bracket runway first. This is the exact behavior
-        # the user expects in years like 2036-2040: post-ACA, pre-RMD, MFJ, wide 24% bracket.
-        if float(highest_bracket_fill_conversion) > hard_target_floor + 1e-9:
-            hard_target_floor = float(highest_bracket_fill_conversion)
+        # Policy intent:
+        # 1) use full target-bracket runway first
+        # 2) if still behind and override is allowed, climb above the bracket runway
+        #    but never above the highest tested conversion that stayed inside the
+        #    planner override cap.
+        hard_target_floor = float(bracket_candidate)
+        if hard_target_floor > 1e-9:
             selection_mode = "HARD_TARGET_BRACKET_FILL"
-        else:
-            selection_mode = "TRAD_TARGET_PRESSURE"
 
-        # If the planner override cap allows even more than the bracket-fill winner, take it.
-        if bool(params.get("target_trad_override_enabled", False)) and float(highest_override_conversion) > hard_target_floor + 1e-9:
-            hard_target_floor = float(highest_override_conversion)
-            selection_mode = "HARD_TARGET_OVERRIDE"
+        if override_enabled and override_candidate > 1e-9:
+            override_floor = min(float(desired_required_conversion), float(override_candidate))
+            if float(override_floor) > float(hard_target_floor) + 1e-9:
+                hard_target_floor = float(override_floor)
+                selection_mode = "HARD_TARGET_OVERRIDE"
+
+        if hard_target_floor <= 1e-9 and desired_required_conversion > 1e-9:
+            hard_target_floor = min(float(desired_required_conversion), float(bracket_candidate)) if bracket_candidate > 1e-9 else 0.0
+            if hard_target_floor > 1e-9:
+                selection_mode = "TRAD_TARGET_PRESSURE"
 
         if float(hard_target_floor) > float(selected_conversion) + 1e-9:
             selected_conversion = float(hard_target_floor)
@@ -5684,7 +5697,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 projection_cache=projection_cache,
             )["first_row"])
 
-    actual_required_conversion = float(hard_target_floor if hard_target_floor > 0 else target_pressure_conversion)
+    actual_required_conversion = float(desired_required_conversion)
     target_status = "OFF"
     if target_lane_active:
         if float(target_gap_at_rmd_start) <= 1e-9:
