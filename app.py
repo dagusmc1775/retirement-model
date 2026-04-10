@@ -5161,15 +5161,34 @@ def adjusted_current_effective_rate(delta_based_rate: float, tax_source_penalty:
 
 def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate: float, current_marginal_rate: float) -> float:
     """
-    Use the delta-based future avoided-cost rate when present, but stabilize cliff-driven spikes.
-    If the raw delta-based rate is zero/unavailable, fall back to the estimated future marginal rate.
-    Then cap the result to a modest premium over the larger of current/future bracket proxies.
+    Stabilize the future avoided-rate signal for diagnostics and BETR decisions.
+
+    The raw delta-based future avoided rate can explode in cliff years because it is derived
+    from multi-year drag deltas divided by a small local conversion step. That makes the value
+    useful as a directional signal, but not as a literal rate once it exceeds plausible tax
+    ranges. Use the estimated future marginal rate as the primary anchor whenever the raw value
+    is unavailable or implausibly large, then cap the result to a modest premium over the larger
+    of the current/future bracket proxies.
     """
-    base = float(raw_delta_rate)
-    if abs(base) <= 1e-12:
-        base = float(estimated_future_rate)
+    try:
+        base = float(raw_delta_rate)
+    except Exception:
+        base = 0.0
+    try:
+        est = float(estimated_future_rate)
+    except Exception:
+        est = 0.0
+    try:
+        cur = float(current_marginal_rate)
+    except Exception:
+        cur = 0.0
+
+    # Treat missing, negative, or clearly implausible raw values as unusable for a rate signal.
+    if abs(base) <= 1e-12 or base < 0.0 or base > 0.60:
+        base = est
+
     floor = 0.0
-    cap = max(float(current_marginal_rate), float(estimated_future_rate)) + 0.15
+    cap = max(cur, est) + 0.10
     return max(floor, min(base, cap))
 
 
@@ -5486,9 +5505,14 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 future_avoided_state = prev_future.get("state", 0.0) - curr_future.get("state", 0.0)
                 future_avoided_aca = prev_future["aca"] - curr_future["aca"]
                 future_avoided_irmaa = prev_future["irmaa"] - curr_future["irmaa"]
-                future_effective = (
+                future_effective_raw = (
                     future_avoided_fed + future_avoided_state + future_avoided_aca + future_avoided_irmaa
                 ) / delta_conv
+                future_effective = stabilized_future_avoided_rate(
+                    future_effective_raw,
+                    float(row.get("Current Marginal Tax Rate", 0.0)),
+                    float(row.get("Current Marginal Tax Rate", 0.0)),
+                )
                 net_benefit_rate = future_effective - info["current_effective"]
 
             tested_rows.append({
