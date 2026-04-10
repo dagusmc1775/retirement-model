@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v265"
+APP_VERSION = "v266"
 APP_STATE_VERSION = "v106"
 
 
@@ -5675,8 +5675,14 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         if hard_target_floor > 1e-9:
             selection_mode = "HARD_TARGET_BRACKET_FILL"
 
-        if override_enabled and override_candidate > 1e-9:
-            override_floor = min(float(desired_required_conversion), float(override_candidate))
+        if override_enabled:
+            # When target-Trad mode is active, the planner override lane is meant to
+            # be authoritative above the bracket runway. The required conversion pace
+            # must therefore remain eligible even if the BETR-style tested-row filters
+            # fail to produce a large "highest override" candidate.
+            override_floor = min(float(desired_required_conversion), float(max_test))
+            if override_candidate > 1e-9:
+                override_floor = min(float(desired_required_conversion), max(float(override_candidate), float(override_floor)))
             if float(override_floor) > float(hard_target_floor) + 1e-9:
                 hard_target_floor = float(override_floor)
                 selection_mode = "HARD_TARGET_OVERRIDE"
