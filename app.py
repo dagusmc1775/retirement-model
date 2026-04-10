@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v267"
+APP_VERSION = "v268"
 APP_STATE_VERSION = "v106"
 
 
@@ -4962,10 +4962,13 @@ def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dic
     Annual conversion pace required to work toward the target Traditional IRA balance by
     the first household RMD year.
 
-    The key input is the projected Traditional IRA balance at RMD start under a no-extra-
-    conversion path from *this* year forward, not just the current year's Trad balance.
-    That keeps the target lane from going timid simply because the current year has not
-    yet reflected the full future growth / RMD problem.
+    Use the stronger of two pace estimates:
+    1) projected gap at RMD start under a no-extra-conversion path, divided across the
+       remaining pre-RMD years, and
+    2) current Traditional IRA balance pressure divided across the remaining years.
+
+    This keeps the target lane from going timid late in the glidepath when the no-extra
+    projection can understate how much current-year conversion pressure is still needed.
     """
     if not bool(params.get("target_trad_balance_enabled", False)):
         return 0.0
@@ -4979,11 +4982,23 @@ def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dic
         0.0,
         float(projected_trad_at_rmd_start if projected_trad_at_rmd_start is not None else state.get("trad", 0.0)),
     )
-    target_gap = max(0.0, projected_trad - target_trad)
-    if target_gap <= 0.0:
+    current_trad_after_growth = max(0.0, float(state.get("trad", 0.0)) * (1.0 + float(params.get("growth", 0.0))))
+
+    projected_gap = max(0.0, projected_trad - target_trad)
+    current_gap = max(0.0, current_trad_after_growth - target_trad)
+    if projected_gap <= 0.0 and current_gap <= 0.0:
         return 0.0
 
-    annual_needed = target_gap / years_left
+    projected_pace = projected_gap / years_left
+    current_pace = current_gap / years_left
+    annual_needed = max(projected_pace, current_pace)
+
+    # Late in the glidepath, if a hard target remains and the required pace already
+    # reaches the annual test cap, make that explicit so target-Trad years do not fall
+    # back to soft bracket-fill behavior.
+    if annual_needed >= float(cap) - 1e-9:
+        return max(0.0, float(cap))
+
     # Round UP to the next step so the target lane does not drift behind schedule.
     rounded_up = math.ceil(max(0.0, annual_needed) / max(1.0, float(step_size))) * max(1.0, float(step_size))
     return max(0.0, min(float(cap), float(rounded_up)))
