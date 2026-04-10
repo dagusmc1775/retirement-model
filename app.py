@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v266"
+APP_VERSION = "v267"
 APP_STATE_VERSION = "v106"
 
 
@@ -5663,32 +5663,23 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     actual_required_conversion = float(target_pressure_conversion)
     hard_target_floor = 0.0
     if target_lane_active and float(target_gap_at_rmd_start) > 1e-9:
-        bracket_candidate = float(highest_bracket_fill_conversion)
-        override_candidate = float(highest_override_conversion) if override_enabled else 0.0
+        # Make the target-depletion lane authoritative based on the actual runway
+        # math, not on whichever tested-row winner happened to survive the BETR
+        # diagnostics. Otherwise the governor can drift back toward timid bracket
+        # fill even when a hard Traditional IRA target is enabled.
+        bracket_floor = float(bracket_runway)
+        override_floor = float(min(cap, max(bracket_floor, desired_required_conversion))) if override_enabled else 0.0
 
-        # Policy intent:
-        # 1) use full target-bracket runway first
-        # 2) if still behind and override is allowed, climb above the bracket runway
-        #    but never above the highest tested conversion that stayed inside the
-        #    planner override cap.
-        hard_target_floor = float(bracket_candidate)
+        hard_target_floor = float(bracket_floor)
         if hard_target_floor > 1e-9:
             selection_mode = "HARD_TARGET_BRACKET_FILL"
 
-        if override_enabled:
-            # When target-Trad mode is active, the planner override lane is meant to
-            # be authoritative above the bracket runway. The required conversion pace
-            # must therefore remain eligible even if the BETR-style tested-row filters
-            # fail to produce a large "highest override" candidate.
-            override_floor = min(float(desired_required_conversion), float(max_test))
-            if override_candidate > 1e-9:
-                override_floor = min(float(desired_required_conversion), max(float(override_candidate), float(override_floor)))
-            if float(override_floor) > float(hard_target_floor) + 1e-9:
-                hard_target_floor = float(override_floor)
-                selection_mode = "HARD_TARGET_OVERRIDE"
+        if override_enabled and float(override_floor) > float(hard_target_floor) + 1e-9:
+            hard_target_floor = float(override_floor)
+            selection_mode = "HARD_TARGET_OVERRIDE"
 
         if hard_target_floor <= 1e-9 and desired_required_conversion > 1e-9:
-            hard_target_floor = min(float(desired_required_conversion), float(bracket_candidate)) if bracket_candidate > 1e-9 else 0.0
+            hard_target_floor = float(min(cap, desired_required_conversion))
             if hard_target_floor > 1e-9:
                 selection_mode = "TRAD_TARGET_PRESSURE"
 
