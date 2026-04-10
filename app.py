@@ -4620,7 +4620,7 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         # Cash inflows / income sources
         "Earned Income", "Owner SS", "Spouse SS", "Total SS",
-        "Annual Spending Need", "Owner Age", "Spouse Age", "Household Reference Age", "RMD Income Component", "Spending Funded From Cash", "Spending Funded From Brokerage", "Spending Trad Withdrawal Component", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
+        "Annual Spending Need", "Household Reference Age", "RMD Income Component", "Spending Funded From Cash", "Spending Funded From Brokerage", "Spending Trad Withdrawal Component", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
 
         # Aggregated income
         "Other Ordinary Income", "Taxable SS", "AGI", "MAGI",
@@ -4924,8 +4924,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Filing Status": filing_status,
         "Owner Alive": bool(phase["owner_alive"]),
         "Spouse Alive": bool(phase["spouse_alive"]),
-        "Owner Longevity Age": int(params.get("owner_planning_age", 0)),
-        "Spouse Longevity Age": int(params.get("spouse_planning_age", 0)),
+        "Owner Planning Age": int(params.get("owner_planning_age", 0)),
+        "Spouse Planning Age": int(params.get("spouse_planning_age", 0)),
         "First Death Year": int(phase["first_death_year"]),
         "Second Death Year": int(phase["second_death_year"]),
         "SOY Trad": soy_trad,
@@ -4947,8 +4947,6 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Spending Brokerage Basis Used": float(max(0.0, spend_result["from_brokerage"] - spending_realized_ltcg)),
         "Spending Funded From Roth": float(spend_result["from_roth"]),
         "Annual Spending Need": annual_spending,
-        "Owner Age": get_current_owner_age(year, params),
-        "Spouse Age": get_current_spouse_age(year, params),
         "Household Reference Age": get_household_reference_age(year, params),
         "Other Ordinary Income": other_ordinary_income,
         "Brokerage Realized LTCG": realized_ltcg,
@@ -7277,46 +7275,6 @@ def render_annual_conversion_calculator_results(result: dict):
 # -----------------------------
 # DISPLAY
 # -----------------------------
-def build_age_snapshot_df(result: dict, milestone_ages: list[int] | None = None) -> pd.DataFrame:
-    df = result.get("df") if isinstance(result, dict) else None
-    if df is None or df.empty:
-        return pd.DataFrame()
-    milestone_ages = milestone_ages or [65, 70, 75, 80, 85, 90, 95]
-    snapshot_rows = []
-    seen_years = set()
-    for age in milestone_ages:
-        candidates = df.loc[(df.get("Owner Age") == age) | (df.get("Spouse Age") == age)].copy()
-        if candidates.empty:
-            continue
-        candidates["_distance"] = (candidates.get("Owner Age", 9999).sub(age).abs().fillna(9999) + candidates.get("Spouse Age", 9999).sub(age).abs().fillna(9999))
-        candidates = candidates.sort_values(["_distance", "Year"])
-        row = candidates.iloc[0]
-        year = int(row.get("Year", 0))
-        if year in seen_years:
-            continue
-        seen_years.add(year)
-        total_ss = float(row.get("Total SS", 0.0))
-        spending_need = float(row.get("Annual Spending Need", 0.0))
-        snapshot_rows.append({
-            "Snapshot Age": int(age),
-            "Year": year,
-            "Life Phase": row.get("Life Phase", ""),
-            "Owner Age": int(row.get("Owner Age", 0)),
-            "Spouse Age": int(row.get("Spouse Age", 0)),
-            "Total Net Worth": float(row.get("Net Worth", 0.0)),
-            "Traditional IRA": float(row.get("EOY Trad", 0.0)),
-            "Roth": float(row.get("EOY Roth", 0.0)),
-            "Brokerage": float(row.get("EOY Brokerage", 0.0)),
-            "Cash": float(row.get("EOY Cash", 0.0)),
-            "Total SS": total_ss,
-            "Annual Spending Need": spending_need,
-            "Federal Tax": float(row.get("Federal Tax", 0.0)),
-            "State Tax": float(row.get("State Tax", 0.0)),
-            "MAGI": float(row.get("MAGI", 0.0)),
-        })
-    return pd.DataFrame(snapshot_rows)
-
-
 def render_summary(title: str, result: dict):
     owner_claim_age = result.get("owner_claim_age")
     spouse_claim_age = result.get("spouse_claim_age")
@@ -7329,9 +7287,9 @@ def render_summary(title: str, result: dict):
     st.write(f"Owner SS Start Year: {result['owner_ss_start']}{owner_year_suffix}")
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}{spouse_year_suffix}")
     if result.get("owner_planning_age") is not None:
-        st.write(f"Owner Longevity Age: {int(result['owner_planning_age'])}")
+        st.write(f"Owner Planning Age: {int(result['owner_planning_age'])}")
     if result.get("spouse_planning_age") is not None:
-        st.write(f"Spouse Longevity Age: {int(result['spouse_planning_age'])}")
+        st.write(f"Spouse Planning Age: {int(result['spouse_planning_age'])}")
     if result.get("first_death_year") is not None:
         st.write(f"First Death Year Assumed: {int(result['first_death_year'])}")
     if result.get("final_projection_year") is not None:
@@ -7391,16 +7349,6 @@ def render_summary(title: str, result: dict):
     st.write(f"ACA Hit Years: {result['aca_hit_years']}")
     st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
     st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
-    age_snapshot_df = build_age_snapshot_df(result)
-    if not age_snapshot_df.empty:
-        st.subheader("Age Snapshot Projection")
-        st.caption("Projection snapshots at milestone ages using the nearest modeled year where either spouse is at the requested age.")
-        snapshot_fmt = {}
-        for col in age_snapshot_df.columns:
-            if col in {"Snapshot Age", "Year", "Life Phase", "Owner Age", "Spouse Age"}:
-                continue
-            snapshot_fmt[col] = "${:,.0f}"
-        st.dataframe(age_snapshot_df.style.format(snapshot_fmt), use_container_width=True)
     validation = result.get("validation")
     if validation is not None:
         if validation["passed"]:
@@ -8121,8 +8069,8 @@ def render_shared_household_inputs() -> dict:
 
         owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
         spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
-        owner_planning_age = st.number_input("Owner Longevity Age", min_value=max(int(owner_current_age), 1), value=int(st.session_state.get("owner_planning_age", DEFAULT_APP_STATE["owner_planning_age"])), step=1, key="owner_planning_age")
-        spouse_planning_age = st.number_input("Spouse Longevity Age", min_value=max(int(spouse_current_age), 1), value=int(st.session_state.get("spouse_planning_age", DEFAULT_APP_STATE["spouse_planning_age"])), step=1, key="spouse_planning_age")
+        owner_planning_age = st.number_input("Owner Planning Age", min_value=max(int(owner_current_age), 1), value=int(st.session_state.get("owner_planning_age", DEFAULT_APP_STATE["owner_planning_age"])), step=1, key="owner_planning_age")
+        spouse_planning_age = st.number_input("Spouse Planning Age", min_value=max(int(spouse_current_age), 1), value=int(st.session_state.get("spouse_planning_age", DEFAULT_APP_STATE["spouse_planning_age"])), step=1, key="spouse_planning_age")
         survivor_spending_percent = st.number_input(
             "Survivor Spending (% of joint spending)",
             min_value=0.0,
