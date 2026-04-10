@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v271"
+APP_VERSION = "v272"
 APP_STATE_VERSION = "v106"
 
 
@@ -967,17 +967,23 @@ def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_na
 def build_ss_scan_inputs(inputs: dict, mode: str | None = None) -> tuple[dict, str]:
     """
     Build the input package used by SS ranking scans.
-    In BETR-only mode, SS scans must not allow planner BEG controls to become
-    authoritative. Those controls remain available for standalone BEG exploration
-    after a strategy is selected.
+
+    Unification rule:
+    - Full BEG scan rows must use the same effective Governor input package and
+      execution semantics as the standalone Break-Even Governor.
+    - BETR-only remains the one intentional exception for SS scan ranking mode.
     """
     selected_mode = str(mode or inputs.get("ss_scan_beg_mode", st.session_state.get("ss_scan_beg_mode", "BETR-only")) or "BETR-only")
     adjusted = copy.deepcopy(inputs)
     adjusted["ss_scan_beg_mode"] = selected_mode
-    adjusted["ss_scan_execution"] = True
     if selected_mode == "BETR-only":
+        adjusted["ss_scan_execution"] = True
         adjusted["target_trad_balance_enabled"] = False
         adjusted["target_trad_override_enabled"] = False
+    else:
+        # Full BEG scan mode must behave like the standalone Governor, not like a
+        # special scan-only execution path.
+        adjusted["ss_scan_execution"] = False
     return adjusted, selected_mode
 
 
@@ -3610,10 +3616,15 @@ def make_consistency_payload(first: dict, second: dict, tol: float = 0.01) -> di
 
 def run_governor_with_validation(inputs: dict, max_conversion: float, step_size: float, integrity_mode: bool = False, tol: float = 0.01) -> dict:
     step_size = sanitize_governor_step_size(step_size)
-    result = run_model_break_even_governor(inputs, max_conversion, step_size)
+    governor_inputs = copy.deepcopy(inputs)
+    # Standalone Governor is the canonical Full BEG execution path.
+    governor_inputs["ss_scan_execution"] = False
+    if str(governor_inputs.get("ss_scan_beg_mode", "") or "") == "":
+        governor_inputs["ss_scan_beg_mode"] = "Full BEG"
+    result = run_model_break_even_governor(governor_inputs, max_conversion, step_size)
 
     if integrity_mode:
-        rerun = run_model_break_even_governor(copy.deepcopy(inputs), max_conversion, step_size)
+        rerun = run_model_break_even_governor(copy.deepcopy(governor_inputs), max_conversion, step_size)
         validation = make_consistency_payload(result, rerun, tol=tol)
         result["validation"] = validation
         result["validation_rerun_summary"] = {k: rerun.get(k) for k in CONSISTENCY_KEYS}
@@ -8179,7 +8190,7 @@ def render_conversion_page() -> None:
         if ss_scan_beg_mode == "BETR-only":
             st.caption("BETR-only mode is active for SS scans: target Traditional IRA and override settings below will not drive Quick or Full rankings.")
         else:
-            st.caption("Full BEG mode is active for SS scans: live target Traditional IRA and override settings can affect Quick and Full rankings.")
+            st.caption("Full BEG mode is active for SS scans: Quick and Full now use the same effective Governor execution semantics as the standalone Break-Even Governor.")
 
         st.caption("Optional preference modifiers let you tilt any base profile without changing the underlying profile definitions.")
         with st.form("ss_optimizer_modifier_form", clear_on_submit=False, border=False):
