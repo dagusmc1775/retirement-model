@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v260"
+APP_VERSION = "v261"
 APP_STATE_VERSION = "v106"
 
 
@@ -1162,7 +1162,7 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "ending_brokerage_balance": float(ending_brokerage),
         "ending_cash_balance": float(ending_cash),
         "stability_value": float(stability_value),
-        "risk_value": 0.0,
+        "risk_value": float(liquidity_risk_raw),
         "trad_at_rmd_start": float(trad_at_rmd_start),
         "irmaa_hit_years": int(irmaa_hit_years),
         "magi_excess_over_cliff": float(magi_excess_over_cliff),
@@ -7920,10 +7920,9 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
     if not isinstance(summary_df, pd.DataFrame):
         summary_df = pd.DataFrame(summary_df)
     summary_df = canonicalize_optimizer_result_df(summary_df.copy(), f"{heading.lower()} primary table")
-    visible_df = summary_df.drop(columns=[c for c in summary_df.columns if str(c).endswith(" Raw")], errors="ignore")
     st.subheader(heading)
     st.dataframe(
-        visible_df.style.format({
+        summary_df.style.format({
             "Selected Score": "{:.2f}",
             "Score": "{:.2f}",
             "Final Net Worth": "${:,.0f}",
@@ -7979,7 +7978,7 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
     )
     st.download_button(
         download_label,
-        data=visible_df.to_csv(index=False),
+        data=summary_df.to_csv(index=False),
         file_name=download_filename,
         mime="text/csv",
         use_container_width=True,
