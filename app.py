@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v262"
+APP_VERSION = "v264"
 APP_STATE_VERSION = "v106"
 
 
@@ -4328,6 +4328,21 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
         + df["ACA Cost"].sum()
         + df["IRMAA Cost"].sum()
     )
+    household_rmd_start = int(params["household_rmd_start"])
+    trad_balance_at_rmd_start = float(df.iloc[-1]["EOY Trad"])
+    if "Year" in df.columns:
+        pre_rmd_rows = df.loc[df["Year"] == household_rmd_start - 1, "EOY Trad"] if "EOY Trad" in df.columns else pd.Series(dtype=float)
+        if not pre_rmd_rows.empty:
+            trad_balance_at_rmd_start = float(pre_rmd_rows.iloc[0])
+        elif "SOY Trad" in df.columns:
+            first_rmd_rows = df.loc[df["Year"] == household_rmd_start, "SOY Trad"]
+            if not first_rmd_rows.empty:
+                trad_balance_at_rmd_start = float(first_rmd_rows.iloc[0])
+    total_lifetime_rmds = 0.0
+    if "RMD Income Component" in df.columns:
+        total_lifetime_rmds = float(df["RMD Income Component"].fillna(0.0).sum())
+    elif "RMD Income" in df.columns:
+        total_lifetime_rmds = float(df["RMD Income"].fillna(0.0).sum())
     return {
         "df": df,
         "final_net_worth": float(df.iloc[-1]["Net Worth"]),
@@ -4343,11 +4358,13 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
         "first_irmaa_year": int(df.loc[df["IRMAA Cost"] > 0, "Year"].iloc[0]) if (df["IRMAA Cost"] > 0).any() else None,
         "owner_ss_start": int(params["owner_ss_start"]),
         "spouse_ss_start": int(params["spouse_ss_start"]),
-        "household_rmd_start": int(params["household_rmd_start"]),
+        "household_rmd_start": household_rmd_start,
         "owner_claim_age": int(params["owner_ss_start"] - START_YEAR + int(params["owner_current_age"])),
         "spouse_claim_age": int(params["spouse_ss_start"] - START_YEAR + int(params["spouse_current_age"])),
         "total_conversions": float(df["Chosen Conversion"].sum()),
         "ending_trad_balance": float(df.iloc[-1]["EOY Trad"]),
+        "trad_balance_at_rmd_start": trad_balance_at_rmd_start,
+        "total_lifetime_rmds": total_lifetime_rmds,
     }
 
 
@@ -6979,13 +6996,35 @@ def render_summary(title: str, result: dict):
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}{spouse_year_suffix}")
     st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
     st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
-    st.write(f"Ending Traditional IRA Balance at RMD Start Age: ${result['ending_trad_balance']:,.0f}")
+    trad_balance_at_rmd_start = result.get("trad_balance_at_rmd_start")
+    if trad_balance_at_rmd_start is None:
+        trad_balance_at_rmd_start = result.get("ending_trad_balance", 0.0)
+        try:
+            df_for_trad = result.get("df")
+            household_rmd_start = int(result.get("household_rmd_start", 0))
+            if df_for_trad is not None and not df_for_trad.empty and household_rmd_start:
+                if "Year" in df_for_trad.columns and "EOY Trad" in df_for_trad.columns:
+                    pre_rmd_rows = df_for_trad.loc[df_for_trad["Year"] == household_rmd_start - 1, "EOY Trad"]
+                    if not pre_rmd_rows.empty:
+                        trad_balance_at_rmd_start = float(pre_rmd_rows.iloc[0])
+                    elif "SOY Trad" in df_for_trad.columns:
+                        first_rmd_rows = df_for_trad.loc[df_for_trad["Year"] == household_rmd_start, "SOY Trad"]
+                        if not first_rmd_rows.empty:
+                            trad_balance_at_rmd_start = float(first_rmd_rows.iloc[0])
+        except Exception:
+            trad_balance_at_rmd_start = result.get("ending_trad_balance", 0.0)
+    st.write(f"Ending Traditional IRA Balance at RMD Start Age: ${float(trad_balance_at_rmd_start):,.0f}")
     total_lifetime_rmds = result.get("total_lifetime_rmds")
     if total_lifetime_rmds is None:
         try:
             df_for_rmd = result.get("df")
-            if df_for_rmd is not None and not df_for_rmd.empty and "RMD Income" in df_for_rmd.columns:
-                total_lifetime_rmds = float(df_for_rmd["RMD Income"].fillna(0.0).sum())
+            if df_for_rmd is not None and not df_for_rmd.empty:
+                if "RMD Income Component" in df_for_rmd.columns:
+                    total_lifetime_rmds = float(df_for_rmd["RMD Income Component"].fillna(0.0).sum())
+                elif "RMD Income" in df_for_rmd.columns:
+                    total_lifetime_rmds = float(df_for_rmd["RMD Income"].fillna(0.0).sum())
+                else:
+                    total_lifetime_rmds = 0.0
             else:
                 total_lifetime_rmds = 0.0
         except Exception:
