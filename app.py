@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v261"
+APP_VERSION = "v262"
 APP_STATE_VERSION = "v106"
 
 
@@ -876,13 +876,14 @@ def build_stateless_quick_recommendation_inputs(current_inputs: dict, profile_na
 def build_ss_scan_inputs(inputs: dict, mode: str | None = None) -> tuple[dict, str]:
     """
     Build the input package used by SS ranking scans.
-    In BETR-only mode, SS scans must not allow target-Trad or override lanes
-    to become authoritative. Those controls remain available for standalone BEG
-    exploration after a strategy is selected.
+    In BETR-only mode, SS scans must not allow planner BEG controls to become
+    authoritative. Those controls remain available for standalone BEG exploration
+    after a strategy is selected.
     """
     selected_mode = str(mode or inputs.get("ss_scan_beg_mode", st.session_state.get("ss_scan_beg_mode", "BETR-only")) or "BETR-only")
     adjusted = copy.deepcopy(inputs)
     adjusted["ss_scan_beg_mode"] = selected_mode
+    adjusted["ss_scan_execution"] = True
     if selected_mode == "BETR-only":
         adjusted["target_trad_balance_enabled"] = False
         adjusted["target_trad_override_enabled"] = False
@@ -4368,6 +4369,7 @@ def build_common_params(inputs: dict) -> dict:
         "cash_sweep_threshold": float(inputs.get("cash_sweep_threshold", 50000.0)),
         "state_tax_rate": float(inputs.get("state_tax_rate", 0.0399)),
         "ss_scan_beg_mode": str(inputs.get("ss_scan_beg_mode", "BETR-only")),
+        "ss_scan_execution": bool(inputs.get("ss_scan_execution", False)),
         "target_trad_balance_enabled": bool(inputs.get("target_trad_balance_enabled", False)),
         "target_trad_balance": float(inputs.get("target_trad_balance", 300000.0)),
         "target_trad_override_enabled": bool(inputs.get("target_trad_override_enabled", False)),
@@ -4984,6 +4986,15 @@ def run_model_fixed(inputs: dict) -> dict:
 # -----------------------------
 def get_year_conversion_cap(state: dict, params: dict, max_conversion: float) -> float:
     trad_after_growth = max(0.0, float(state["trad"]) * (1.0 + float(params["growth"])))
+    ss_scan_mode = str(params.get("ss_scan_beg_mode", "") or "")
+    ss_scan_execution = bool(params.get("ss_scan_execution", False))
+
+    # In BETR-only SS ranking mode, planner BEG caps must not shape the candidate
+    # set. Let marginal economics and real tax guardrails determine how much can be
+    # converted, bounded only by available Traditional IRA balance.
+    if ss_scan_execution and ss_scan_mode == "BETR-only":
+        return float(trad_after_growth)
+
     return max(0.0, min(float(max_conversion), trad_after_growth))
 
 def estimate_target_trad_pressure_conversion(year: int, state: dict, params: dict, step_size: float, cap: float, projected_trad_at_rmd_start: float | None = None) -> float:
@@ -5482,6 +5493,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     target_gap_at_rmd_start = max(0.0, projected_trad_at_rmd_start - float(params.get("target_trad_balance", 0.0)))
     target_lane_active = bool(
         params.get("target_trad_balance_enabled", False)
+        and not (bool(params.get("ss_scan_execution", False)) and str(params.get("ss_scan_beg_mode", "BETR-only") or "BETR-only") == "BETR-only")
         and year < int(params.get("household_rmd_start", year))
         and target_pressure_conversion > 0.0
     )
