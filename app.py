@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v269"
+APP_VERSION = "v270"
 APP_STATE_VERSION = "v106"
 
 
@@ -5519,10 +5519,15 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             delta_total_tax = 0.0
             current_effective = 0.0
             whole_effective_rate = 0.0
+            override_cap_test_rate = 0.0
         else:
             delta_total_tax = float(test_total_tax - baseline_total_tax)
             current_effective = sanitize_effective_rate(delta_total_tax / float(current_conversion), float(row.get("Current Marginal Tax Rate", 0.0)))
             whole_effective_rate = max(0.0, delta_total_tax / float(current_conversion))
+            # Planner override is labeled as an all-in rate in the UI, so the cap must
+            # be evaluated against the whole-conversion effective cost rate rather than
+            # the incremental marginal proxy used by BETR stopping logic.
+            override_cap_test_rate = float(0.0 if abs(whole_effective_rate) > 1.0 else whole_effective_rate)
         if prev is not None and current_conversion > prev["conversion"] + 1e-9:
             delta_conv = float(current_conversion - prev["conversion"])
             current_fed_delta = float(row["Federal Tax"]) - float(prev["row"]["Federal Tax"])
@@ -5601,6 +5606,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Test Total Tax": float(test_total_tax),
             "Delta Total Tax": float(delta_total_tax),
             "Whole Conversion Effective Cost Rate": float(0.0 if abs(whole_effective_rate) > 1.0 else whole_effective_rate),
+            "Override Cap Test Rate": float(override_cap_test_rate),
             "Future Avoided Federal Tax": float(future_avoided_fed),
             "Future Avoided State Tax": float(future_avoided_state),
             "Future Avoided ACA Cost": float(future_avoided_aca),
@@ -5619,7 +5625,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 (not roth_tax_used)
                 and float(current_conversion) > 0.0
                 and bool(params.get("target_trad_override_enabled", False))
-                and float(effective_current_adjusted) <= float(params.get("target_trad_override_max_rate", 0.22)) + 1e-12
+                and float(override_cap_test_rate) <= float(params.get("target_trad_override_max_rate", 0.22)) + 1e-12
             ),
             "Post-RMD Policy Active": bool(year >= int(params["household_rmd_start"])),
             "Target Lane Active": bool(target_lane_active),
@@ -5875,6 +5881,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
                     "Test Total Tax",
                     "Delta Total Tax",
                     "Whole Conversion Effective Cost Rate",
+                    "Override Cap Test Rate",
                     "Target Trad Pressure Conversion",
                     "Target Trad Highest Bracket Fill Conversion",
                     "Target Trad Highest Override Conversion",
@@ -8518,7 +8525,7 @@ def render_conversion_page() -> None:
             target_trad_override_enabled = st.checkbox(
                 "Allow Target Traditional IRA Planner Override",
                 value=bool(st.session_state.get("target_trad_override_enabled", DEFAULT_APP_STATE["target_trad_override_enabled"])),
-                help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as current adjusted cost stays under the planner cap.",
+                help="When enabled, pre-RMD non-ACA years may exceed pure BETR stopping as long as the whole-conversion all-in cost rate stays under the planner cap.",
                 key="target_trad_override_enabled",
             )
         with ov2:
