@@ -5583,6 +5583,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
 
     bracket_runway = min(cap, floor_to_step(target_headroom, step_size))
     override_enabled = bool(params.get("target_trad_override_enabled", False))
+    try:
+        target_rate_cap = float(str(target_label).replace("%", "").strip()) / 100.0
+    except Exception:
+        target_rate_cap = 1.0
     # Critical: planner override years must be allowed to search above the target
     # bracket runway. Otherwise the override lane can never actually rescue the
     # target-Trad objective, no matter how high the override cap is set.
@@ -5691,8 +5695,14 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             net_benefit_rate = future_effective_blended - effective_current_adjusted
         # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
         post_rmd_hurdle = 0.05 if year >= int(params["household_rmd_start"]) else 0.0
+        respects_bracket_cap = bool(
+            override_enabled
+            or current_conversion <= 1e-9
+            or float(current_rate) <= float(target_rate_cap) + 1e-12
+        )
         within_limit = bool(
             within_target
+            and respects_bracket_cap
             and (not roth_tax_used)
             and (
                 current_conversion == 0
@@ -5714,6 +5724,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             "Ordinary Income Headroom Before Conversion": float(max(0.0, target_top - baseline_ordinary_taxable)),
             "Ordinary Income Remaining To Target": float(target_top - ordinary_taxable),
             "Within Target Bracket": within_target,
+            "Respects Bracket Cap": bool(respects_bracket_cap),
+            "Target Bracket Rate Cap": float(target_rate_cap),
             "Post-RMD Hurdle": float(post_rmd_hurdle),
             "Current Marginal Incremental Cost Rate": float(current_effective),
             "Projected Future Avoided Rate": float(future_effective_blended),
@@ -5768,7 +5780,7 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
         #   even if pure BETR already says stop
         base_override_eligible = bool((not roth_tax_used))
 
-        if base_override_eligible and within_target:
+        if base_override_eligible and within_target and float(current_rate) <= float(target_rate_cap) + 1e-12:
             if float(current_conversion) >= float(highest_bracket_fill_conversion) - 1e-12:
                 highest_bracket_fill_conversion = float(current_conversion)
                 highest_bracket_fill_row = row
