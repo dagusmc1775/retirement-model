@@ -8124,6 +8124,18 @@ def render_shared_scan_primary_table(result: dict, heading: str, download_label:
     )
 
 
+def build_live_governor_run_inputs(base_inputs: dict | None = None, force_full_beg: bool = False) -> dict:
+    """Resolve the current live household + Governor controls directly from session state.
+    Use this right before running BEG or SS scans so visible controls are authoritative.
+    """
+    resolved = copy.deepcopy(base_inputs) if isinstance(base_inputs, dict) else {}
+    resolved.update(get_shared_household_inputs_from_state())
+    if force_full_beg:
+        resolved["ss_scan_beg_mode"] = "Full BEG"
+        resolved["ss_scan_execution"] = False
+    return resolved
+
+
 def render_conversion_page() -> None:
     ensure_default_state()
     st.subheader("Retirement Optimizer")
@@ -8263,13 +8275,14 @@ def render_conversion_page() -> None:
             if st.button("Run Quick Scan", use_container_width=True):
                 st.session_state["ss_optimizer_expanded"] = True
                 with st.spinner("Running SS Optimizer quick scan..."):
+                    live_scan_inputs = build_live_governor_run_inputs(inputs)
                     recommendation_result = run_quick_strategy_recommendation(
-                        inputs=inputs,
+                        inputs=live_scan_inputs,
                         max_conversion=max_conversion,
                         step_size=step_size,
                         profile_name=planning_profile,
                     )
-                quick_scan_inputs, _ = build_ss_scan_inputs(inputs)
+                quick_scan_inputs, _ = build_ss_scan_inputs(live_scan_inputs)
                 quick_hash_inputs = {
                     **copy.deepcopy(quick_scan_inputs),
                     "max_conversion": QUICK_RECOMMENDATION_MAX_CONVERSION,
@@ -8284,8 +8297,9 @@ def render_conversion_page() -> None:
             if st.button("Run Full 81-Combination Scan", use_container_width=True):
                 st.session_state["ss_optimizer_expanded"] = True
                 clear_ss_optimizer_state(clear_last_result=True)
+                live_scan_inputs = build_live_governor_run_inputs(inputs)
                 optimizer_result = run_ss_optimizer(
-                    inputs=inputs,
+                    inputs=live_scan_inputs,
                     max_conversion=max_conversion,
                     step_size=step_size,
                     trad_balance_penalty_lambda=trad_balance_penalty_lambda,
@@ -8297,7 +8311,7 @@ def render_conversion_page() -> None:
                 )
                 optimizer_result["scoring_preferences_snapshot"] = copy.deepcopy(extract_scoring_preferences(st.session_state))
                 optimizer_result["planning_profile_snapshot"] = planning_profile
-                optimizer_scan_inputs, _ = build_ss_scan_inputs(inputs)
+                optimizer_scan_inputs, _ = build_ss_scan_inputs(live_scan_inputs)
                 optimizer_hash_inputs = {**copy.deepcopy(optimizer_scan_inputs), "max_conversion": max_conversion, "step_size": step_size, "trad_balance_penalty_lambda": trad_balance_penalty_lambda, "optimizer_is_profile_neutral": True}
                 st.session_state["ss_optimizer_last_result"] = tag_result_payload(optimizer_result, engine="ss_optimizer", inputs=optimizer_hash_inputs)
                 if optimizer_result.get("completed", False):
@@ -8717,18 +8731,22 @@ def render_conversion_page() -> None:
             st.subheader("Run Break-Even Governor")
             st.caption("Use any 'Apply ... to Governor' button above to load Social Security claim ages here, then run the Governor.")
             if st.button("Run Break-Even Governor"):
+                live_governor_inputs = build_live_governor_run_inputs(inputs, force_full_beg=True)
                 result = run_governor_with_validation(
-                    inputs=inputs,
+                    inputs=live_governor_inputs,
                     max_conversion=max_conversion,
                     step_size=step_size,
                     integrity_mode=integrity_mode,
                     tol=validation_tolerance,
                 )
-                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs={**inputs, "max_conversion": max_conversion, "step_size": step_size})
-                mark_result_state("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size})
+                stored_break_even_inputs = {**live_governor_inputs, "max_conversion": max_conversion, "step_size": step_size}
+                st.session_state["break_even_last_result"] = tag_result_payload(result, engine="break_even_governor", inputs=stored_break_even_inputs)
+                mark_result_state("break_even", stored_break_even_inputs)
             result = get_current_result_payload("break_even_last_result")
             if result is not None:
-                render_stale_warning("break_even", {**inputs, "max_conversion": max_conversion, "step_size": step_size}, "Break-even governor results")
+                live_governor_inputs = build_live_governor_run_inputs(inputs, force_full_beg=True)
+                stored_break_even_inputs = {**live_governor_inputs, "max_conversion": max_conversion, "step_size": step_size}
+                render_stale_warning("break_even", stored_break_even_inputs, "Break-even governor results")
                 render_summary("Break-Even Governor Summary", result)
                 beg_export_name = f"beg__{sanitize_export_filename(get_loaded_scenario_name(), 'unsaved-session')}__{active_strategy.replace('/', '-')}__v124.json"
                 st.download_button(
@@ -8797,7 +8815,7 @@ def render_conversion_page() -> None:
                 )
 
                 selected_diag_df = build_beg_selected_diagnostics_df(result)
-                effective_beg_settings_df = build_effective_beg_settings_df(inputs, max_conversion, step_size)
+                effective_beg_settings_df = build_effective_beg_settings_df(live_governor_inputs, max_conversion, step_size)
                 if (selected_diag_df is not None and not selected_diag_df.empty) or not effective_beg_settings_df.empty:
                     st.subheader("BEG Diagnostics")
                     with st.expander("Chosen-path BEG diagnostics", expanded=False):
