@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v272"
+APP_VERSION = "v273"
 APP_STATE_VERSION = "v106"
 
 
@@ -7147,7 +7147,15 @@ def render_summary(title: str, result: dict):
                             trad_balance_at_rmd_start = float(first_rmd_rows.iloc[0])
         except Exception:
             trad_balance_at_rmd_start = result.get("ending_trad_balance", 0.0)
-    st.write(f"Ending Traditional IRA Balance at RMD Start Age: ${float(trad_balance_at_rmd_start):,.0f}")
+    st.write(f"Traditional IRA Balance at Household RMD Start Age: ${float(trad_balance_at_rmd_start):,.0f}")
+    final_ending_trad_balance = float(result.get("ending_trad_balance", 0.0))
+    try:
+        df_for_final_trad = result.get("df")
+        if df_for_final_trad is not None and not df_for_final_trad.empty and "EOY Trad" in df_for_final_trad.columns:
+            final_ending_trad_balance = float(df_for_final_trad["EOY Trad"].iloc[-1])
+    except Exception:
+        final_ending_trad_balance = float(result.get("ending_trad_balance", 0.0))
+    st.write(f"Final Ending Traditional IRA Balance: ${final_ending_trad_balance:,.0f}")
     total_lifetime_rmds = result.get("total_lifetime_rmds")
     if total_lifetime_rmds is None:
         try:
