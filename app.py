@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v270"
+APP_VERSION = "v271"
 APP_STATE_VERSION = "v106"
 
 
@@ -405,6 +405,97 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
     }
     out = out.rename(columns=rename_map)
     return out
+
+
+def build_beg_selected_diagnostics_df(result: dict) -> pd.DataFrame:
+    """
+    Compact per-year diagnostics for the chosen BEG path.
+    This is intended to remain useful long-term behind an expander.
+    """
+    if result is None:
+        return pd.DataFrame()
+    df = result.get("df")
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    preferred_cols = [
+        "Year",
+        "Chosen Conversion",
+        "Target Lane Active",
+        "Selection Mode Detail",
+        "Target Path Status",
+        "Required Annual Conversion To Target",
+        "Target Trad Pressure Conversion",
+        "Target Trad Highest Bracket Fill Conversion",
+        "Target Trad Highest Override Conversion",
+        "Projected Trad At RMD Start (No Extra Conv)",
+        "Target Trad Gap At RMD Start",
+        "Within Planner Override Cap",
+        "Override Cap Test Rate",
+        "Whole Conversion Effective Cost Rate",
+        "Effective Current Rate (Adjusted)",
+        "Projected Future Avoided Rate",
+        "Net Benefit Rate",
+        "Target Ordinary Taxable Income",
+        "Ordinary Income Headroom Before Conversion",
+        "Selected Ordinary Taxable Income",
+        "Ordinary Taxable Income",
+        "MAGI",
+        "ACA Cost",
+        "IRMAA Cost",
+        "EOY Trad",
+    ]
+    cols = [c for c in preferred_cols if c in df.columns]
+    if not cols:
+        return pd.DataFrame()
+    out = df[cols].copy()
+    rename_map = {
+        "Chosen Conversion": "Chosen Conversion ($)",
+        "Required Annual Conversion To Target": "Required To Target ($)",
+        "Target Trad Pressure Conversion": "Pressure Conversion ($)",
+        "Target Trad Highest Bracket Fill Conversion": "Best Bracket Fill ($)",
+        "Target Trad Highest Override Conversion": "Best Override ($)",
+        "Projected Trad At RMD Start (No Extra Conv)": "Projected Trad @ RMD Start ($)",
+        "Target Trad Gap At RMD Start": "Trad Gap @ RMD Start ($)",
+        "Target Ordinary Taxable Income": "Target Ordinary Income ($)",
+        "Ordinary Income Headroom Before Conversion": "Ordinary Headroom ($)",
+        "Selected Ordinary Taxable Income": "Selected Ordinary Income ($)",
+        "Ordinary Taxable Income": "Actual Ordinary Income ($)",
+        "EOY Trad": "Ending Trad ($)",
+    }
+    return out.rename(columns=rename_map)
+
+
+def build_beg_decision_focus_df(decision_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Focused candidate-level diagnostics to make the BEG decision table readable.
+    """
+    if decision_df is None or not isinstance(decision_df, pd.DataFrame) or decision_df.empty:
+        return pd.DataFrame()
+    preferred_cols = [
+        "Year",
+        "Decision Mode",
+        "Test Conversion",
+        "Selected Conversion After Test",
+        "Target Lane Active",
+        "Selection Mode Detail",
+        "Target Path Status",
+        "Required Annual Conversion To Target",
+        "Target Trad Highest Bracket Fill Conversion",
+        "Target Trad Highest Override Conversion",
+        "Within Target Bracket",
+        "Within Full Guardrails",
+        "Within Planner Override Cap",
+        "Override Cap Test Rate",
+        "Whole Conversion Effective Cost Rate",
+        "Effective Current Rate (Adjusted)",
+        "Projected Future Avoided Rate",
+        "Net Benefit Rate",
+        "BETR Stop Trigger Hit",
+        "Roth Used For Tax Payment",
+    ]
+    cols = [c for c in preferred_cols if c in decision_df.columns]
+    return decision_df[cols].copy()
 
 
 def build_funding_debug_view_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -8682,7 +8773,49 @@ def render_conversion_page() -> None:
                     mime="text/csv",
                     use_container_width=True,
                 )
+
+                selected_diag_df = build_beg_selected_diagnostics_df(result)
+                if selected_diag_df is not None and not selected_diag_df.empty:
+                    st.subheader("BEG Diagnostics")
+                    st.caption("Keep this panel long-term behind an expander. It is compact enough for normal use and should make future BEG troubleshooting much faster.")
+                    with st.expander("Chosen-path BEG diagnostics", expanded=True):
+                        diag_fmt = {}
+                        bool_cols = {
+                            "Target Lane Active",
+                            "Within Planner Override Cap",
+                        }
+                        for col in selected_diag_df.columns:
+                            series = selected_diag_df[col]
+                            if col in bool_cols:
+                                continue
+                            if not pd.api.types.is_numeric_dtype(series):
+                                continue
+                            if "Rate" in col:
+                                diag_fmt[col] = "{:.2%}"
+                            elif col == "Net Benefit Rate":
+                                diag_fmt[col] = "{:.2%}"
+                            else:
+                                diag_fmt[col] = "${:,.0f}" if col != "Year" else "{:.0f}"
+                        if "Year" in diag_fmt:
+                            diag_fmt["Year"] = "{:.0f}"
+                        st.dataframe(selected_diag_df.style.format(diag_fmt), use_container_width=True)
+
+                focused_decision_df = build_beg_decision_focus_df(result.get("decision_df"))
                 st.subheader("Year-by-Year Decision Diagnostics")
+                if focused_decision_df is not None and not focused_decision_df.empty:
+                    with st.expander("Focused candidate diagnostics", expanded=False):
+                        focus_fmt = {}
+                        for col in focused_decision_df.columns:
+                            series = focused_decision_df[col]
+                            if not pd.api.types.is_numeric_dtype(series):
+                                continue
+                            if "Rate" in col or col == "Net Benefit Rate":
+                                focus_fmt[col] = "{:.2%}"
+                            else:
+                                focus_fmt[col] = "${:,.0f}" if col != "Year" else "{:.0f}"
+                        if "Year" in focus_fmt:
+                            focus_fmt["Year"] = "{:.0f}"
+                        st.dataframe(focused_decision_df.style.format(focus_fmt), use_container_width=True)
                 st.dataframe(result["decision_df"], use_container_width=True)
                 st.download_button(
                     "Download Decision Diagnostics (CSV)",
