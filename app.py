@@ -9206,10 +9206,6 @@ def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.Dat
     return pd.DataFrame(compare_rows)
 
 
-
-if __name__ == "__main__":
-    main()
-
 def build_effective_beg_settings_df(inputs: dict, max_conversion: float, step_size: float) -> pd.DataFrame:
     rows = [
         {"Setting": "Governor mode", "Value": "Standalone / Full BEG"},
@@ -9226,5 +9222,9 @@ def build_effective_beg_settings_df(inputs: dict, max_conversion: float, step_si
         {"Setting": "SS scan Governor mode in session", "Value": str(st.session_state.get("ss_scan_beg_mode", DEFAULT_APP_STATE["ss_scan_beg_mode"]))},
     ]
     return pd.DataFrame(rows)
+
+
+if __name__ == "__main__":
+    main()
 
 
