@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v273"
+APP_VERSION = "v274"
 APP_STATE_VERSION = "v106"
 
 
@@ -7836,7 +7836,10 @@ def launch_conversion_optimizer_from_strategy(owner_age: int, spouse_age: int, s
     st.session_state["governor_strategy_applied_notice"] = f"Governor now set to {strategy} from {source_text}{profile_text}."
     if profile_name:
         st.session_state["planning_profile"] = profile_name
-        apply_break_even_governor_profile_presets(profile_name, st.session_state.get("trad", 0.0), force=True)
+        st.session_state["selected_recommendation_profile"] = profile_name
+        st.session_state["break_even_governor_preset_note"] = (
+            "Recommendation profile linked for reference only. Live Governor controls remain unchanged until you explicitly apply a preset."
+        )
     st.session_state["app_page"] = "conversion"
 
 
@@ -8794,30 +8797,42 @@ def render_conversion_page() -> None:
                 )
 
                 selected_diag_df = build_beg_selected_diagnostics_df(result)
-                if selected_diag_df is not None and not selected_diag_df.empty:
+                effective_beg_settings_df = build_effective_beg_settings_df(inputs, max_conversion, step_size)
+                if (selected_diag_df is not None and not selected_diag_df.empty) or not effective_beg_settings_df.empty:
                     st.subheader("BEG Diagnostics")
-                    st.caption("Keep this panel long-term behind an expander. It is compact enough for normal use and should make future BEG troubleshooting much faster.")
-                    with st.expander("Chosen-path BEG diagnostics", expanded=True):
-                        diag_fmt = {}
-                        bool_cols = {
-                            "Target Lane Active",
-                            "Within Planner Override Cap",
-                        }
-                        for col in selected_diag_df.columns:
-                            series = selected_diag_df[col]
-                            if col in bool_cols:
-                                continue
-                            if not pd.api.types.is_numeric_dtype(series):
-                                continue
-                            if "Rate" in col:
-                                diag_fmt[col] = "{:.2%}"
-                            elif col == "Net Benefit Rate":
-                                diag_fmt[col] = "{:.2%}"
-                            else:
-                                diag_fmt[col] = "${:,.0f}" if col != "Year" else "{:.0f}"
-                        if "Year" in diag_fmt:
-                            diag_fmt["Year"] = "{:.0f}"
-                        st.dataframe(selected_diag_df.style.format(diag_fmt), use_container_width=True)
+                    with st.expander("Chosen-path BEG diagnostics", expanded=False):
+                        if not effective_beg_settings_df.empty:
+                            st.caption("Resolved live Governor settings used for this run. Keep this hidden unless troubleshooting.")
+                            settings_fmt = {
+                                "Value": lambda x: f"{x:.0%}" if isinstance(x, float) and 0.0 <= x <= 1.0 and any(k in str(x) for k in []) else x
+                            }
+                            display_settings_df = effective_beg_settings_df.copy()
+                            rate_mask = display_settings_df["Setting"].isin(["Override max all-in rate"])
+                            display_settings_df.loc[rate_mask, "Value"] = display_settings_df.loc[rate_mask, "Value"].map(lambda v: f"{float(v):.0%}")
+                            money_mask = display_settings_df["Setting"].isin(["Max annual conversion", "Step size", "Target Traditional IRA"])
+                            display_settings_df.loc[money_mask, "Value"] = display_settings_df.loc[money_mask, "Value"].map(lambda v: f"${float(v):,.0f}")
+                            st.dataframe(display_settings_df, hide_index=True, use_container_width=True)
+                        if selected_diag_df is not None and not selected_diag_df.empty:
+                            diag_fmt = {}
+                            bool_cols = {
+                                "Target Lane Active",
+                                "Within Planner Override Cap",
+                            }
+                            for col in selected_diag_df.columns:
+                                series = selected_diag_df[col]
+                                if col in bool_cols:
+                                    continue
+                                if not pd.api.types.is_numeric_dtype(series):
+                                    continue
+                                if "Rate" in col:
+                                    diag_fmt[col] = "{:.2%}"
+                                elif col == "Net Benefit Rate":
+                                    diag_fmt[col] = "{:.2%}"
+                                else:
+                                    diag_fmt[col] = "${:,.0f}" if col != "Year" else "{:.0f}"
+                            if "Year" in diag_fmt:
+                                diag_fmt["Year"] = "{:.0f}"
+                            st.dataframe(selected_diag_df.style.format(diag_fmt), use_container_width=True)
 
                 focused_decision_df = build_beg_decision_focus_df(result.get("decision_df"))
                 st.subheader("Year-by-Year Decision Diagnostics")
@@ -9194,3 +9209,22 @@ def build_top_strategy_comparison_df(df: pd.DataFrame, top_n: int = 3) -> pd.Dat
 
 if __name__ == "__main__":
     main()
+
+def build_effective_beg_settings_df(inputs: dict, max_conversion: float, step_size: float) -> pd.DataFrame:
+    rows = [
+        {"Setting": "Governor mode", "Value": "Standalone / Full BEG"},
+        {"Setting": "Owner SS claim age", "Value": int(inputs.get("owner_claim_age", DEFAULT_APP_STATE["owner_claim_age"]))},
+        {"Setting": "Spouse SS claim age", "Value": int(inputs.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"]))},
+        {"Setting": "Max annual conversion", "Value": float(max_conversion)},
+        {"Setting": "Step size", "Value": float(step_size)},
+        {"Setting": "Target Trad enabled", "Value": bool(inputs.get("target_trad_balance_enabled", False))},
+        {"Setting": "Target Traditional IRA", "Value": float(inputs.get("target_trad_balance", 0.0))},
+        {"Setting": "Override enabled", "Value": bool(inputs.get("target_trad_override_enabled", False))},
+        {"Setting": "Override max all-in rate", "Value": float(inputs.get("target_trad_override_max_rate", 0.0))},
+        {"Setting": "Post-ACA target bracket", "Value": str(inputs.get("post_aca_target_bracket", DEFAULT_APP_STATE["post_aca_target_bracket"]))},
+        {"Setting": "RMD-era target bracket", "Value": str(inputs.get("rmd_era_target_bracket", DEFAULT_APP_STATE["rmd_era_target_bracket"]))},
+        {"Setting": "SS scan Governor mode in session", "Value": str(st.session_state.get("ss_scan_beg_mode", DEFAULT_APP_STATE["ss_scan_beg_mode"]))},
+    ]
+    return pd.DataFrame(rows)
+
+
