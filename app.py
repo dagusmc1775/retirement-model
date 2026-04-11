@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v301"
+APP_VERSION = "v274"
 APP_STATE_VERSION = "v106"
 
 
@@ -134,7 +134,6 @@ DEFAULT_APP_STATE = {
     "optimizer_rerun_best_validation": False,
     "owner_claim_age": 62,
     "owner_current_age": 0,
-    "owner_longevity_age": 90,
     "owner_ss_base": 0.0,
     "post_aca_target_bracket": "22%",
     "primary_aca_end_year": START_YEAR,
@@ -148,7 +147,6 @@ DEFAULT_APP_STATE = {
     "spouse_aca_end_year": START_YEAR,
     "spouse_claim_age": 62,
     "spouse_current_age": 0,
-    "spouse_longevity_age": 90,
     "spouse_ss_base": 0.0,
     "state_tax_rate": 0.0399,
     "planning_profile": "Balanced",
@@ -4137,10 +4135,6 @@ def ss_start_year_from_current_age(start_year: int, current_age: int, claim_age:
     return int(start_year + (int(claim_age) - int(current_age)))
 
 
-def longevity_year_from_current_age(start_year: int, current_age: int, longevity_age: int) -> int:
-    return int(start_year + max(0, int(longevity_age) - int(current_age)))
-
-
 # -----------------------------
 # WITHDRAWAL ENGINE
 # -----------------------------
@@ -4387,12 +4381,6 @@ def build_common_params(inputs: dict) -> dict:
     owner_rmd_start = START_YEAR + max(0, owner_rmd_start_age - int(inputs["owner_current_age"]))
     spouse_rmd_start = START_YEAR + max(0, spouse_rmd_start_age - int(inputs["spouse_current_age"]))
     household_rmd_start = min(owner_rmd_start, spouse_rmd_start)
-    owner_longevity_age = int(inputs.get("owner_longevity_age", 90))
-    spouse_longevity_age = int(inputs.get("spouse_longevity_age", 90))
-    owner_longevity_year = longevity_year_from_current_age(START_YEAR, int(inputs["owner_current_age"]), owner_longevity_age)
-    spouse_longevity_year = longevity_year_from_current_age(START_YEAR, int(inputs["spouse_current_age"]), spouse_longevity_age)
-    first_death_year = min(owner_longevity_year, spouse_longevity_year)
-    final_projection_year = max(owner_longevity_year, spouse_longevity_year)
 
     return {
         "growth": float(inputs["growth"]),
@@ -4419,12 +4407,6 @@ def build_common_params(inputs: dict) -> dict:
         "rmd_era_target_bracket": str(inputs.get("rmd_era_target_bracket", "22%")),
         "owner_current_age": int(inputs["owner_current_age"]),
         "spouse_current_age": int(inputs["spouse_current_age"]),
-        "owner_longevity_age": int(owner_longevity_age),
-        "spouse_longevity_age": int(spouse_longevity_age),
-        "owner_longevity_year": int(owner_longevity_year),
-        "spouse_longevity_year": int(spouse_longevity_year),
-        "first_death_year": int(first_death_year),
-        "final_projection_year": int(final_projection_year),
         "owner_rmd_start_age": int(owner_rmd_start_age),
         "spouse_rmd_start_age": int(spouse_rmd_start_age),
         "owner_rmd_start": int(owner_rmd_start),
@@ -4479,10 +4461,6 @@ def summarize_run(df: pd.DataFrame, params: dict) -> dict:
         "owner_ss_start": int(params["owner_ss_start"]),
         "spouse_ss_start": int(params["spouse_ss_start"]),
         "household_rmd_start": household_rmd_start,
-        "owner_longevity_age": int(params.get("owner_longevity_age", 90)),
-        "spouse_longevity_age": int(params.get("spouse_longevity_age", 90)),
-        "first_death_year": int(params.get("first_death_year", household_rmd_start)),
-        "final_projection_year": int(params.get("final_projection_year", END_YEAR)),
         "owner_claim_age": int(params["owner_ss_start"] - START_YEAR + int(params["owner_current_age"])),
         "spouse_claim_age": int(params["spouse_ss_start"] - START_YEAR + int(params["spouse_current_age"])),
         "total_conversions": float(df["Chosen Conversion"].sum()),
@@ -4944,8 +4922,7 @@ def run_projection_from_state(
     }
     rows = []
 
-    projection_end_year = int(params.get("final_projection_year", END_YEAR))
-    for year in range(start_year, projection_end_year + 1):
+    for year in range(start_year, END_YEAR + 1):
         conversion = float(first_year_conversion) if year == start_year else float(later_year_conversion)
         state, row = simulate_one_year(year, state, params, conversion)
         rows.append(row)
@@ -5001,8 +4978,7 @@ def run_projection_summary_from_state(
     total_conversions = 0.0
     max_magi = 0.0
 
-    projection_end_year = int(params.get("final_projection_year", END_YEAR))
-    for year in range(start_year, projection_end_year + 1):
+    for year in range(start_year, END_YEAR + 1):
         conversion = float(first_year_conversion) if year == start_year else float(later_year_conversion)
         state, row = simulate_one_year(year, state, params, conversion)
         if first_row is None:
@@ -5053,7 +5029,7 @@ def run_model_fixed(inputs: dict) -> dict:
     annual_conversion = float(inputs["annual_conversion"])
 
     rows = []
-    for year in range(START_YEAR, int(params.get("final_projection_year", END_YEAR)) + 1):
+    for year in range(START_YEAR, END_YEAR + 1):
         state_before = dict(state)
         state, row = simulate_one_year(year, state, params, annual_conversion)
         row = enrich_year_row_for_display(year, state_before, params, row)
@@ -5920,7 +5896,7 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
     chosen_rows = []
     decision_frames = []
 
-    for year in range(START_YEAR, int(params.get("final_projection_year", END_YEAR)) + 1):
+    for year in range(START_YEAR, END_YEAR + 1):
         state_before = dict(state)
         optimal_conversion, _, diag_df = find_optimal_conversion_for_year(
             year=year,
@@ -7189,10 +7165,6 @@ def render_summary(title: str, result: dict):
     st.write(f"Owner SS Start Year: {result['owner_ss_start']}{owner_year_suffix}")
     st.write(f"Spouse SS Start Year: {result['spouse_ss_start']}{spouse_year_suffix}")
     st.write(f"Household RMD Start Year (approx): {result['household_rmd_start']}")
-    st.write(f"Owner Longevity Age: {int(result.get('owner_longevity_age', 90))}")
-    st.write(f"Spouse Longevity Age: {int(result.get('spouse_longevity_age', 90))}")
-    st.write(f"First Death Year Assumed: {int(result.get('first_death_year', result.get('final_projection_year', END_YEAR)))}")
-    st.write(f"Final Projection Year: {int(result.get('final_projection_year', END_YEAR))}")
     st.write(f"Final Net Worth: ${result['final_net_worth']:,.0f}")
     trad_balance_at_rmd_start = result.get("trad_balance_at_rmd_start")
     if trad_balance_at_rmd_start is None:
