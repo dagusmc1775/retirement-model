@@ -2519,8 +2519,19 @@ def run_strategy_combo_scan(
             comparison_top_n=comparison_top_n,
             include_profile_shortlists=include_profile_shortlists,
         )
-        empty_payload["errors"] = errors
-        return empty_payload
+        ranked_df = canonicalize_optimizer_result_df(empty_payload["ranked_df"].copy(), "strategy scan ranked results")
+        primary_table_df = canonicalize_optimizer_result_df(empty_payload["primary_table_df"].copy(), "strategy scan primary table")
+        comparison_df = empty_payload["comparison_df"].copy() if isinstance(empty_payload.get("comparison_df"), pd.DataFrame) else pd.DataFrame(empty_payload.get("comparison_df", []))
+        return {
+            "inputs_snapshot": base_snapshot,
+            "preferences": preferences,
+            "fact_rows": [],
+            "errors": errors,
+            "shared_payload": empty_payload,
+            "ranked_df": ranked_df,
+            "primary_table_df": primary_table_df,
+            "comparison_df": comparison_df,
+        }
 
     shared_payload = build_strategy_scan_payload(
         fact_rows,
