@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v300"
+APP_VERSION = "v301"
 APP_STATE_VERSION = "v106"
 
 
@@ -4944,7 +4944,8 @@ def run_projection_from_state(
     }
     rows = []
 
-    for year in range(start_year, END_YEAR + 1):
+    projection_end_year = int(params.get("final_projection_year", END_YEAR))
+    for year in range(start_year, projection_end_year + 1):
         conversion = float(first_year_conversion) if year == start_year else float(later_year_conversion)
         state, row = simulate_one_year(year, state, params, conversion)
         rows.append(row)
@@ -5000,7 +5001,8 @@ def run_projection_summary_from_state(
     total_conversions = 0.0
     max_magi = 0.0
 
-    for year in range(start_year, END_YEAR + 1):
+    projection_end_year = int(params.get("final_projection_year", END_YEAR))
+    for year in range(start_year, projection_end_year + 1):
         conversion = float(first_year_conversion) if year == start_year else float(later_year_conversion)
         state, row = simulate_one_year(year, state, params, conversion)
         if first_row is None:
