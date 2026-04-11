@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v274"
+APP_VERSION = "v305"
 APP_STATE_VERSION = "v106"
 
 
@@ -998,8 +998,12 @@ def evaluate_strategy_via_governor(
     Single source of truth for Quick/Full strategy evaluation.
     Every SS strategy candidate must flow through the exact same Break-Even
     Governor execution path used by the standalone Governor summary.
+
+    Performance note:
+    base_inputs for scans is a flat scalar/string dict, so a shallow copy is
+    sufficient here and avoids repeated deep-copy overhead across every combo.
     """
-    scenario_inputs = copy.deepcopy(base_inputs)
+    scenario_inputs = dict(base_inputs)
     scenario_inputs["owner_claim_age"] = int(owner_age)
     scenario_inputs["spouse_claim_age"] = int(spouse_age)
     scenario_inputs["integrity_mode"] = False
@@ -1064,7 +1068,7 @@ def build_ss_optimizer_fact_rows(
     cache_namespace: str = "_ss_optimizer_fact_rows_cache",
 ) -> tuple[list[dict], list[str]]:
     cache = st.session_state.setdefault(cache_namespace, {})
-    base_snapshot = copy.deepcopy(inputs)
+    base_snapshot = dict(inputs)
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
     fact_key = build_scenario_fingerprint(
@@ -1082,8 +1086,15 @@ def build_ss_optimizer_fact_rows(
     rows: list[dict] = []
     errors: list[str] = []
     total = len(combos)
+    progress_label = (progress_text or "Running optimizer...").split('...')[0]
     progress_bar = st.progress(0.0, text=progress_text or "Running optimizer...") if total else None
+    progress_status = st.empty() if total else None
     for idx, (owner_age, spouse_age) in enumerate(combos, start=1):
+        strategy_label = f"{int(owner_age)}/{int(spouse_age)}"
+        if progress_bar is not None:
+            progress_bar.progress((idx - 1) / total, text=f"{progress_label}... {idx - 1}/{total}")
+        if progress_status is not None:
+            progress_status.caption(f"Running strategy {idx}/{total}: {strategy_label}")
         try:
             _, run_result = evaluate_strategy_via_governor(
                 base_snapshot,
@@ -1097,7 +1108,9 @@ def build_ss_optimizer_fact_rows(
             errors.append(f"{owner_age}/{spouse_age}: {exc}")
         finally:
             if progress_bar is not None:
-                progress_bar.progress(idx / total, text=(progress_text or "Running optimizer...").split('...')[0] + f"... {idx}/{total}")
+                progress_bar.progress(idx / total, text=f"{progress_label}... {idx}/{total}")
+    if progress_status is not None:
+        progress_status.empty()
     if progress_bar is not None:
         progress_bar.empty()
     cache[fact_key] = {"rows": copy.deepcopy(rows), "errors": copy.deepcopy(errors)}
