@@ -240,13 +240,12 @@ OPTIMIZER_PROFILE_SCORE_COLUMNS = [
 
 def ensure_dataframe_columns(df: pd.DataFrame, required: list[str], name: str) -> pd.DataFrame:
     if df is None:
-        df = pd.DataFrame()
+        raise ValueError(f"{name} is None")
     if not isinstance(df, pd.DataFrame):
         df = pd.DataFrame(df)
-    df = df.copy()
-    for c in required:
-        if c not in df.columns:
-            df[c] = 0 if c not in {"Strategy"} else ""
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"{name} missing required columns: {missing}")
     return df
 
 
@@ -2440,17 +2439,6 @@ def build_strategy_scan_payload(
     Every downstream table must therefore be sliced directly from the same canonical
     ranked dataframe instead of passing through alternate row/schema builders.
     """
-    if not results_rows:
-        required_cols = OPTIMIZER_REQUIRED_COLUMNS + ["Selected Score", "Score"] + OPTIMIZER_PROFILE_SCORE_COLUMNS
-        empty_ranked = pd.DataFrame(columns=required_cols)
-        return {
-            "scoring_context": {},
-            "ranked_df": empty_ranked.copy(),
-            "primary_table_df": empty_ranked.copy(),
-            "comparison_df": pd.DataFrame(),
-            "best_result": None,
-            "profile_shortlists": {},
-        }
     shared_outputs = build_scored_strategy_outputs(
         results_rows,
         inputs=inputs,
@@ -2508,30 +2496,7 @@ def run_strategy_combo_scan(
         cache_namespace=cache_namespace,
     )
     if not fact_rows:
-        empty_payload = build_strategy_scan_payload(
-            [],
-            inputs=base_snapshot,
-            selected_profile_name=profile_name,
-            preferences=preferences,
-            trad_balance_penalty_lambda=trad_balance_penalty_lambda,
-            shortlist_top_n=shortlist_top_n,
-            primary_table_top_n=primary_table_top_n,
-            comparison_top_n=comparison_top_n,
-            include_profile_shortlists=include_profile_shortlists,
-        )
-        ranked_df = canonicalize_optimizer_result_df(empty_payload["ranked_df"].copy(), "strategy scan ranked results")
-        primary_table_df = canonicalize_optimizer_result_df(empty_payload["primary_table_df"].copy(), "strategy scan primary table")
-        comparison_df = empty_payload["comparison_df"].copy() if isinstance(empty_payload.get("comparison_df"), pd.DataFrame) else pd.DataFrame(empty_payload.get("comparison_df", []))
-        return {
-            "inputs_snapshot": base_snapshot,
-            "preferences": preferences,
-            "fact_rows": [],
-            "errors": errors,
-            "shared_payload": empty_payload,
-            "ranked_df": ranked_df,
-            "primary_table_df": primary_table_df,
-            "comparison_df": comparison_df,
-        }
+        raise RuntimeError("Strategy scan could not produce any valid strategy results.")
 
     shared_payload = build_strategy_scan_payload(
         fact_rows,
@@ -4655,7 +4620,7 @@ def organize_yearly_columns(df: pd.DataFrame) -> pd.DataFrame:
 
         # Cash inflows / income sources
         "Earned Income", "Owner SS", "Spouse SS", "Total SS",
-        "Annual Spending Need", "Owner Age", "Spouse Age", "Household Reference Age", "RMD Income Component", "Spending Funded From Cash", "Spending Funded From Brokerage", "Spending Trad Withdrawal Component", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
+        "Annual Spending Need", "Household Reference Age", "RMD Income Component", "Spending Funded From Cash", "Spending Funded From Brokerage", "Spending Trad Withdrawal Component", "Trad Withdrawal Income Component", "Conversion Income Component", "Brokerage Realized LTCG",
 
         # Aggregated income
         "Other Ordinary Income", "Taxable SS", "AGI", "MAGI",
@@ -4982,8 +4947,6 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Spending Brokerage Basis Used": float(max(0.0, spend_result["from_brokerage"] - spending_realized_ltcg)),
         "Spending Funded From Roth": float(spend_result["from_roth"]),
         "Annual Spending Need": annual_spending,
-        "Owner Age": get_current_owner_age(year, params),
-        "Spouse Age": get_current_spouse_age(year, params),
         "Household Reference Age": get_household_reference_age(year, params),
         "Other Ordinary Income": other_ordinary_income,
         "Brokerage Realized LTCG": realized_ltcg,
@@ -7312,50 +7275,6 @@ def render_annual_conversion_calculator_results(result: dict):
 # -----------------------------
 # DISPLAY
 # -----------------------------
-def build_age_snapshot_df(result: dict, milestone_ages: list[int] | None = None) -> pd.DataFrame:
-    df = result.get("df") if isinstance(result, dict) else None
-    if df is None or df.empty:
-        return pd.DataFrame()
-    milestone_ages = milestone_ages or [65, 70, 75, 80, 85, 90, 95]
-    snapshot_rows = []
-    seen_years = set()
-    owner_age_series = df["Owner Age"] if "Owner Age" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
-    spouse_age_series = df["Spouse Age"] if "Spouse Age" in df.columns else pd.Series([pd.NA] * len(df), index=df.index)
-    for age in milestone_ages:
-        candidates = df.loc[(owner_age_series == age) | (spouse_age_series == age)].copy()
-        if candidates.empty:
-            continue
-        owner_age_candidates = candidates["Owner Age"] if "Owner Age" in candidates.columns else pd.Series([9999] * len(candidates), index=candidates.index)
-        spouse_age_candidates = candidates["Spouse Age"] if "Spouse Age" in candidates.columns else pd.Series([9999] * len(candidates), index=candidates.index)
-        candidates["_distance"] = (owner_age_candidates.sub(age).abs().fillna(9999) + spouse_age_candidates.sub(age).abs().fillna(9999))
-        candidates = candidates.sort_values(["_distance", "Year"])
-        row = candidates.iloc[0]
-        year = int(row.get("Year", 0))
-        if year in seen_years:
-            continue
-        seen_years.add(year)
-        total_ss = float(row.get("Total SS", 0.0))
-        spending_need = float(row.get("Annual Spending Need", 0.0))
-        snapshot_rows.append({
-            "Snapshot Age": int(age),
-            "Year": year,
-            "Life Phase": row.get("Life Phase", ""),
-            "Owner Age": int(row.get("Owner Age", 0)),
-            "Spouse Age": int(row.get("Spouse Age", 0)),
-            "Total Net Worth": float(row.get("Net Worth", 0.0)),
-            "Traditional IRA": float(row.get("EOY Trad", 0.0)),
-            "Roth": float(row.get("EOY Roth", 0.0)),
-            "Brokerage": float(row.get("EOY Brokerage", 0.0)),
-            "Cash": float(row.get("EOY Cash", 0.0)),
-            "Total SS": total_ss,
-            "Annual Spending Need": spending_need,
-            "Federal Tax": float(row.get("Federal Tax", 0.0)),
-            "State Tax": float(row.get("State Tax", 0.0)),
-            "MAGI": float(row.get("MAGI", 0.0)),
-        })
-    return pd.DataFrame(snapshot_rows)
-
-
 def render_summary(title: str, result: dict):
     owner_claim_age = result.get("owner_claim_age")
     spouse_claim_age = result.get("spouse_claim_age")
@@ -7430,16 +7349,6 @@ def render_summary(title: str, result: dict):
     st.write(f"ACA Hit Years: {result['aca_hit_years']}")
     st.write(f"IRMAA Hit Years: {result['irmaa_hit_years']}")
     st.write(f"First IRMAA Year: {result['first_irmaa_year'] if result['first_irmaa_year'] is not None else 'None'}")
-    age_snapshot_df = build_age_snapshot_df(result)
-    if not age_snapshot_df.empty:
-        st.subheader("Age Snapshot Projection")
-        st.caption("Projection snapshots at milestone ages using the nearest modeled year where either spouse is at the requested age.")
-        snapshot_fmt = {}
-        for col in age_snapshot_df.columns:
-            if col in {"Snapshot Age", "Year", "Life Phase", "Owner Age", "Spouse Age"}:
-                continue
-            snapshot_fmt[col] = "${:,.0f}"
-        st.dataframe(age_snapshot_df.style.format(snapshot_fmt), use_container_width=True)
     validation = result.get("validation")
     if validation is not None:
         if validation["passed"]:
