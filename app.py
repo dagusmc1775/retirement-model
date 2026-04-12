@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v308"
+APP_VERSION = "v274"
 APP_STATE_VERSION = "v106"
 
 
@@ -998,7 +998,6 @@ def evaluate_strategy_via_governor(
     Single source of truth for Quick/Full strategy evaluation.
     Every SS strategy candidate must flow through the exact same Break-Even
     Governor execution path used by the standalone Governor summary.
-
     """
     scenario_inputs = copy.deepcopy(base_inputs)
     scenario_inputs["owner_claim_age"] = int(owner_age)
@@ -1083,15 +1082,8 @@ def build_ss_optimizer_fact_rows(
     rows: list[dict] = []
     errors: list[str] = []
     total = len(combos)
-    progress_label = (progress_text or "Running optimizer...").split('...')[0]
     progress_bar = st.progress(0.0, text=progress_text or "Running optimizer...") if total else None
     for idx, (owner_age, spouse_age) in enumerate(combos, start=1):
-        strategy_label = f"{int(owner_age)}/{int(spouse_age)}"
-        if progress_bar is not None:
-            progress_bar.progress(
-                (idx - 1) / total,
-                text=f"{progress_label}... {idx - 1}/{total} | Current strategy: {strategy_label}",
-            )
         try:
             _, run_result = evaluate_strategy_via_governor(
                 base_snapshot,
@@ -1105,10 +1097,7 @@ def build_ss_optimizer_fact_rows(
             errors.append(f"{owner_age}/{spouse_age}: {exc}")
         finally:
             if progress_bar is not None:
-                progress_bar.progress(
-                    idx / total,
-                    text=f"{progress_label}... {idx}/{total} | Last finished: {strategy_label}",
-                )
+                progress_bar.progress(idx / total, text=(progress_text or "Running optimizer...").split('...')[0] + f"... {idx}/{total}")
     if progress_bar is not None:
         progress_bar.empty()
     cache[fact_key] = {"rows": copy.deepcopy(rows), "errors": copy.deepcopy(errors)}
@@ -5203,58 +5192,6 @@ def stabilized_future_avoided_rate(raw_delta_rate: float, estimated_future_rate:
     return max(floor, min(base, cap))
 
 
-def blend_future_rate_for_scan_mode(ss_scan_mode: str, raw_future_effective: float, estimated_future_rate: float, current_marginal_rate: float) -> float:
-    """
-    Shared BEG/BETR core:
-    - BETR-only uses the projected future marginal rate directly as the cleaner baseline.
-    - Full BEG uses the stronger of the future marginal anchor and the stabilized avoided-rate signal.
-    This keeps BEG as a planning overlay on top of BETR-style core economics.
-    """
-    mode = str(ss_scan_mode or "BETR-only")
-    future_rate = float(estimated_future_rate)
-    if mode == "BETR-only":
-        return future_rate
-    return max(
-        future_rate,
-        float(stabilized_future_avoided_rate(raw_future_effective, future_rate, current_marginal_rate)),
-    )
-
-
-def compute_betr_core_rates(
-    *,
-    current_conversion: float,
-    current_effective_rate: float,
-    tax_source_penalty: float,
-    raw_future_effective_rate: float,
-    estimated_future_rate: float,
-    current_marginal_rate: float,
-    ss_scan_mode: str,
-) -> dict:
-    """
-    Shared rate math used by both BETR-only and Full BEG in non-ACA years.
-    This isolates the baseline economics from the BEG planning overlay.
-    """
-    if float(current_conversion) <= 1e-9:
-        return {
-            "effective_current_adjusted": 0.0,
-            "future_effective_blended": float(estimated_future_rate),
-            "net_benefit_rate": 0.0,
-        }
-
-    effective_current_adjusted = adjusted_current_effective_rate(current_effective_rate, tax_source_penalty)
-    future_effective_blended = blend_future_rate_for_scan_mode(
-        ss_scan_mode=ss_scan_mode,
-        raw_future_effective=float(raw_future_effective_rate),
-        estimated_future_rate=float(estimated_future_rate),
-        current_marginal_rate=float(current_marginal_rate),
-    )
-    return {
-        "effective_current_adjusted": float(effective_current_adjusted),
-        "future_effective_blended": float(future_effective_blended),
-        "net_benefit_rate": float(future_effective_blended - effective_current_adjusted),
-    }
-
-
 def evaluate_conversion_pair(year: int, state: dict, params: dict, current_conversion: float, next_conversion: float) -> dict:
     current_path = run_projection_from_state(year, state, params, first_year_conversion=current_conversion, later_year_conversion=0.0)
     next_path = run_projection_from_state(year, state, params, first_year_conversion=next_conversion, later_year_conversion=0.0)
@@ -5737,18 +5674,25 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
             net_benefit_rate = future_effective - current_effective
 
         ss_scan_mode = str(params.get("ss_scan_beg_mode", "BETR-only") or "BETR-only")
-        core_rate_info = compute_betr_core_rates(
-            current_conversion=float(current_conversion),
-            current_effective_rate=float(current_effective),
-            tax_source_penalty=float(tax_source_penalty),
-            raw_future_effective_rate=float(future_effective),
-            estimated_future_rate=float(future_rate),
-            current_marginal_rate=float(current_rate),
-            ss_scan_mode=ss_scan_mode,
-        )
-        effective_current_adjusted = float(core_rate_info["effective_current_adjusted"])
-        future_effective_blended = float(core_rate_info["future_effective_blended"])
-        net_benefit_rate = float(core_rate_info["net_benefit_rate"])
+        if current_conversion <= 1e-9:
+            effective_current_adjusted = 0.0
+            future_effective_blended = float(future_rate)
+            net_benefit_rate = 0.0
+        else:
+            effective_current_adjusted = adjusted_current_effective_rate(current_effective, tax_source_penalty)
+
+            if ss_scan_mode == "BETR-only":
+                # In SS ranking mode, use the projected future marginal rate directly.
+                # This avoids overstating conversion benefit by taking the more aggressive
+                # of multiple future-rate proxies.
+                future_effective_blended = float(future_rate)
+            else:
+                # Outside BETR-only scan mode, keep the broader BEG-style future avoided-rate anchor.
+                future_effective_blended = max(
+                    float(future_rate),
+                    float(stabilized_future_avoided_rate(future_effective, future_rate, current_rate)),
+                )
+            net_benefit_rate = future_effective_blended - effective_current_adjusted
         # Policy layer: after household RMD start, require a stronger BETR margin before allowing extra conversion.
         post_rmd_hurdle = 0.05 if year >= int(params["household_rmd_start"]) else 0.0
         respects_bracket_cap = bool(
