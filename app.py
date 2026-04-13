@@ -135,6 +135,7 @@ DEFAULT_APP_STATE = {
     "owner_claim_age": 62,
     "owner_current_age": 0,
     "owner_ss_base": 0.0,
+    "owner_longevity_age": 95,
     "post_aca_target_bracket": "22%",
     "primary_aca_end_year": START_YEAR,
     "retirement_smile_enabled": False,
@@ -148,6 +149,7 @@ DEFAULT_APP_STATE = {
     "spouse_claim_age": 62,
     "spouse_current_age": 0,
     "spouse_ss_base": 0.0,
+    "spouse_longevity_age": 95,
     "state_tax_rate": 0.0399,
     "planning_profile": "Balanced",
     "preference_maximize_social_security": False,
@@ -3654,20 +3656,29 @@ def get_latest_year_value(table_by_year: dict, year: int):
     return table_by_year[max(eligible)]
 
 
-def get_standard_deduction(year: int) -> float:
-    return float(get_latest_year_value(STANDARD_DEDUCTION_BY_YEAR, year))
+def filing_status_factor(filing_status: str) -> float:
+    return 1.0 if str(filing_status or "MFJ") == "MFJ" else 0.5
 
 
-def get_federal_brackets(year: int):
-    return get_latest_year_value(FEDERAL_BRACKETS_MFJ_BY_YEAR, year)
+def get_standard_deduction(year: int, filing_status: str = "MFJ") -> float:
+    base = float(get_latest_year_value(STANDARD_DEDUCTION_BY_YEAR, year))
+    return base * filing_status_factor(filing_status)
 
 
-def get_bracket_tops(year: int):
-    return get_latest_year_value(BRACKET_TOPS_MFJ_BY_YEAR, year)
+def get_federal_brackets(year: int, filing_status: str = "MFJ"):
+    factor = filing_status_factor(filing_status)
+    return [(float(start) * factor, float(rate)) for start, rate in get_latest_year_value(FEDERAL_BRACKETS_MFJ_BY_YEAR, year)]
 
 
-def get_ltcg_brackets(year: int):
-    return get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)
+def get_bracket_tops(year: int, filing_status: str = "MFJ"):
+    factor = filing_status_factor(filing_status)
+    base = get_latest_year_value(BRACKET_TOPS_MFJ_BY_YEAR, year)
+    return {k: float(v) * factor for k, v in base.items()}
+
+
+def get_ltcg_brackets(year: int, filing_status: str = "MFJ"):
+    factor = filing_status_factor(filing_status)
+    return [(float(start) * factor, float(rate)) for start, rate in get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)]
 
 
 def get_irmaa_table(year: int):
@@ -3707,10 +3718,10 @@ def interpolate_cost_from_table(income: float, points: list) -> float:
 # -----------------------------
 # TAX HELPERS
 # -----------------------------
-def calculate_progressive_tax(taxable_income: float, year: int) -> float:
+def calculate_progressive_tax(taxable_income: float, year: int, filing_status: str = "MFJ") -> float:
     taxable_income = max(0.0, float(taxable_income))
     tax = 0.0
-    brackets = get_federal_brackets(year)
+    brackets = get_federal_brackets(year, filing_status)
 
     for i, (lower_bound, rate) in enumerate(brackets):
         upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
@@ -3721,9 +3732,9 @@ def calculate_progressive_tax(taxable_income: float, year: int) -> float:
     return max(0.0, tax)
 
 
-def get_marginal_rate_from_taxable_income(taxable_income: float, year: int) -> float:
+def get_marginal_rate_from_taxable_income(taxable_income: float, year: int, filing_status: str = "MFJ") -> float:
     taxable_income = max(0.0, float(taxable_income))
-    brackets = get_federal_brackets(year)
+    brackets = get_federal_brackets(year, filing_status)
     rate = brackets[0][1]
 
     for i, (lower_bound, bracket_rate) in enumerate(brackets):
@@ -3734,29 +3745,34 @@ def get_marginal_rate_from_taxable_income(taxable_income: float, year: int) -> f
     return float(rate)
 
 
-def calculate_taxable_ss(total_ss: float, other_income: float) -> float:
+def calculate_taxable_ss(total_ss: float, other_income: float, filing_status: str = "MFJ") -> float:
     total_ss = max(0.0, float(total_ss))
     other_income = max(0.0, float(other_income))
 
+    if str(filing_status or "MFJ") == "MFJ":
+        base1, base2, base_taxable = 32000.0, 44000.0, 6000.0
+    else:
+        base1, base2, base_taxable = 25000.0, 34000.0, 4500.0
+
     provisional_income = other_income + 0.5 * total_ss
 
-    if provisional_income <= 32000:
+    if provisional_income <= base1:
         taxable_ss = 0.0
-    elif provisional_income <= 44000:
-        taxable_ss = 0.5 * (provisional_income - 32000)
+    elif provisional_income <= base2:
+        taxable_ss = 0.5 * (provisional_income - base1)
     else:
-        taxable_ss = 6000.0 + 0.85 * (provisional_income - 44000)
+        taxable_ss = base_taxable + 0.85 * (provisional_income - base2)
 
     return max(0.0, min(taxable_ss, 0.85 * total_ss))
 
 
-def calculate_ltcg_tax(ordinary_taxable_income: float, ltcg_taxable_income: float, year: int) -> float:
+def calculate_ltcg_tax(ordinary_taxable_income: float, ltcg_taxable_income: float, year: int, filing_status: str = "MFJ") -> float:
     ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
     ltcg_taxable_income = max(0.0, float(ltcg_taxable_income))
     if ltcg_taxable_income <= 0.0:
         return 0.0
 
-    brackets = get_ltcg_brackets(year)
+    brackets = get_ltcg_brackets(year, filing_status)
     tax = 0.0
     remaining = ltcg_taxable_income
     stack_start = ordinary_taxable_income
@@ -3778,23 +3794,24 @@ def calculate_ltcg_tax(ordinary_taxable_income: float, ltcg_taxable_income: floa
     return max(0.0, tax)
 
 
-def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: int, realized_ltcg: float = 0.0) -> dict:
+def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: int, realized_ltcg: float = 0.0, filing_status: str = "MFJ") -> dict:
     other_ordinary_income = max(0.0, float(other_ordinary_income))
     realized_ltcg = max(0.0, float(realized_ltcg))
-    taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income + realized_ltcg)
+    filing_status = str(filing_status or "MFJ")
+    taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income + realized_ltcg, filing_status=filing_status)
     agi = other_ordinary_income + taxable_ss + realized_ltcg
 
-    standard_deduction = get_standard_deduction(year)
+    standard_deduction = get_standard_deduction(year, filing_status)
     ordinary_income_before_deduction = other_ordinary_income + taxable_ss
     ordinary_taxable_income = max(0.0, ordinary_income_before_deduction - standard_deduction)
     deduction_remaining_for_ltcg = max(0.0, standard_deduction - ordinary_income_before_deduction)
     ltcg_taxable_income = max(0.0, realized_ltcg - deduction_remaining_for_ltcg)
     taxable_income = ordinary_taxable_income + ltcg_taxable_income
 
-    ordinary_tax = calculate_progressive_tax(ordinary_taxable_income, year)
-    ltcg_tax = calculate_ltcg_tax(ordinary_taxable_income, ltcg_taxable_income, year)
+    ordinary_tax = calculate_progressive_tax(ordinary_taxable_income, year, filing_status=filing_status)
+    ltcg_tax = calculate_ltcg_tax(ordinary_taxable_income, ltcg_taxable_income, year, filing_status=filing_status)
     federal_tax = ordinary_tax + ltcg_tax
-    marginal_rate = get_marginal_rate_from_taxable_income(ordinary_taxable_income, year)
+    marginal_rate = get_marginal_rate_from_taxable_income(ordinary_taxable_income, year, filing_status=filing_status)
 
     return {
         "taxable_ss": taxable_ss,
@@ -3807,6 +3824,7 @@ def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: i
         "ltcg_tax": ltcg_tax,
         "federal_tax": federal_tax,
         "marginal_rate": marginal_rate,
+        "filing_status": filing_status,
     }
 
 
@@ -3820,7 +3838,44 @@ def get_aca_magi_limit(year: int, aca_lives: int) -> float:
     _ = year
     if aca_lives <= 0:
         return float('inf')
-    return max(0.0, ACA_CLIFF_MFJ - ACA_HEADROOM_BUFFER)
+    if int(aca_lives) >= 2:
+        return max(0.0, ACA_CLIFF_MFJ - ACA_HEADROOM_BUFFER)
+    one_person_table = get_aca_cost_table(year, "1_person")
+    if one_person_table:
+        return max(0.0, float(one_person_table[-1][0]) - ACA_HEADROOM_BUFFER)
+    return max(0.0, ACA_CLIFF_MFJ * 0.5 - ACA_HEADROOM_BUFFER)
+
+
+def get_life_status_for_year(year: int, params: dict) -> dict:
+    owner_age = int(params.get("owner_current_age", 0)) + (year - START_YEAR)
+    spouse_age = int(params.get("spouse_current_age", 0)) + (year - START_YEAR)
+    owner_longevity_age = int(params.get("owner_longevity_age", 200))
+    spouse_longevity_age = int(params.get("spouse_longevity_age", 200))
+
+    owner_alive = owner_age <= owner_longevity_age
+    spouse_alive = spouse_age <= spouse_longevity_age
+
+    if owner_alive and spouse_alive:
+        household_phase = "Both Alive"
+        filing_status = "MFJ"
+    elif spouse_alive:
+        household_phase = "Owner Dead (Spouse Survivor)"
+        filing_status = "Single"
+    elif owner_alive:
+        household_phase = "Spouse Dead (Owner Survivor)"
+        filing_status = "Single"
+    else:
+        household_phase = "No Household Members Alive"
+        filing_status = "Single"
+
+    return {
+        "owner_age": int(owner_age),
+        "spouse_age": int(spouse_age),
+        "owner_alive": bool(owner_alive),
+        "spouse_alive": bool(spouse_alive),
+        "household_phase": household_phase,
+        "filing_status": filing_status,
+    }
 
 
 def get_earned_income_for_year(year: int, params: dict) -> float:
@@ -3833,9 +3888,15 @@ def get_earned_income_for_year(year: int, params: dict) -> float:
 
 
 def get_household_reference_age(year: int, params: dict) -> int:
-    owner_age = int(params.get("owner_current_age", 0)) + (year - START_YEAR)
-    spouse_age = int(params.get("spouse_current_age", 0)) + (year - START_YEAR)
-    return max(owner_age, spouse_age)
+    life = get_life_status_for_year(year, params)
+    alive_ages = []
+    if life["owner_alive"]:
+        alive_ages.append(int(life["owner_age"]))
+    if life["spouse_alive"]:
+        alive_ages.append(int(life["spouse_age"]))
+    if alive_ages:
+        return max(alive_ages)
+    return max(int(life["owner_age"]), int(life["spouse_age"]))
 
 
 def get_annual_spending_for_year(year: int, params: dict) -> float:
@@ -3912,7 +3973,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "owner_claim_age": 67,
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
+    "owner_longevity_age": 95,
                 "spouse_ss_base": 0.0,
+    "spouse_longevity_age": 95,
                 "earned_income_annual": 0.0,
                 "earned_income_start_year": 2024,
                 "earned_income_end_year": 2024,
@@ -3941,7 +4004,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "owner_claim_age": 67,
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
+    "owner_longevity_age": 95,
                 "spouse_ss_base": 0.0,
+    "spouse_longevity_age": 95,
                 "earned_income_annual": 0.0,
                 "earned_income_start_year": 2024,
                 "earned_income_end_year": 2024,
@@ -3999,7 +4064,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "owner_claim_age": 67,
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
+    "owner_longevity_age": 95,
                 "spouse_ss_base": 0.0,
+    "spouse_longevity_age": 95,
                 "primary_aca_end_year": 2035,
                 "spouse_aca_end_year": 2035,
             },
@@ -4023,7 +4090,9 @@ def run_contract_validation_suite() -> pd.DataFrame:
                 "owner_claim_age": 67,
                 "spouse_claim_age": 67,
                 "owner_ss_base": 0.0,
+    "owner_longevity_age": 95,
                 "spouse_ss_base": 0.0,
+    "spouse_longevity_age": 95,
                 "earned_income_annual": 0.0,
                 "earned_income_start_year": 2024,
                 "earned_income_end_year": 2024,
@@ -4090,37 +4159,53 @@ def calculate_aca_cost(magi: float, year: int, aca_lives: int) -> float:
     return interpolate_cost_from_table(magi, two_person_table) / 2.0
 
 
-def calculate_irmaa_cost(magi: float, year: int, medicare_lives: int) -> float:
+def calculate_irmaa_cost(magi: float, year: int, medicare_lives: int, filing_status: str = "MFJ") -> float:
     magi = max(0.0, float(magi))
     if medicare_lives <= 0:
         return 0.0
 
+    filing_status = str(filing_status or "MFJ")
     table = get_irmaa_table(year)
+    threshold_factor = 1.0 if filing_status == "MFJ" else 0.5
     monthly_total_for_household = 0.0
 
     for start_exclusive, end_inclusive, monthly_total in table:
-        if magi > start_exclusive and magi <= end_inclusive:
-            monthly_total_for_household = monthly_total
+        scaled_start = float(start_exclusive) * threshold_factor
+        scaled_end = float(end_inclusive) * threshold_factor
+        if magi > scaled_start and magi <= scaled_end:
+            monthly_total_for_household = float(monthly_total) * threshold_factor
             break
 
     annual_household = monthly_total_for_household * 12.0
-    return annual_household * (medicare_lives / 2.0)
+    if filing_status == "MFJ":
+        return annual_household * (medicare_lives / 2.0)
+    return annual_household
 
 
 # -----------------------------
 # COVERAGE STATUS
 # -----------------------------
-def get_coverage_status(year: int, primary_aca_end_year: int, spouse_aca_end_year: int) -> dict:
-    primary_on_aca = year <= int(primary_aca_end_year)
-    spouse_on_aca = year <= int(spouse_aca_end_year)
+def get_coverage_status(year: int, primary_aca_end_year: int, spouse_aca_end_year: int, params: dict | None = None) -> dict:
+    life = get_life_status_for_year(year, params or {}) if params is not None else None
+    owner_alive = True if life is None else bool(life["owner_alive"])
+    spouse_alive = True if life is None else bool(life["spouse_alive"])
+
+    primary_on_aca = owner_alive and year <= int(primary_aca_end_year)
+    spouse_on_aca = spouse_alive and year <= int(spouse_aca_end_year)
     aca_lives = int(primary_on_aca) + int(spouse_on_aca)
-    medicare_lives = 2 - aca_lives
+    living_lives = int(owner_alive) + int(spouse_alive)
+    medicare_lives = max(0, living_lives - aca_lives)
 
     return {
         "primary_on_aca": primary_on_aca,
         "spouse_on_aca": spouse_on_aca,
         "aca_lives": aca_lives,
         "medicare_lives": medicare_lives,
+        "owner_alive": owner_alive,
+        "spouse_alive": spouse_alive,
+        "living_lives": living_lives,
+        "filing_status": (life or {}).get("filing_status", "MFJ" if living_lives >= 2 else "Single"),
+        "household_phase": (life or {}).get("household_phase", "Both Alive"),
     }
 
 
@@ -4358,26 +4443,36 @@ def uniform_lifetime_divisor(age: int) -> float:
 
 def estimate_household_rmd_for_year(year: int, trad_balance: float, params: dict) -> float:
     """
-    Household simplification: once the first spouse reaches RMD age, apply a Uniform Lifetime
-    divisor based on the older spouse's age to the combined traditional balance.
+    Household simplification: use the living household member(s) only.
+    While both spouses are alive, use the older living spouse's age against the combined
+    Traditional IRA balance. After the first death, use the surviving spouse's age.
     """
-    owner_age = int(params.get("owner_current_age", 0)) + (year - START_YEAR)
-    spouse_age = int(params.get("spouse_current_age", 0)) + (year - START_YEAR)
+    life = get_life_status_for_year(year, params)
+    owner_age = int(life["owner_age"])
+    spouse_age = int(life["spouse_age"])
+    owner_alive = bool(life["owner_alive"])
+    spouse_alive = bool(life["spouse_alive"])
     owner_start_age = int(params.get("owner_rmd_start_age", 73))
     spouse_start_age = int(params.get("spouse_rmd_start_age", 73))
     owner_rmd_start = int(params.get("owner_rmd_start", START_YEAR + max(0, owner_start_age - int(params.get("owner_current_age", 0)))))
     spouse_rmd_start = int(params.get("spouse_rmd_start", START_YEAR + max(0, spouse_start_age - int(params.get("spouse_current_age", 0)))))
 
-    if year < min(owner_rmd_start, spouse_rmd_start) and year < max(owner_rmd_start, spouse_rmd_start):
-        # Neither spouse yet at RMD age
-        if year < owner_rmd_start and year < spouse_rmd_start:
-            return 0.0
-
-    if trad_balance <= 0:
+    if trad_balance <= 0 or not (owner_alive or spouse_alive):
         return 0.0
 
-    oldest_age = max(owner_age, spouse_age)
-    divisor = uniform_lifetime_divisor(oldest_age)
+    active_rmd_years = []
+    active_ages = []
+    if owner_alive:
+        active_rmd_years.append(owner_rmd_start)
+        active_ages.append(owner_age)
+    if spouse_alive:
+        active_rmd_years.append(spouse_rmd_start)
+        active_ages.append(spouse_age)
+
+    if year < min(active_rmd_years):
+        return 0.0
+
+    divisor = uniform_lifetime_divisor(max(active_ages))
     return max(0.0, float(trad_balance) / divisor)
 
 def build_common_params(inputs: dict) -> dict:
@@ -4408,6 +4503,8 @@ def build_common_params(inputs: dict) -> dict:
         "spouse_ss_start": spouse_ss_start,
         "owner_ss_annual": owner_ss_annual,
         "spouse_ss_annual": spouse_ss_annual,
+        "owner_longevity_age": int(inputs.get("owner_longevity_age", 95)),
+        "spouse_longevity_age": int(inputs.get("spouse_longevity_age", 95)),
         "earned_income_annual": float(inputs.get("earned_income_annual", 0.0)),
         "earned_income_start_year": int(inputs.get("earned_income_start_year", START_YEAR)),
         "earned_income_end_year": int(inputs.get("earned_income_end_year", START_YEAR - 1)),
@@ -4663,6 +4760,8 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     spouse_ss_annual = float(params["spouse_ss_annual"])
     primary_aca_end_year = int(params["primary_aca_end_year"])
     spouse_aca_end_year = int(params["spouse_aca_end_year"])
+    life = get_life_status_for_year(year, params)
+    filing_status = str(life["filing_status"])
 
     soy_trad = trad
     soy_roth = roth
@@ -4683,14 +4782,31 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         trad -= rmd_for_year
         cash += rmd_for_year
 
-    owner_ss = owner_ss_annual if year >= owner_ss_start else 0.0
-    spouse_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
-    total_ss = owner_ss + spouse_ss
+    owner_base_ss = owner_ss_annual if year >= owner_ss_start else 0.0
+    spouse_base_ss = spouse_ss_annual if year >= spouse_ss_start else 0.0
+    survivor_benefit = max(owner_ss_annual, spouse_ss_annual) if (life["owner_alive"] or life["spouse_alive"]) else 0.0
+
+    if life["owner_alive"] and life["spouse_alive"]:
+        owner_ss = owner_base_ss
+        spouse_ss = spouse_base_ss
+        total_ss = owner_ss + spouse_ss
+    elif life["spouse_alive"]:
+        owner_ss = 0.0
+        spouse_ss = survivor_benefit
+        total_ss = spouse_ss
+    elif life["owner_alive"]:
+        owner_ss = survivor_benefit
+        spouse_ss = 0.0
+        total_ss = owner_ss
+    else:
+        owner_ss = 0.0
+        spouse_ss = 0.0
+        total_ss = 0.0
     earned_income = get_earned_income_for_year(year, params)
     cash += total_ss + earned_income
 
     # Coverage status is based on the calendar year, not the funding sequence
-    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year)
+    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year, params=params)
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
 
@@ -4713,6 +4829,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         total_ss,
         year,
         realized_ltcg=spending_realized_ltcg,
+        filing_status=filing_status,
     )
     baseline_magi = calculate_magi(baseline_tax_info["agi"], year)
 
@@ -4730,6 +4847,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         total_ss,
         year,
         realized_ltcg=realized_ltcg,
+        filing_status=filing_status,
     )
     federal_tax = tax_info["federal_tax"]
     estimated_state_tax = max(
@@ -4754,6 +4872,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         total_ss,
         year,
         realized_ltcg=realized_ltcg,
+        filing_status=filing_status,
     )
     federal_tax = tax_info["federal_tax"]
     state_tax = max(0.0, float(tax_info["ordinary_taxable_income"] + tax_info.get("ltcg_taxable_income", 0.0))) * float(params.get("state_tax_rate", 0.0399))
@@ -4761,7 +4880,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
 
     # 6) ACA / IRMAA are determined off final MAGI
     aca_cost = calculate_aca_cost(magi, year, aca_lives)
-    irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
+    irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives, filing_status=filing_status)
 
     # 7) Pay ACA / IRMAA; brokerage sales here can also realize additional LTCG
     aca_result = withdraw_for_spending(aca_cost, trad, roth, brokerage, cash, brokerage_basis)
@@ -4786,6 +4905,7 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         total_ss,
         year,
         realized_ltcg=realized_ltcg,
+        filing_status=filing_status,
     )
     federal_tax = tax_info["federal_tax"]
     state_tax = max(
@@ -4837,6 +4957,10 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
         "Spending Funded From Roth": float(spend_result["from_roth"]),
         "Annual Spending Need": annual_spending,
         "Household Reference Age": get_household_reference_age(year, params),
+        "Household Phase": life["household_phase"],
+        "Tax Filing Status": filing_status,
+        "Owner Alive": bool(life["owner_alive"]),
+        "Spouse Alive": bool(life["spouse_alive"]),
         "Other Ordinary Income": other_ordinary_income,
         "Brokerage Realized LTCG": realized_ltcg,
         "Taxable SS": tax_info["taxable_ss"],
@@ -6495,6 +6619,7 @@ def evaluate_annual_conversion_candidate(
     state_tax_rate: float,
     aca_lives: int,
     medicare_lives: int,
+    filing_status: str = "MFJ",
 ) -> dict:
     conversion = max(0.0, float(conversion))
     other_ordinary_income = max(0.0, float(other_ordinary_income))
@@ -6506,6 +6631,7 @@ def evaluate_annual_conversion_candidate(
         total_ss,
         year,
         realized_ltcg=realized_ltcg,
+        filing_status=filing_status,
     )
     magi = calculate_magi(tax_info['agi'], year)
     state_tax = max(
@@ -6513,7 +6639,7 @@ def evaluate_annual_conversion_candidate(
         float(tax_info['ordinary_taxable_income'] + tax_info.get('ltcg_taxable_income', 0.0))
     ) * float(state_tax_rate)
     aca_cost = calculate_aca_cost(magi, year, aca_lives)
-    irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives)
+    irmaa_cost = calculate_irmaa_cost(magi, year, medicare_lives, filing_status=filing_status)
     total_drag = float(tax_info['federal_tax'] + state_tax + aca_cost + irmaa_cost)
     agi = float(tax_info['agi'])
     total_tax = float(tax_info['federal_tax'] + state_tax)
@@ -6523,7 +6649,7 @@ def evaluate_annual_conversion_candidate(
     # "What percent of this conversion is being consumed by total government drag?"
     all_in_effective_rate = (total_drag / conversion) if conversion > 0 else None
     aca_limit = get_aca_magi_limit(year, aca_lives) if aca_lives > 0 else None
-    first_irmaa_cliff = get_first_irmaa_cliff_threshold(year) if medicare_lives > 0 else None
+    first_irmaa_cliff = get_first_irmaa_cliff_threshold(year) * filing_status_factor(filing_status) if medicare_lives > 0 else None
     aca_headroom_remaining = max(0.0, float(aca_limit) - float(magi)) if aca_limit is not None else None
     irmaa_headroom_remaining = max(0.0, float(first_irmaa_cliff) - float(magi)) if first_irmaa_cliff is not None else None
 
@@ -6549,6 +6675,7 @@ def evaluate_annual_conversion_candidate(
         'ACA Headroom Remaining': aca_headroom_remaining,
         'IRMAA Headroom Remaining': irmaa_headroom_remaining,
         'Marginal Rate': float(tax_info['marginal_rate']),
+        'Filing Status': str(filing_status),
     }
 
 
@@ -6583,6 +6710,7 @@ def find_max_conversion_under_rule(
     max_conversion: float,
     step_size: float,
     predicate,
+    filing_status: str = "MFJ",
 ) -> tuple[float, dict]:
     best_conversion = 0.0
     best_candidate = evaluate_annual_conversion_candidate(
@@ -6594,6 +6722,7 @@ def find_max_conversion_under_rule(
         state_tax_rate,
         aca_lives,
         medicare_lives,
+        filing_status=filing_status,
     )
 
     steps = int(max(0, math.floor(float(max_conversion) / float(step_size))))
@@ -6608,6 +6737,7 @@ def find_max_conversion_under_rule(
             state_tax_rate,
             aca_lives,
             medicare_lives,
+            filing_status=filing_status,
         )
         if predicate(candidate):
             best_conversion = conversion
@@ -6643,9 +6773,10 @@ def run_annual_conversion_calculator(
     future_rate_info = estimate_future_marginal_rate(calc_year, annual_state, params)
     estimated_future_marginal_rate = float(future_rate_info.get('estimated_future_marginal_rate', 0.0))
 
-    coverage = get_coverage_status(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']))
+    coverage = get_coverage_status(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']), params=params)
     aca_lives = int(coverage['aca_lives'])
     medicare_lives = int(coverage['medicare_lives'])
+    filing_status = str(coverage.get('filing_status', 'MFJ'))
     state_tax_rate = float(inputs.get('state_tax_rate', 0.0399))
     safety_buffer = max(0.0, float(income_safety_buffer))
 
@@ -6658,16 +6789,17 @@ def run_annual_conversion_calculator(
         state_tax_rate,
         aca_lives,
         medicare_lives,
+        filing_status=filing_status,
     )
 
-    bracket_tops = get_bracket_tops(calc_year)
+    bracket_tops = get_bracket_tops(calc_year, filing_status)
     target_bracket_top = float(bracket_tops[target_bracket])
     bracket_limit = max(0.0, target_bracket_top - safety_buffer)
 
     aca_limit = get_aca_magi_limit(calc_year, aca_lives) if aca_lives > 0 else None
     aca_limit_buffered = max(0.0, float(aca_limit) - safety_buffer) if aca_limit is not None else None
 
-    first_irmaa_cliff = get_first_irmaa_cliff_threshold(calc_year) if medicare_lives > 0 else None
+    first_irmaa_cliff = get_first_irmaa_cliff_threshold(calc_year) * filing_status_factor(filing_status) if medicare_lives > 0 else None
     first_irmaa_cliff_buffered = max(0.0, float(first_irmaa_cliff) - safety_buffer) if first_irmaa_cliff is not None else None
 
     threshold_rows = []
@@ -6684,6 +6816,7 @@ def run_annual_conversion_calculator(
         max_conversion,
         step_size,
         lambda c: float(c['Ordinary Taxable Income']) <= bracket_limit,
+        filing_status=filing_status,
     )
     threshold_rows.append({
         'Rule': f'Top of {target_bracket} bracket',
@@ -6717,6 +6850,7 @@ def run_annual_conversion_calculator(
             max_conversion,
             step_size,
             lambda c: float(c['MAGI']) <= float(aca_limit_buffered),
+            filing_status=filing_status,
         )
         threshold_rows.append({
             'Rule': 'ACA MAGI limit',
@@ -6768,6 +6902,7 @@ def run_annual_conversion_calculator(
             max_conversion,
             step_size,
             lambda c: float(c['MAGI']) <= float(first_irmaa_cliff_buffered),
+            filing_status=filing_status,
         )
         threshold_rows.append({
             'Rule': 'First IRMAA cliff',
@@ -6818,6 +6953,7 @@ def run_annual_conversion_calculator(
         state_tax_rate,
         aca_lives,
         medicare_lives,
+        filing_status=filing_status,
     )
 
     def _comparison_stop_reason(scenario_label: str, candidate: dict) -> str:
@@ -7250,27 +7386,23 @@ ANNUAL_TARGET_BRACKET_OPTIONS = ["12%", "22%", "24%"]
 
 
 def annual_status_factor(filing_status: str) -> float:
-    return 1.0 if filing_status == "MFJ" else 0.5
+    return filing_status_factor(filing_status)
 
 
 def get_annual_standard_deduction_default(year: int, filing_status: str) -> float:
-    return float(get_standard_deduction(year)) * annual_status_factor(filing_status)
+    return float(get_standard_deduction(year, filing_status))
 
 
 def get_annual_federal_brackets(year: int, filing_status: str) -> list[tuple[float, float]]:
-    factor = annual_status_factor(filing_status)
-    return [(float(start) * factor, float(rate)) for start, rate in get_federal_brackets(year)]
+    return get_federal_brackets(year, filing_status)
 
 
 def get_annual_ltcg_brackets(year: int, filing_status: str) -> list[tuple[float, float]]:
-    factor = annual_status_factor(filing_status)
-    return [(float(start) * factor, float(rate)) for start, rate in get_ltcg_brackets(year)]
+    return get_ltcg_brackets(year, filing_status)
 
 
 def get_annual_bracket_tops(year: int, filing_status: str) -> dict:
-    factor = annual_status_factor(filing_status)
-    base = get_bracket_tops(year)
-    return {k: float(v) * factor for k, v in base.items()}
+    return get_bracket_tops(year, filing_status)
 
 
 def calculate_taxable_ss_annual(total_ss: float, non_ss_income: float, filing_status: str) -> tuple[float, float]:
@@ -7950,6 +8082,8 @@ def render_shared_household_inputs() -> dict:
 
         owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
         spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
+        owner_longevity_age = st.number_input("Owner Longevity Age", min_value=0, value=int(st.session_state.get("owner_longevity_age", DEFAULT_APP_STATE["owner_longevity_age"])), step=1, key="owner_longevity_age")
+        spouse_longevity_age = st.number_input("Spouse Longevity Age", min_value=0, value=int(st.session_state.get("spouse_longevity_age", DEFAULT_APP_STATE["spouse_longevity_age"])), step=1, key="spouse_longevity_age")
 
         col1, col2 = st.columns(2)
 
@@ -8088,6 +8222,8 @@ def render_shared_household_inputs() -> dict:
         "spouse_claim_age": spouse_claim_age,
         "owner_ss_base": owner_ss_base,
         "spouse_ss_base": spouse_ss_base,
+        "owner_longevity_age": owner_longevity_age,
+        "spouse_longevity_age": spouse_longevity_age,
         "earned_income_annual": float(st.session_state.get("earned_income_annual", earned_income_annual)),
         "earned_income_start_year": int(st.session_state.get("earned_income_start_year", earned_income_start_year)),
         "earned_income_end_year": int(st.session_state.get("earned_income_end_year", earned_income_end_year)),
@@ -8955,6 +9091,8 @@ def render_conversion_page() -> None:
             "spouse_claim_age": int(st.session_state.get("spouse_claim_age", DEFAULT_APP_STATE["spouse_claim_age"])),
             "owner_ss_base": float(st.session_state.get("owner_ss_base", DEFAULT_APP_STATE["owner_ss_base"])),
             "spouse_ss_base": float(st.session_state.get("spouse_ss_base", DEFAULT_APP_STATE["spouse_ss_base"])),
+            "owner_longevity_age": int(st.session_state.get("owner_longevity_age", DEFAULT_APP_STATE["owner_longevity_age"])),
+            "spouse_longevity_age": int(st.session_state.get("spouse_longevity_age", DEFAULT_APP_STATE["spouse_longevity_age"])),
             "earned_income_annual": float(st.session_state.get("earned_income_annual", DEFAULT_APP_STATE["earned_income_annual"])),
             "earned_income_start_year": int(st.session_state.get("earned_income_start_year", DEFAULT_APP_STATE["earned_income_start_year"])),
             "earned_income_end_year": int(st.session_state.get("earned_income_end_year", DEFAULT_APP_STATE["earned_income_end_year"])),
