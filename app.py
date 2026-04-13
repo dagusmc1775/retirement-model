@@ -28,8 +28,8 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v309"
-APP_STATE_VERSION = "v106"
+APP_VERSION = "v310"
+APP_STATE_VERSION = "v107"
 
 
 
@@ -1069,7 +1069,7 @@ def build_ss_optimizer_fact_rows(
     base_snapshot["integrity_mode"] = False
     base_snapshot["strict_repeatability_check"] = False
     fact_key = build_scenario_fingerprint(
-        {**base_snapshot, "combos": [(int(a), int(b)) for a, b in combos], "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda)},
+        {**base_snapshot, "combos": [(int(a), int(b)) for a, b in combos], "trad_balance_penalty_lambda": float(trad_balance_penalty_lambda), "app_version": APP_VERSION},
         max_conversion,
         step_size,
     )
