@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v313"
+APP_VERSION = "v315"
 APP_STATE_VERSION = "v107"
 
 
@@ -134,6 +134,7 @@ DEFAULT_APP_STATE = {
     "optimizer_rerun_best_validation": False,
     "owner_claim_age": 62,
     "owner_current_age": 0,
+    "owner_longevity_age": 95,
     "owner_ss_base": 0.0,
     "post_aca_target_bracket": "22%",
     "primary_aca_end_year": START_YEAR,
@@ -147,6 +148,7 @@ DEFAULT_APP_STATE = {
     "spouse_aca_end_year": START_YEAR,
     "spouse_claim_age": 62,
     "spouse_current_age": 0,
+    "spouse_longevity_age": 95,
     "spouse_ss_base": 0.0,
     "state_tax_rate": 0.0399,
     "planning_profile": "Balanced",
@@ -4124,6 +4126,51 @@ def get_coverage_status(year: int, primary_aca_end_year: int, spouse_aca_end_yea
     }
 
 
+def get_household_life_status(year: int, params: dict) -> dict:
+    owner_age = int(params.get("owner_current_age", 0)) + (int(year) - START_YEAR)
+    spouse_age = int(params.get("spouse_current_age", 0)) + (int(year) - START_YEAR)
+    owner_alive = owner_age <= int(params.get("owner_longevity_age", 95))
+    spouse_alive = spouse_age <= int(params.get("spouse_longevity_age", 95))
+
+    if owner_alive and spouse_alive:
+        phase = "Both Alive"
+        filing_status = "MFJ"
+    elif owner_alive and not spouse_alive:
+        phase = "Spouse Dead (Owner Survivor)"
+        filing_status = "Single"
+    elif spouse_alive and not owner_alive:
+        phase = "Owner Dead (Spouse Survivor)"
+        filing_status = "Single"
+    else:
+        phase = "No Household Members Alive"
+        filing_status = "Single"
+
+    return {
+        "owner_age": owner_age,
+        "spouse_age": spouse_age,
+        "owner_alive": owner_alive,
+        "spouse_alive": spouse_alive,
+        "household_phase": phase,
+        "projected_filing_status": filing_status,
+    }
+
+
+def build_survivor_phase_preview_df(params: dict) -> pd.DataFrame:
+    rows = []
+    for year in range(START_YEAR, END_YEAR + 1):
+        life = get_household_life_status(year, params)
+        rows.append({
+            "Year": year,
+            "Owner Age": int(life["owner_age"]),
+            "Spouse Age": int(life["spouse_age"]),
+            "Owner Alive": bool(life["owner_alive"]),
+            "Spouse Alive": bool(life["spouse_alive"]),
+            "Household Phase": str(life["household_phase"]),
+            "Projected Filing Status": str(life["projected_filing_status"]),
+        })
+    return pd.DataFrame(rows)
+
+
 # -----------------------------
 # SOCIAL SECURITY
 # -----------------------------
@@ -4418,6 +4465,8 @@ def build_common_params(inputs: dict) -> dict:
         "rmd_era_target_bracket": str(inputs.get("rmd_era_target_bracket", "22%")),
         "owner_current_age": int(inputs["owner_current_age"]),
         "spouse_current_age": int(inputs["spouse_current_age"]),
+        "owner_longevity_age": int(inputs.get("owner_longevity_age", 95)),
+        "spouse_longevity_age": int(inputs.get("spouse_longevity_age", 95)),
         "owner_rmd_start_age": int(owner_rmd_start_age),
         "spouse_rmd_start_age": int(spouse_rmd_start_age),
         "owner_rmd_start": int(owner_rmd_start),
@@ -7950,6 +7999,8 @@ def render_shared_household_inputs() -> dict:
 
         owner_current_age = st.number_input("Owner Current Age", min_value=0, value=int(st.session_state.get("owner_current_age", DEFAULT_APP_STATE["owner_current_age"])), step=1, key="owner_current_age")
         spouse_current_age = st.number_input("Spouse Current Age", min_value=0, value=int(st.session_state.get("spouse_current_age", DEFAULT_APP_STATE["spouse_current_age"])), step=1, key="spouse_current_age")
+        owner_longevity_age = st.number_input("Owner Longevity Age", min_value=0, value=int(st.session_state.get("owner_longevity_age", DEFAULT_APP_STATE["owner_longevity_age"])), step=1, key="owner_longevity_age")
+        spouse_longevity_age = st.number_input("Spouse Longevity Age", min_value=0, value=int(st.session_state.get("spouse_longevity_age", DEFAULT_APP_STATE["spouse_longevity_age"])), step=1, key="spouse_longevity_age")
 
         col1, col2 = st.columns(2)
 
@@ -8084,6 +8135,8 @@ def render_shared_household_inputs() -> dict:
         "conversion_tax_funding_policy": conversion_tax_funding_policy,
         "owner_current_age": owner_current_age,
         "spouse_current_age": spouse_current_age,
+        "owner_longevity_age": owner_longevity_age,
+        "spouse_longevity_age": spouse_longevity_age,
         "owner_claim_age": owner_claim_age,
         "spouse_claim_age": spouse_claim_age,
         "owner_ss_base": owner_ss_base,
@@ -8828,6 +8881,27 @@ def render_conversion_page() -> None:
                         else:
                             fmt[col] = "${:,.0f}"
                     st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+                    st.download_button(
+                        "Download Chosen Year-by-Year Path CSV",
+                        data=path_display_df.to_csv(index=False),
+                        file_name="break_even_governor_chosen_year_by_year_path.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="download_beg_chosen_path_csv_button",
+                    )
+                    with st.expander("Survivor Phase Preview (first-step scaffolding only)", expanded=False):
+                        st.caption("This preview is based on longevity inputs only. It does not yet change Social Security, taxes, or optimizer math in v315.")
+                        survivor_phase_preview_df = build_survivor_phase_preview_df(live_governor_inputs)
+                        if survivor_phase_preview_df is not None and not survivor_phase_preview_df.empty:
+                            st.dataframe(survivor_phase_preview_df, use_container_width=True)
+                            st.download_button(
+                                "Download Survivor Phase Preview CSV",
+                                data=survivor_phase_preview_df.to_csv(index=False),
+                                file_name="survivor_phase_preview.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key="download_survivor_phase_preview_csv_button",
+                            )
 
                 funding_debug_df = build_funding_debug_view_df(result["df"])
                 if funding_debug_df is not None and not funding_debug_df.empty:
@@ -8852,15 +8926,22 @@ def render_conversion_page() -> None:
                         if pd.api.types.is_numeric_dtype(series):
                             funding_fmt[col] = "${:,.0f}"
                     st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
-
-                if path_display_df is not None and not path_display_df.empty:
                     st.download_button(
-                        "Download Chosen Year-by-Year Path CSV",
-                        data=path_display_df.to_csv(index=False),
-                        file_name="chosen_year_by_year_path.csv",
+                        "Download Funding Trace + Income View CSV",
+                        data=funding_debug_df.to_csv(index=False),
+                        file_name="break_even_governor_funding_trace_income_view.csv",
                         mime="text/csv",
                         use_container_width=True,
+                        key="download_beg_funding_trace_csv_button",
                     )
+
+                st.download_button(
+                    "Download Chosen Path (CSV)",
+                    data=result["df"].to_csv(index=False),
+                    file_name="break_even_governor_chosen_path.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
                 selected_diag_df = build_beg_selected_diagnostics_df(result)
                 effective_beg_settings_df = build_effective_beg_settings_df(live_governor_inputs, max_conversion, step_size)
@@ -8878,6 +8959,14 @@ def render_conversion_page() -> None:
                             money_mask = display_settings_df["Setting"].isin(["Max annual conversion", "Step size", "Target Traditional IRA"])
                             display_settings_df.loc[money_mask, "Value"] = display_settings_df.loc[money_mask, "Value"].map(lambda v: f"${float(v):,.0f}")
                             st.dataframe(display_settings_df, hide_index=True, use_container_width=True)
+                            st.download_button(
+                                "Download Resolved Governor Settings CSV",
+                                data=display_settings_df.to_csv(index=False),
+                                file_name="break_even_governor_resolved_settings.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key="download_beg_resolved_settings_csv_button",
+                            )
                         if selected_diag_df is not None and not selected_diag_df.empty:
                             diag_fmt = {}
                             bool_cols = {
@@ -8899,6 +8988,14 @@ def render_conversion_page() -> None:
                             if "Year" in diag_fmt:
                                 diag_fmt["Year"] = "{:.0f}"
                             st.dataframe(selected_diag_df.style.format(diag_fmt), use_container_width=True)
+                            st.download_button(
+                                "Download Chosen-path BEG Diagnostics CSV",
+                                data=selected_diag_df.to_csv(index=False),
+                                file_name="break_even_governor_chosen_path_beg_diagnostics.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key="download_beg_selected_diag_csv_button",
+                            )
 
                 focused_decision_df = build_beg_decision_focus_df(result.get("decision_df"))
                 st.subheader("Year-by-Year Decision Diagnostics")
@@ -8916,13 +9013,22 @@ def render_conversion_page() -> None:
                         if "Year" in focus_fmt:
                             focus_fmt["Year"] = "{:.0f}"
                         st.dataframe(focused_decision_df.style.format(focus_fmt), use_container_width=True)
+                        st.download_button(
+                            "Download Focused Candidate Diagnostics CSV",
+                            data=focused_decision_df.to_csv(index=False),
+                            file_name="break_even_governor_focused_candidate_diagnostics.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                            key="download_beg_focused_decision_csv_button",
+                        )
                 st.dataframe(result["decision_df"], use_container_width=True)
                 st.download_button(
-                    "Download Decision Diagnostics (CSV)",
+                    "Download Full Decision Diagnostics CSV",
                     data=result["decision_df"].to_csv(index=False),
-                    file_name="break_even_governor_decisions.csv",
+                    file_name="break_even_governor_full_decision_diagnostics.csv",
                     mime="text/csv",
                     use_container_width=True,
+                    key="download_beg_full_decision_csv_button",
                 )
 
 
