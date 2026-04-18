@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v310"
+APP_VERSION = "v312"
 APP_STATE_VERSION = "v107"
 
 
@@ -3660,23 +3660,194 @@ def filing_status_factor(filing_status: str) -> float:
     return 1.0 if str(filing_status or "MFJ") == "MFJ" else 0.5
 
 
+
+def get_standard_deduction_v310(year: int) -> float:
+    return float(get_latest_year_value(STANDARD_DEDUCTION_BY_YEAR, year))
+
+
+def get_federal_brackets_v310(year: int):
+    return get_latest_year_value(FEDERAL_BRACKETS_MFJ_BY_YEAR, year)
+
+
+def get_bracket_tops_v310(year: int):
+    return get_latest_year_value(BRACKET_TOPS_MFJ_BY_YEAR, year)
+
+
+def get_ltcg_brackets_v310(year: int):
+    return get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)
+
+
+def calculate_progressive_tax_v310(taxable_income: float, year: int) -> float:
+    taxable_income = max(0.0, float(taxable_income))
+    tax = 0.0
+    brackets = get_federal_brackets_v310(year)
+
+    for i, (lower_bound, rate) in enumerate(brackets):
+        upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
+        if taxable_income > lower_bound:
+            taxed_amount = min(taxable_income, upper_bound) - lower_bound
+            tax += taxed_amount * rate
+        else:
+            break
+
+    return max(0.0, tax)
+
+
+def get_marginal_rate_from_taxable_income_v310(taxable_income: float, year: int) -> float:
+    taxable_income = max(0.0, float(taxable_income))
+    brackets = get_federal_brackets_v310(year)
+    rate = brackets[0][1]
+
+    for i, (lower_bound, bracket_rate) in enumerate(brackets):
+        upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
+        if taxable_income > lower_bound:
+            rate = bracket_rate
+        if taxable_income <= upper_bound:
+            break
+
+    return float(rate)
+
+
+def calculate_taxable_ss_v310(total_ss: float, other_income: float) -> float:
+    total_ss = max(0.0, float(total_ss))
+    other_income = max(0.0, float(other_income))
+
+    provisional_income = other_income + 0.5 * total_ss
+
+    if provisional_income <= 32000:
+        taxable_ss = 0.0
+    elif provisional_income <= 44000:
+        taxable_ss = 0.5 * (provisional_income - 32000)
+    else:
+        taxable_ss = 6000.0 + 0.85 * (provisional_income - 44000)
+
+    return max(0.0, min(taxable_ss, 0.85 * total_ss))
+
+
+def calculate_ltcg_tax_v310(ordinary_taxable_income: float, ltcg_taxable_income: float, year: int) -> float:
+    ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
+    ltcg_taxable_income = max(0.0, float(ltcg_taxable_income))
+    if ltcg_taxable_income <= 0.0:
+        return 0.0
+
+    brackets = get_ltcg_brackets_v310(year)
+    tax = 0.0
+    remaining = ltcg_taxable_income
+    stack_start = ordinary_taxable_income
+
+    for i, (lower_bound, rate) in enumerate(brackets):
+        upper_bound = brackets[i + 1][0] if i + 1 < len(brackets) else float("inf")
+        effective_lower = max(stack_start, lower_bound)
+        if upper_bound <= effective_lower:
+            continue
+        capacity = upper_bound - effective_lower
+        taxed_amount = min(remaining, capacity)
+        if taxed_amount > 0:
+            tax += taxed_amount * rate
+            remaining -= taxed_amount
+            stack_start = effective_lower + taxed_amount
+        if remaining <= 0:
+            break
+
+    if remaining > 0:
+        tax += remaining * brackets[-1][1]
+
+    return max(0.0, tax)
+
+
+def calculate_federal_tax_v310(other_ordinary_income: float, total_ss: float, year: int, realized_ltcg: float = 0.0) -> dict:
+    other_ordinary_income = max(0.0, float(other_ordinary_income))
+    realized_ltcg = max(0.0, float(realized_ltcg))
+    taxable_ss = calculate_taxable_ss_v310(total_ss, other_ordinary_income + realized_ltcg)
+    agi = other_ordinary_income + taxable_ss + realized_ltcg
+
+    standard_deduction = get_standard_deduction_v310(year)
+    ordinary_income_before_deduction = other_ordinary_income + taxable_ss
+    ordinary_taxable_income = max(0.0, ordinary_income_before_deduction - standard_deduction)
+    deduction_remaining_for_ltcg = max(0.0, standard_deduction - ordinary_income_before_deduction)
+    ltcg_taxable_income = max(0.0, realized_ltcg - deduction_remaining_for_ltcg)
+    taxable_income = ordinary_taxable_income + ltcg_taxable_income
+
+    ordinary_tax = calculate_progressive_tax_v310(ordinary_taxable_income, year)
+    ltcg_tax = calculate_ltcg_tax_v310(ordinary_taxable_income, ltcg_taxable_income, year)
+    federal_tax = ordinary_tax + ltcg_tax
+    marginal_rate = get_marginal_rate_from_taxable_income_v310(ordinary_taxable_income, year)
+
+    return {
+        "taxable_ss": taxable_ss,
+        "agi": agi,
+        "ordinary_income_before_deduction": ordinary_income_before_deduction,
+        "standard_deduction": standard_deduction,
+        "ordinary_taxable_income": ordinary_taxable_income,
+        "ltcg_taxable_income": ltcg_taxable_income,
+        "taxable_income": taxable_income,
+        "ordinary_tax": ordinary_tax,
+        "ltcg_tax": ltcg_tax,
+        "federal_tax": federal_tax,
+        "marginal_rate": marginal_rate,
+        "filing_status": "MFJ",
+    }
+
+
+def get_coverage_status_v310(year: int, primary_aca_end_year: int, spouse_aca_end_year: int) -> dict:
+    primary_on_aca = year <= int(primary_aca_end_year)
+    spouse_on_aca = year <= int(spouse_aca_end_year)
+    aca_lives = int(primary_on_aca) + int(spouse_on_aca)
+    medicare_lives = 2 - aca_lives
+
+    return {
+        "primary_on_aca": primary_on_aca,
+        "spouse_on_aca": spouse_on_aca,
+        "aca_lives": aca_lives,
+        "medicare_lives": medicare_lives,
+        "owner_alive": True,
+        "spouse_alive": True,
+        "living_lives": 2,
+        "filing_status": "MFJ",
+        "household_phase": "Both Alive",
+    }
+
+
+def calculate_irmaa_cost_v310(magi: float, year: int, medicare_lives: int) -> float:
+    magi = max(0.0, float(magi))
+    if medicare_lives <= 0:
+        return 0.0
+
+    table = get_irmaa_table(year)
+    monthly_total_for_household = 0.0
+
+    for start_exclusive, end_inclusive, monthly_total in table:
+        if magi > float(start_exclusive) and magi <= float(end_inclusive):
+            monthly_total_for_household = float(monthly_total)
+            break
+
+    return max(0.0, monthly_total_for_household * 12.0)
+
 def get_standard_deduction(year: int, filing_status: str = "MFJ") -> float:
+    if str(filing_status or "MFJ") == "MFJ":
+        return get_standard_deduction_v310(year)
     base = float(get_latest_year_value(STANDARD_DEDUCTION_BY_YEAR, year))
     return base * filing_status_factor(filing_status)
 
 
 def get_federal_brackets(year: int, filing_status: str = "MFJ"):
+    if str(filing_status or "MFJ") == "MFJ":
+        return get_federal_brackets_v310(year)
     factor = filing_status_factor(filing_status)
     return [(float(start) * factor, float(rate)) for start, rate in get_latest_year_value(FEDERAL_BRACKETS_MFJ_BY_YEAR, year)]
 
 
 def get_bracket_tops(year: int, filing_status: str = "MFJ"):
+    if str(filing_status or "MFJ") == "MFJ":
+        return get_bracket_tops_v310(year)
     factor = filing_status_factor(filing_status)
     base = get_latest_year_value(BRACKET_TOPS_MFJ_BY_YEAR, year)
     return {k: float(v) * factor for k, v in base.items()}
 
 
 def get_ltcg_brackets(year: int, filing_status: str = "MFJ"):
+    if str(filing_status or "MFJ") == "MFJ":
+        return get_ltcg_brackets_v310(year)
     factor = filing_status_factor(filing_status)
     return [(float(start) * factor, float(rate)) for start, rate in get_latest_year_value(LTCG_BRACKETS_MFJ_BY_YEAR, year)]
 
@@ -3719,6 +3890,8 @@ def interpolate_cost_from_table(income: float, points: list) -> float:
 # TAX HELPERS
 # -----------------------------
 def calculate_progressive_tax(taxable_income: float, year: int, filing_status: str = "MFJ") -> float:
+    if str(filing_status or "MFJ") == "MFJ":
+        return calculate_progressive_tax_v310(taxable_income, year)
     taxable_income = max(0.0, float(taxable_income))
     tax = 0.0
     brackets = get_federal_brackets(year, filing_status)
@@ -3733,6 +3906,8 @@ def calculate_progressive_tax(taxable_income: float, year: int, filing_status: s
 
 
 def get_marginal_rate_from_taxable_income(taxable_income: float, year: int, filing_status: str = "MFJ") -> float:
+    if str(filing_status or "MFJ") == "MFJ":
+        return get_marginal_rate_from_taxable_income_v310(taxable_income, year)
     taxable_income = max(0.0, float(taxable_income))
     brackets = get_federal_brackets(year, filing_status)
     rate = brackets[0][1]
@@ -3746,13 +3921,12 @@ def get_marginal_rate_from_taxable_income(taxable_income: float, year: int, fili
 
 
 def calculate_taxable_ss(total_ss: float, other_income: float, filing_status: str = "MFJ") -> float:
+    if str(filing_status or "MFJ") == "MFJ":
+        return calculate_taxable_ss_v310(total_ss, other_income)
     total_ss = max(0.0, float(total_ss))
     other_income = max(0.0, float(other_income))
 
-    if str(filing_status or "MFJ") == "MFJ":
-        base1, base2, base_taxable = 32000.0, 44000.0, 6000.0
-    else:
-        base1, base2, base_taxable = 25000.0, 34000.0, 4500.0
+    base1, base2, base_taxable = 25000.0, 34000.0, 4500.0
 
     provisional_income = other_income + 0.5 * total_ss
 
@@ -3767,6 +3941,8 @@ def calculate_taxable_ss(total_ss: float, other_income: float, filing_status: st
 
 
 def calculate_ltcg_tax(ordinary_taxable_income: float, ltcg_taxable_income: float, year: int, filing_status: str = "MFJ") -> float:
+    if str(filing_status or "MFJ") == "MFJ":
+        return calculate_ltcg_tax_v310(ordinary_taxable_income, ltcg_taxable_income, year)
     ordinary_taxable_income = max(0.0, float(ordinary_taxable_income))
     ltcg_taxable_income = max(0.0, float(ltcg_taxable_income))
     if ltcg_taxable_income <= 0.0:
@@ -3795,9 +3971,11 @@ def calculate_ltcg_tax(ordinary_taxable_income: float, ltcg_taxable_income: floa
 
 
 def calculate_federal_tax(other_ordinary_income: float, total_ss: float, year: int, realized_ltcg: float = 0.0, filing_status: str = "MFJ") -> dict:
+    filing_status = str(filing_status or "MFJ")
+    if filing_status == "MFJ":
+        return calculate_federal_tax_v310(other_ordinary_income, total_ss, year, realized_ltcg=realized_ltcg)
     other_ordinary_income = max(0.0, float(other_ordinary_income))
     realized_ltcg = max(0.0, float(realized_ltcg))
-    filing_status = str(filing_status or "MFJ")
     taxable_ss = calculate_taxable_ss(total_ss, other_ordinary_income + realized_ltcg, filing_status=filing_status)
     agi = other_ordinary_income + taxable_ss + realized_ltcg
 
@@ -4160,11 +4338,13 @@ def calculate_aca_cost(magi: float, year: int, aca_lives: int) -> float:
 
 
 def calculate_irmaa_cost(magi: float, year: int, medicare_lives: int, filing_status: str = "MFJ") -> float:
+    filing_status = str(filing_status or "MFJ")
+    if filing_status == "MFJ":
+        return calculate_irmaa_cost_v310(magi, year, medicare_lives)
     magi = max(0.0, float(magi))
     if medicare_lives <= 0:
         return 0.0
 
-    filing_status = str(filing_status or "MFJ")
     table = get_irmaa_table(year)
     threshold_factor = 1.0 if filing_status == "MFJ" else 0.5
     monthly_total_for_household = 0.0
@@ -4805,8 +4985,12 @@ def simulate_one_year(year: int, state: dict, params: dict, annual_conversion: f
     earned_income = get_earned_income_for_year(year, params)
     cash += total_ss + earned_income
 
-    # Coverage status is based on the calendar year, not the funding sequence
-    coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year, params=params)
+    # Preserve the exact legacy MFJ path while both spouses are alive.
+    # Only switch to survivor-aware coverage handling after the first death.
+    if life["owner_alive"] and life["spouse_alive"]:
+        coverage = get_coverage_status_v310(year, primary_aca_end_year, spouse_aca_end_year)
+    else:
+        coverage = get_coverage_status(year, primary_aca_end_year, spouse_aca_end_year, params=params)
     aca_lives = coverage["aca_lives"]
     medicare_lives = coverage["medicare_lives"]
 
@@ -6773,7 +6957,11 @@ def run_annual_conversion_calculator(
     future_rate_info = estimate_future_marginal_rate(calc_year, annual_state, params)
     estimated_future_marginal_rate = float(future_rate_info.get('estimated_future_marginal_rate', 0.0))
 
-    coverage = get_coverage_status(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']), params=params)
+    life = get_life_status_for_year(calc_year, params)
+    if life["owner_alive"] and life["spouse_alive"]:
+        coverage = get_coverage_status_v310(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']))
+    else:
+        coverage = get_coverage_status(calc_year, int(inputs['primary_aca_end_year']), int(inputs['spouse_aca_end_year']), params=params)
     aca_lives = int(coverage['aca_lives'])
     medicare_lives = int(coverage['medicare_lives'])
     filing_status = str(coverage.get('filing_status', 'MFJ'))
@@ -8061,9 +8249,19 @@ def render_top_nav(current_page: str) -> None:
     render_scenario_manager(current_page)
 
 
+
+def render_page_header(title: str) -> None:
+    st.title(title)
+    st.caption(APP_VERSION)
+
+
+def render_irmaa_model_note() -> None:
+    st.caption("Model note: IRMAA is currently applied using same-year MAGI for planning simplicity. The real Medicare surcharge system uses a 2-year lookback.")
+
 def render_home_page() -> None:
     ensure_default_state()
-    st.title("Main Retirement Model")
+    render_page_header("Retirement Model")
+    st.subheader("Choose a tool")
     st.write(
         "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
     )
@@ -8071,6 +8269,7 @@ def render_home_page() -> None:
     st.info(
         "State is kept across pages. Annual current-year inputs stay in session and remain available when you switch tools."
     )
+    render_irmaa_model_note()
 
 
 
@@ -8320,7 +8519,7 @@ def build_live_governor_run_inputs(base_inputs: dict | None = None, force_full_b
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.subheader("Retirement Optimizer")
+    render_page_header("Retirement Optimizer")
     render_top_nav("conversion")
 
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
@@ -8337,6 +8536,7 @@ def render_conversion_page() -> None:
         st.caption(f"Selected strategy context: {selected_strategy}{source_text}{profile_text}.")
     if preset_note:
         st.caption(preset_note)
+    render_irmaa_model_note()
 
     inputs = render_shared_household_inputs()
 
@@ -9108,11 +9308,12 @@ def render_conversion_page() -> None:
 
 def render_annual_page() -> None:
     ensure_default_state()
-    st.title("Annual Conversion Calculator")
+    render_page_header("Annual Conversion Calculator")
     render_top_nav("annual")
     st.write("Use this page for current-year conversion analysis and annual tax checks without running the full lifetime optimizer.")
 
     st.info("This page is focused on the current-year tax picture. Broader planning assumptions are used from your saved/session values unless you choose to edit them below.")
+    render_irmaa_model_note()
 
     summary_col1, summary_col2, summary_col3 = st.columns(3)
     with summary_col1:
