@@ -7931,7 +7931,7 @@ def render_top_nav(current_page: str) -> None:
 
 def render_home_page() -> None:
     ensure_default_state()
-    st.title("Backup Retirement Model")
+    st.title("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
         "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
@@ -8853,13 +8853,14 @@ def render_conversion_page() -> None:
                             funding_fmt[col] = "${:,.0f}"
                     st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
 
-                st.download_button(
-                    "Download Chosen Path (CSV)",
-                    data=result["df"].to_csv(index=False),
-                    file_name="break_even_governor_chosen_path.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+                if path_display_df is not None and not path_display_df.empty:
+                    st.download_button(
+                        "Download Chosen Year-by-Year Path CSV",
+                        data=path_display_df.to_csv(index=False),
+                        file_name="chosen_year_by_year_path.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
 
                 selected_diag_df = build_beg_selected_diagnostics_df(result)
                 effective_beg_settings_df = build_effective_beg_settings_df(live_governor_inputs, max_conversion, step_size)
