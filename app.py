@@ -28,8 +28,13 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v315"
+APP_VERSION = "v316"
 APP_STATE_VERSION = "v107"
+
+
+def render_page_title_with_version(title: str) -> None:
+    st.title(title)
+    st.caption(f"Version {APP_VERSION}")
 
 
 
@@ -7980,7 +7985,7 @@ def render_top_nav(current_page: str) -> None:
 
 def render_home_page() -> None:
     ensure_default_state()
-    st.title("Retirement Model")
+    render_page_title_with_version("Retirement Model")
     st.subheader("Choose a tool")
     st.write(
         "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
@@ -8238,7 +8243,7 @@ def build_live_governor_run_inputs(base_inputs: dict | None = None, force_full_b
 
 def render_conversion_page() -> None:
     ensure_default_state()
-    st.subheader("Retirement Optimizer")
+    render_page_title_with_version("Retirement Optimizer")
     render_top_nav("conversion")
 
     selected_strategy = st.session_state.get("selected_recommendation_strategy")
@@ -9078,7 +9083,7 @@ def render_conversion_page() -> None:
 
 def render_annual_page() -> None:
     ensure_default_state()
-    st.title("Annual Conversion Calculator")
+    render_page_title_with_version("Annual Conversion Calculator")
     render_top_nav("annual")
     st.write("Use this page for current-year conversion analysis and annual tax checks without running the full lifetime optimizer.")
 
