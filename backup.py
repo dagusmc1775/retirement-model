@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v310"
+APP_VERSION = "v314"
 APP_STATE_VERSION = "v107"
 
 
@@ -8828,6 +8828,14 @@ def render_conversion_page() -> None:
                         else:
                             fmt[col] = "${:,.0f}"
                     st.dataframe(path_display_df.style.format(fmt), use_container_width=True)
+                    st.download_button(
+                        "Download Chosen Year-by-Year Path CSV",
+                        data=path_display_df.to_csv(index=False),
+                        file_name="break_even_governor_chosen_year_by_year_path.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key="download_beg_chosen_path_csv_button",
+                    )
 
                 funding_debug_df = build_funding_debug_view_df(result["df"])
                 if funding_debug_df is not None and not funding_debug_df.empty:
@@ -8852,15 +8860,22 @@ def render_conversion_page() -> None:
                         if pd.api.types.is_numeric_dtype(series):
                             funding_fmt[col] = "${:,.0f}"
                     st.dataframe(funding_debug_df.style.format(funding_fmt), use_container_width=True)
-
-                if path_display_df is not None and not path_display_df.empty:
                     st.download_button(
-                        "Download Chosen Year-by-Year Path CSV",
-                        data=path_display_df.to_csv(index=False),
-                        file_name="chosen_year_by_year_path.csv",
+                        "Download Funding Trace + Income View CSV",
+                        data=funding_debug_df.to_csv(index=False),
+                        file_name="break_even_governor_funding_trace_income_view.csv",
                         mime="text/csv",
                         use_container_width=True,
+                        key="download_beg_funding_trace_csv_button",
                     )
+
+                st.download_button(
+                    "Download Chosen Path (CSV)",
+                    data=result["df"].to_csv(index=False),
+                    file_name="break_even_governor_chosen_path.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
                 selected_diag_df = build_beg_selected_diagnostics_df(result)
                 effective_beg_settings_df = build_effective_beg_settings_df(live_governor_inputs, max_conversion, step_size)
@@ -8878,6 +8893,14 @@ def render_conversion_page() -> None:
                             money_mask = display_settings_df["Setting"].isin(["Max annual conversion", "Step size", "Target Traditional IRA"])
                             display_settings_df.loc[money_mask, "Value"] = display_settings_df.loc[money_mask, "Value"].map(lambda v: f"${float(v):,.0f}")
                             st.dataframe(display_settings_df, hide_index=True, use_container_width=True)
+                            st.download_button(
+                                "Download Resolved Governor Settings CSV",
+                                data=display_settings_df.to_csv(index=False),
+                                file_name="break_even_governor_resolved_settings.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key="download_beg_resolved_settings_csv_button",
+                            )
                         if selected_diag_df is not None and not selected_diag_df.empty:
                             diag_fmt = {}
                             bool_cols = {
@@ -8899,6 +8922,14 @@ def render_conversion_page() -> None:
                             if "Year" in diag_fmt:
                                 diag_fmt["Year"] = "{:.0f}"
                             st.dataframe(selected_diag_df.style.format(diag_fmt), use_container_width=True)
+                            st.download_button(
+                                "Download Chosen-path BEG Diagnostics CSV",
+                                data=selected_diag_df.to_csv(index=False),
+                                file_name="break_even_governor_chosen_path_beg_diagnostics.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                                key="download_beg_selected_diag_csv_button",
+                            )
 
                 focused_decision_df = build_beg_decision_focus_df(result.get("decision_df"))
                 st.subheader("Year-by-Year Decision Diagnostics")
@@ -8916,13 +8947,22 @@ def render_conversion_page() -> None:
                         if "Year" in focus_fmt:
                             focus_fmt["Year"] = "{:.0f}"
                         st.dataframe(focused_decision_df.style.format(focus_fmt), use_container_width=True)
+                        st.download_button(
+                            "Download Focused Candidate Diagnostics CSV",
+                            data=focused_decision_df.to_csv(index=False),
+                            file_name="break_even_governor_focused_candidate_diagnostics.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                            key="download_beg_focused_decision_csv_button",
+                        )
                 st.dataframe(result["decision_df"], use_container_width=True)
                 st.download_button(
-                    "Download Decision Diagnostics (CSV)",
+                    "Download Full Decision Diagnostics CSV",
                     data=result["decision_df"].to_csv(index=False),
-                    file_name="break_even_governor_decisions.csv",
+                    file_name="break_even_governor_full_decision_diagnostics.csv",
                     mime="text/csv",
                     use_container_width=True,
+                    key="download_beg_full_decision_csv_button",
                 )
 
 
