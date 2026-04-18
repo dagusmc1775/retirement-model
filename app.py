@@ -8064,7 +8064,6 @@ def render_top_nav(current_page: str) -> None:
 def render_home_page() -> None:
     ensure_default_state()
     st.title("Main Retirement Model")
-    st.subheader("Choose a tool")
     st.write(
         "Use the Annual Conversion Calculator for a clean current-year tax cockpit, or open the Retirement Optimizer for lifetime conversion planning and Social Security optimization."
     )
