@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v323"
+APP_VERSION = "v324"
 APP_STATE_VERSION = "v107"
 
 
@@ -4279,7 +4279,35 @@ def calculate_survivor_future_rate_adjustment(current_year: int, params: dict) -
         # to dominate the underlying future-rate economics.
         irmaa_premium = 0.035 * (proximity ** 2.0) * medicare_weight
 
-    premium = base_premium + irmaa_premium
+    # Modest RMD-aware premium: if the survivor years are likely to overlap the RMD era
+    # while a meaningful Traditional IRA balance still exists, add a small extra nudge.
+    rmd_premium = 0.0
+    try:
+        current_trad = float(params.get("trad", 0.0) or 0.0)
+    except Exception:
+        current_trad = 0.0
+    if current_trad > 0 and surviving_phase:
+        transition_life = get_household_life_status(transition_year, params)
+        surviving_age = 0
+        if surviving_phase == "Owner Dead (Spouse Survivor)":
+            surviving_age = int(transition_life.get("spouse_age", 0) or 0)
+        elif surviving_phase == "Spouse Dead (Owner Survivor)":
+            surviving_age = int(transition_life.get("owner_age", 0) or 0)
+        years_to_rmd = max(0, 73 - surviving_age)
+        rmd_start_year = transition_year + years_to_rmd
+        survivor_rmd_years = max(0, END_YEAR - max(transition_year, rmd_start_year) + 1)
+        survivor_rmd_weight = max(0.0, min(1.0, float(survivor_rmd_years) / 12.0))
+        starting_assets = max(
+            1.0,
+            float(params.get("trad", 0.0) or 0.0)
+            + float(params.get("roth", 0.0) or 0.0)
+            + float(params.get("brokerage", 0.0) or 0.0)
+            + float(params.get("cash", 0.0) or 0.0),
+        )
+        trad_share_weight = max(0.0, min(1.0, current_trad / starting_assets))
+        rmd_premium = 0.045 * (proximity ** 2.1) * survivor_rmd_weight * (0.50 + 0.50 * trad_share_weight)
+
+    premium = base_premium + irmaa_premium + rmd_premium
     return float(max(0.0, premium))
 
 
