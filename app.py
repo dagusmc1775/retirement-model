@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v322"
+APP_VERSION = "v323"
 APP_STATE_VERSION = "v107"
 
 
@@ -4235,25 +4235,51 @@ def calculate_survivor_future_rate_adjustment(current_year: int, params: dict) -
     Add a modest pre-death survivor tax-pressure premium to the future avoided-rate
     signal when the household is still MFJ but a future survivor/Single regime is near.
     This only affects optimizer decision logic, not projection math.
+
+    v323 extends the v322 proximity premium with a small IRMAA-aware component when the
+    expected survivor years overlap Medicare ages. This remains intentionally modest and
+    only nudges optimization pressure rather than rewriting BETR/BEG math.
     """
     summary = get_survivor_transition_summary(current_year, params)
     years_until = summary.get("Years Until Survivor Transition")
+    transition_year = summary.get("Survivor Transition Year")
     future_status = str(summary.get("Future Survivor Filing Status", "") or "")
     future_years = int(summary.get("Future Survivor Years In Horizon", 0) or 0)
-    if future_status != "Single" or years_until is None:
+    if future_status != "Single" or years_until is None or transition_year is None:
         return 0.0
     try:
         years_until = int(years_until)
+        transition_year = int(transition_year)
     except Exception:
         return 0.0
     if years_until <= 0:
         return 0.0
-    # Slightly stronger and more convex premium near the survivor transition year,
-    # while remaining modest at longer horizons.
+
+    # Base survivor pressure: convex near-transition curve.
     proximity = max(0.0, min(1.0, (15.0 - float(years_until)) / 15.0))
     proximity_curve = proximity ** 1.6
     horizon_weight = max(0.0, min(1.0, float(future_years) / 15.0))
-    premium = 0.10 * proximity_curve * (0.55 + 0.45 * horizon_weight)
+    base_premium = 0.10 * proximity_curve * (0.55 + 0.45 * horizon_weight)
+
+    # Small IRMAA-aware premium: only when the survivor years overlap Medicare ages.
+    # Because the model currently applies same-year IRMAA, this is a planning nudge,
+    # not a full Medicare-lookback implementation.
+    irmaa_premium = 0.0
+    surviving_phase = str(summary.get("Future Survivor Phase", "") or "")
+    if surviving_phase:
+        transition_life = get_household_life_status(transition_year, params)
+        surviving_age = 0
+        if surviving_phase == "Owner Dead (Spouse Survivor)":
+            surviving_age = int(transition_life.get("spouse_age", 0) or 0)
+        elif surviving_phase == "Spouse Dead (Owner Survivor)":
+            surviving_age = int(transition_life.get("owner_age", 0) or 0)
+        medicare_survivor_years = max(0, END_YEAR - max(transition_year, START_YEAR + max(0, 65 - surviving_age)) + 1)
+        medicare_weight = max(0.0, min(1.0, float(medicare_survivor_years) / 12.0))
+        # Keep this modest: enough to matter near survivor+Medicare overlap, but not enough
+        # to dominate the underlying future-rate economics.
+        irmaa_premium = 0.035 * (proximity ** 2.0) * medicare_weight
+
+    premium = base_premium + irmaa_premium
     return float(max(0.0, premium))
 
 
