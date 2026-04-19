@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v319"
+APP_VERSION = "v320"
 APP_STATE_VERSION = "v107"
 
 
@@ -439,6 +439,11 @@ def build_beg_selected_diagnostics_df(result: dict) -> pd.DataFrame:
 
     preferred_cols = [
         "Year",
+        "Survivor Transition Year",
+        "Years Until Survivor Transition",
+        "Future Survivor Phase",
+        "Future Survivor Filing Status",
+        "Future Survivor Years In Horizon",
         "Chosen Conversion",
         "Target Lane Active",
         "Selection Mode Detail",
@@ -493,6 +498,11 @@ def build_beg_decision_focus_df(decision_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     preferred_cols = [
         "Year",
+        "Survivor Transition Year",
+        "Years Until Survivor Transition",
+        "Future Survivor Phase",
+        "Future Survivor Filing Status",
+        "Future Survivor Years In Horizon",
         "Decision Mode",
         "Test Conversion",
         "Selected Conversion After Test",
@@ -4191,6 +4201,34 @@ def get_household_life_status(year: int, params: dict) -> dict:
     }
 
 
+
+
+def get_survivor_transition_summary(current_year: int, params: dict) -> dict:
+    first_survivor_year = None
+    survivor_phase = ""
+    for test_year in range(int(current_year), END_YEAR + 1):
+        life = get_household_life_status(test_year, params)
+        if life["household_phase"] != "Both Alive":
+            first_survivor_year = int(test_year)
+            survivor_phase = str(life["household_phase"])
+            break
+    if first_survivor_year is None:
+        return {
+            "Survivor Transition Year": None,
+            "Years Until Survivor Transition": None,
+            "Future Survivor Phase": "",
+            "Future Survivor Filing Status": "",
+            "Future Survivor Years In Horizon": 0,
+        }
+    survivor_years = max(0, END_YEAR - first_survivor_year + 1)
+    return {
+        "Survivor Transition Year": int(first_survivor_year),
+        "Years Until Survivor Transition": int(first_survivor_year - int(current_year)),
+        "Future Survivor Phase": survivor_phase,
+        "Future Survivor Filing Status": "Single",
+        "Future Survivor Years In Horizon": int(survivor_years),
+    }
+
 def build_survivor_phase_preview_df(params: dict) -> pd.DataFrame:
     rows = []
     for year in range(START_YEAR, END_YEAR + 1):
@@ -5634,8 +5672,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 )
                 net_benefit_rate = future_effective - info["current_effective"]
 
+            survivor_summary = get_survivor_transition_summary(year, params)
             tested_rows.append({
                 "Year": year,
+                **survivor_summary,
                 "Decision Mode": "ACA Headroom",
                 "Step Index": int(step_index),
                 "Base Conversion": float(prev_info["conversion"]) if prev_info is not None else 0.0,
