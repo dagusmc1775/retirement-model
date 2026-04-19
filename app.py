@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v321"
+APP_VERSION = "v322"
 APP_STATE_VERSION = "v107"
 
 
@@ -4248,10 +4248,12 @@ def calculate_survivor_future_rate_adjustment(current_year: int, params: dict) -
         return 0.0
     if years_until <= 0:
         return 0.0
-    # Stronger premium when the survivor regime is closer and persists longer.
-    proximity = max(0.0, min(1.0, (12.0 - float(years_until)) / 12.0))
+    # Slightly stronger and more convex premium near the survivor transition year,
+    # while remaining modest at longer horizons.
+    proximity = max(0.0, min(1.0, (15.0 - float(years_until)) / 15.0))
+    proximity_curve = proximity ** 1.6
     horizon_weight = max(0.0, min(1.0, float(future_years) / 15.0))
-    premium = 0.08 * proximity * (0.5 + 0.5 * horizon_weight)
+    premium = 0.10 * proximity_curve * (0.55 + 0.45 * horizon_weight)
     return float(max(0.0, premium))
 
 
