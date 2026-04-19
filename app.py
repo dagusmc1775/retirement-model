@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v320"
+APP_VERSION = "v321"
 APP_STATE_VERSION = "v107"
 
 
@@ -4229,6 +4229,32 @@ def get_survivor_transition_summary(current_year: int, params: dict) -> dict:
         "Future Survivor Years In Horizon": int(survivor_years),
     }
 
+
+def calculate_survivor_future_rate_adjustment(current_year: int, params: dict) -> float:
+    """
+    Add a modest pre-death survivor tax-pressure premium to the future avoided-rate
+    signal when the household is still MFJ but a future survivor/Single regime is near.
+    This only affects optimizer decision logic, not projection math.
+    """
+    summary = get_survivor_transition_summary(current_year, params)
+    years_until = summary.get("Years Until Survivor Transition")
+    future_status = str(summary.get("Future Survivor Filing Status", "") or "")
+    future_years = int(summary.get("Future Survivor Years In Horizon", 0) or 0)
+    if future_status != "Single" or years_until is None:
+        return 0.0
+    try:
+        years_until = int(years_until)
+    except Exception:
+        return 0.0
+    if years_until <= 0:
+        return 0.0
+    # Stronger premium when the survivor regime is closer and persists longer.
+    proximity = max(0.0, min(1.0, (12.0 - float(years_until)) / 12.0))
+    horizon_weight = max(0.0, min(1.0, float(future_years) / 15.0))
+    premium = 0.08 * proximity * (0.5 + 0.5 * horizon_weight)
+    return float(max(0.0, premium))
+
+
 def build_survivor_phase_preview_df(params: dict) -> pd.DataFrame:
     rows = []
     for year in range(START_YEAR, END_YEAR + 1):
@@ -5673,6 +5699,8 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 net_benefit_rate = future_effective - info["current_effective"]
 
             survivor_summary = get_survivor_transition_summary(year, params)
+            survivor_rate_adjustment = calculate_survivor_future_rate_adjustment(year, params)
+            survivor_aware_future_rate = float(future_effective + survivor_rate_adjustment)
             tested_rows.append({
                 "Year": year,
                 **survivor_summary,
@@ -5689,8 +5717,10 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
                 "MAGI Remaining To Limit": float(aca_limit - float(row["MAGI"])),
                 "Within ACA Limit": bool(info["within_limit"] and not info["roth_tax_used"]),
                 "Current Marginal Incremental Cost Rate": float(info["current_effective"]),
-                "Projected Future Avoided Rate": float(future_effective),
-                "Net Benefit Rate": float(net_benefit_rate),
+                "Projected Future Avoided Rate": float(survivor_aware_future_rate),
+                "Survivor Future Rate Adjustment": float(survivor_rate_adjustment),
+                "Survivor-Aware Future Rate": float(survivor_aware_future_rate),
+                "Net Benefit Rate": float(survivor_aware_future_rate - adjusted_current_effective_rate(info["current_effective"], info["tax_source_penalty"])),
                 "Tax Funding Source": " + ".join(info["tax_sources"]) if info["tax_sources"] else "none",
                 "Tax Funding Penalty": float(info["tax_source_penalty"]),
                 "Current Marginal Tax Rate": float(row.get("Current Marginal Tax Rate", 0.0)),
@@ -5738,7 +5768,9 @@ def find_optimal_conversion_for_year(year: int, state: dict, params: dict, max_c
     baseline_ordinary_taxable = float(baseline_row.get("Ordinary Taxable Income", 0.0))
     target_headroom = max(0.0, float(target_top) - baseline_ordinary_taxable)
     future_rate_info = estimate_future_marginal_rate(year, state, params, projection_cache=projection_cache)
-    future_rate = float(future_rate_info["estimated_future_marginal_rate"])
+    future_rate_base = float(future_rate_info["estimated_future_marginal_rate"])
+    survivor_rate_adjustment = calculate_survivor_future_rate_adjustment(year, params)
+    future_rate = float(future_rate_base + survivor_rate_adjustment)
 
     bracket_runway = min(cap, floor_to_step(target_headroom, step_size))
     override_enabled = bool(params.get("target_trad_override_enabled", False))
@@ -6091,7 +6123,11 @@ def run_model_break_even_governor(inputs: dict, max_conversion: float, step_size
             "brokerage_basis": chosen_row["SOY Brokerage Basis"],
             "cash": chosen_row["SOY Cash"],
         }), params, projection_cache=projection_cache)
-        chosen_row["Estimated Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"])
+        survivor_rate_adjustment = calculate_survivor_future_rate_adjustment(year, params)
+        chosen_row["Estimated Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"] + survivor_rate_adjustment)
+        chosen_row["Base Future Marginal Rate"] = float(future_rate_info["estimated_future_marginal_rate"])
+        chosen_row["Survivor Future Rate Adjustment"] = float(survivor_rate_adjustment)
+        chosen_row["Survivor-Aware Future Rate"] = float(chosen_row["Estimated Future Marginal Rate"])
         tax_sources, tax_source_penalty = determine_tax_source_mix_from_row(chosen_row)
         chosen_row["Tax Funding Source"] = " + ".join(tax_sources) if tax_sources else "none"
         chosen_row["Tax Funding Penalty"] = float(tax_source_penalty)
