@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v317"
+APP_VERSION = "v318"
 APP_STATE_VERSION = "v107"
 
 
@@ -376,6 +376,11 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
         "Year",
         "Household Phase",
         "Tax Filing Status",
+        "Owner Alive",
+        "Spouse Alive",
+        "Owner SS",
+        "Spouse SS",
+        "Total SS",
         "Chosen Conversion Display",
         "Binding Constraint",
         "Target Bracket",
@@ -411,6 +416,11 @@ def build_chosen_path_display_df(df: pd.DataFrame) -> pd.DataFrame:
         "SOY Brokerage": "Starting Brokerage",
         "EOY Brokerage": "Ending Brokerage",
         "EOY Brokerage Basis": "Ending Brokerage Basis",
+        "Owner Alive": "Owner Alive",
+        "Spouse Alive": "Spouse Alive",
+        "Owner SS": "Owner SS",
+        "Spouse SS": "Spouse SS",
+        "Total SS": "Total SS",
     }
     out = out.rename(columns=rename_map)
     return out
