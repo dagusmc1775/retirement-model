@@ -28,7 +28,7 @@ ACA_CLIFF_MFJ = 84601.0
 ACA_HEADROOM_BUFFER = 1.0
 
 GOVERNOR_MIN_STEP_SIZE = 1000.0
-APP_VERSION = "v324"
+APP_VERSION = "v325"
 APP_STATE_VERSION = "v107"
 
 
@@ -1077,6 +1077,10 @@ def build_ss_optimizer_result_row(
         "Total Government Drag": float(run_result.get("total_government_drag", 0.0)),
         "Total Conversions": float(run_result["total_conversions"]),
         "Ending Traditional IRA Balance": float(run_result["ending_trad_balance"]),
+        "Survivor Transition Year": metrics.get("survivor_transition_year"),
+        "Survivor Phase": metrics.get("survivor_phase", ""),
+        "Survivor Filing Status": metrics.get("survivor_filing_status", ""),
+        "Survivor Years In Horizon": int(metrics.get("survivor_years_in_horizon", 0)),
         "First IRMAA Year": run_result["first_irmaa_year"],
         "Max MAGI": float(run_result["max_magi"]),
         "ACA Hit Years": int(run_result["aca_hit_years"]),
@@ -1189,6 +1193,10 @@ def build_quick_recommendation_fact_rows(base_inputs: dict, quick_max_conversion
             "Total State Tax": float(row.get("Total State Tax", 0.0)),
             "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
             "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "Survivor Transition Year": row.get("Survivor Transition Year"),
+            "Survivor Phase": row.get("Survivor Phase", ""),
+            "Survivor Filing Status": row.get("Survivor Filing Status", ""),
+            "Survivor Years In Horizon": int(row.get("Survivor Years In Horizon", 0) or 0),
             "First IRMAA Year": row.get("First IRMAA Year"),
             "Max MAGI": float(row.get("Max MAGI", 0.0)),
             "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
@@ -1215,6 +1223,18 @@ def build_strategy_metrics(run_result: dict) -> dict:
     heir_tax_drag = ending_trad * HEIR_EFFECTIVE_TRAD_TAX_RATE
     stability_value = final_household_ss + 0.5 * survivor_ss
     social_security_present_value = estimate_social_security_present_value(final_household_ss, survivor_ss)
+
+    survivor_transition_year = None
+    survivor_phase = ""
+    survivor_filing_status = ""
+    survivor_years_in_horizon = 0
+    if "Household Phase" in df.columns:
+        survivor_rows = df[df["Household Phase"] != "Both Alive"]
+        if not survivor_rows.empty:
+            survivor_transition_year = int(survivor_rows.iloc[0].get("Year", START_YEAR))
+            survivor_phase = str(survivor_rows.iloc[0].get("Household Phase", "") or "")
+            survivor_filing_status = str(survivor_rows.iloc[0].get("Tax Filing Status", "") or "")
+            survivor_years_in_horizon = int((df["Year"] >= survivor_transition_year).sum()) if "Year" in df.columns else 0
 
     household_rmd_start = int(run_result.get("household_rmd_start", df["Year"].max() if "Year" in df.columns else START_YEAR))
     pre_rmd_year = household_rmd_start - 1
@@ -1254,6 +1274,10 @@ def build_strategy_metrics(run_result: dict) -> dict:
         "final_household_ss_income": float(final_household_ss),
         "survivor_ss_income": float(survivor_ss),
         "social_security_present_value": float(social_security_present_value),
+        "survivor_transition_year": survivor_transition_year,
+        "survivor_phase": survivor_phase,
+        "survivor_filing_status": survivor_filing_status,
+        "survivor_years_in_horizon": int(survivor_years_in_horizon),
     }
 
 
@@ -1377,6 +1401,10 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
             "Total State Tax": float(row.get("Total State Tax", 0.0)),
             "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
             "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "Survivor Transition Year": row.get("Survivor Transition Year"),
+            "Survivor Phase": row.get("Survivor Phase", ""),
+            "Survivor Filing Status": row.get("Survivor Filing Status", ""),
+            "Survivor Years In Horizon": int(row.get("Survivor Years In Horizon", 0) or 0),
             "First IRMAA Year": row.get("First IRMAA Year"),
             "Max MAGI": float(row.get("Max MAGI", 0.0)),
             "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
@@ -1411,6 +1439,10 @@ def build_profile_shortlists_from_optimizer_rows(results_rows: list[dict], top_n
                 "Survivor SS Income": float(ranked_row["survivor_ss_income"]),
                 "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
                 "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+                "Survivor Transition Year": ranked_row.get("Survivor Transition Year"),
+                "Survivor Phase": ranked_row.get("Survivor Phase", ""),
+                "Survivor Filing Status": ranked_row.get("Survivor Filing Status", ""),
+                "Survivor Years In Horizon": int(ranked_row.get("Survivor Years In Horizon", 0) or 0),
                 "First IRMAA Year": ranked_row.get("First IRMAA Year"),
                 "NW Score +": float(ranked_row.get("nw_component", 0.0) * 100.0),
                 "Legacy Score +": float(ranked_row.get("legacy_component", 0.0) * 100.0),
@@ -1457,6 +1489,10 @@ def reorder_ss_optimizer_results_df(df: pd.DataFrame) -> pd.DataFrame:
         "Total IRMAA Cost",
         "Total Government Drag",
         "Total Conversions",
+        "Survivor Transition Year",
+        "Survivor Phase",
+        "Survivor Filing Status",
+        "Survivor Years In Horizon",
         "First IRMAA Year",
         "Max MAGI",
         "ACA Hit Years",
@@ -1516,6 +1552,10 @@ def build_ranked_optimizer_results_df(
             "Total IRMAA Cost": float(ranked_row.get("Total IRMAA Cost", 0.0)),
             "Total Government Drag": float(ranked_row.get("Total Government Drag", 0.0)),
             "Total Conversions": float(ranked_row.get("Total Conversions", 0.0)),
+            "Survivor Transition Year": ranked_row.get("Survivor Transition Year"),
+            "Survivor Phase": ranked_row.get("Survivor Phase", ""),
+            "Survivor Filing Status": ranked_row.get("Survivor Filing Status", ""),
+            "Survivor Years In Horizon": int(ranked_row.get("Survivor Years In Horizon", 0) or 0),
             "First IRMAA Year": ranked_row.get("First IRMAA Year"),
             "Max MAGI": float(ranked_row.get("Max MAGI", 0.0)),
             "ACA Hit Years": int(ranked_row.get("ACA Hit Years", 0)),
@@ -1641,6 +1681,10 @@ def build_profile_winner_metric_df(row: pd.Series | dict) -> pd.DataFrame:
         "Survivor SS Income",
         "Total Government Drag",
         "Total Conversions",
+        "Survivor Transition Year",
+        "Survivor Phase",
+        "Survivor Filing Status",
+        "Survivor Years In Horizon",
         "First IRMAA Year",
         "Max MAGI",
         "ACA Hit Years",
@@ -2120,6 +2164,10 @@ def build_strategy_scoring_payload(
             "Total State Tax": float(row.get("Total State Tax", 0.0)),
             "Total ACA Cost": float(row.get("Total ACA Cost", 0.0)),
             "Total IRMAA Cost": float(row.get("Total IRMAA Cost", 0.0)),
+            "Survivor Transition Year": row.get("Survivor Transition Year"),
+            "Survivor Phase": row.get("Survivor Phase", ""),
+            "Survivor Filing Status": row.get("Survivor Filing Status", ""),
+            "Survivor Years In Horizon": int(row.get("Survivor Years In Horizon", 0) or 0),
             "First IRMAA Year": row.get("First IRMAA Year"),
             "Max MAGI": float(row.get("Max MAGI", 0.0)),
             "ACA Hit Years": int(row.get("ACA Hit Years", 0)),
